@@ -1,9 +1,11 @@
 import numpy as np
 from Bio.PDB import PDBParser
+import gzip
 
 def get_pairwise_distances(pdb_file):
     parser = PDBParser(QUIET=True)
-    structure = parser.get_structure("protein", pdb_file)
+    with gzip.open(pdb_file, 'rt') as handle:
+        structure = parser.get_structure("protein", handle)
 
     ca_atoms = []
     for model in structure:

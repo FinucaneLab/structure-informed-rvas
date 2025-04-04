@@ -39,8 +39,8 @@ def get_random_ac_per_residue(case_ac_per_residue, total_ac_per_residue, n_sim):
     return null_ac_per_residue
 
 def get_case_control_ac_matrix(df, n_res, n_sim):
-    case_ac_per_residue = get_ac_per_residue(df, 'AC Case', n_res)
-    control_ac_per_residue = get_ac_per_residue(df, 'AC Control', n_res)
+    case_ac_per_residue = get_ac_per_residue(df, 'ac_case', n_res)
+    control_ac_per_residue = get_ac_per_residue(df, 'ac_control', n_res)
     total_ac_per_residue = (case_ac_per_residue + control_ac_per_residue).flatten()
     null_case_ac_per_residue = get_random_ac_per_residue(case_ac_per_residue, total_ac_per_residue, n_sim)
     null_control_ac_per_residue = total_ac_per_residue[:, np.newaxis] - null_case_ac_per_residue
