@@ -10,17 +10,21 @@ def annotation_test(
     import os
     import gzip
     from utils import valid_for_fisher, get_pairwise_distances
-    
+    from scipy import stats
+
+    def flatten(xss):
+        return [x for xs in xss for x in xs]
+        
     def loop_protein(uniprotID):
 
         ## Expand residues
         annot_residues_inprotein = annotation_file.loc[annotation_file.uniprot_id == uniprotID, 'aa_pos'] #residues with reference to protein
-        annot_residues_file = df_rvas.loc[(df_rvas.uniprot_id == uniprotID) && df_rvas.aa_pos.isin(annot_residues_inprotein), 
-                                        ['aa_pos','pdb_file','file_index'].set_index(file_index) # df mapping between protein-file residue pos 
-        annot_residues_infile = annot_residues_file.file_index #residues with reference to pdb file 
+        annot_residues_file = DFANNOT.loc[(DFANNOT.uniprot_id == uniprotID) & DFANNOT.aa_pos.isin(annot_residues_inprotein), 
+                                        ['aa_pos','pdb_filename','aa_pos_file']].set_index('aa_pos_file', drop=False) # df mapping between protein-file residue pos 
+        annot_residues_infile = annot_residues_file.aa_pos_file #residues with reference to pdb file 
                              
         expanded_annot_residues = list()
-        for ipdb in annot_residues_file.pdb_file.unique():
+        for ipdb in annot_residues_file.pdb_filename.unique():
             pdb_file = f'{reference_directory}/{ipdb}'
             if not os.path.exists(pdb_file):
                 return None
@@ -37,12 +41,14 @@ def annotation_test(
                             ca_atoms.append(residue['CA'].get_coord())
             ca_atoms = np.array(ca_atoms)
             residue_cas = ca_atoms[annot_residues_infile-1,:]
-            center = np.mean(residue_cas, axis=0)
-            distance_from_center = np.sqrt(np.sum((ca_atoms - center) ** 2, axis=-1))
-            expanded_residues_file = np.where(distance_from_center<=neighborhood_radius)[0]+1
-            expanded_residues_protein = annot_residues_file.loc(expanded_residues_file,'aa_pos')
+            distance_from_center = np.sqrt(np.sum((ca_atoms[:, np.newaxis] - residue_cas) ** 2, axis=-1))
+            expanded_residues_file = list(set(np.where(distance_from_center<=neighborhood_radius)[0]+1))
+            #expanded_residues_protein = annot_residues_file.loc(expanded_residues_file,'aa_pos')
+            expanded_residues_protein = expanded_residues_file
             expanded_annot_residues.append(expanded_residues_protein)
 
+        expanded_annot_residues = flatten(expanded_annot_residues)
+        
         ## Filter rvas data frame
         df_rvas_curr = df_rvas[df_rvas.uniprot_id == uniprotID].copy()
         df_rvas_curr['hasAnnot'] = 0
@@ -50,27 +56,28 @@ def annotation_test(
         df_rvas_curr = df_rvas_curr.merge(filter_file, on=['uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt'], how='inner')
 
         ### Perform Fischer's exact test
-        inAnnotCas = df_rvas_curr.loc[df_rvas_curr.hasAnnot, 'ac_cas'].sum()
-        inAnnotCon = df_rvas_curr.loc[df_rvas_curr.hasAnnot, 'ac_con'].sum()
-        outAnnotCas = df_rvas_curr.loc[~df_rvas_curr.hasAnnot, 'ac_cas'].sum()
-        outAnnotCon = df_rvas_curr.loc[~df_rvas_curr.hasAnnot, 'ac_con'].sum()
-
-        contigency_table = [ [inAnnotCas, outAnnotCas], [inAnnotCon, outAnnotCon] ]
-        if ~valid_for_fisher(contigency_table):
+        inAnnotCas = df_rvas_curr.loc[df_rvas_curr.hasAnnot.astype(bool), 'ac_case'].sum()
+        inAnnotCon = df_rvas_curr.loc[df_rvas_curr.hasAnnot.astype(bool), 'ac_control'].sum()
+        outAnnotCas = df_rvas_curr.loc[~df_rvas_curr.hasAnnot.astype(bool), 'ac_case'].sum()
+        outAnnotCon = df_rvas_curr.loc[~df_rvas_curr.hasAnnot.astype(bool), 'ac_control'].sum()
+        
+        contingency_table = np.array([ [inAnnotCas, outAnnotCas], [inAnnotCon, outAnnotCon] ])
+        if valid_for_fisher(contingency_table):
+            o, p = stats.fisher_exact(contingency_table)
+        else:
             o = np.nan
             p = np.nan
-        else:
-            o, p = stats.fisher_exact(contigency_table)
             
-        return (uniprotID, contigency_table, o, p)
+        return (uniprotID, contingency_table, o, p)
     
-        res = list(map(loop_protein, df_rvas.uniprot_id.unique()))
-        # this list will contain an entry per protein, which will be a tuple constisting of:
-        # - the uniprot_id
-        # - the contingency table
-        # - the odds ratio
-        # - the pvalue of the Fischer's exact test
+    res = list(map(loop_protein, df_rvas.uniprot_id.unique()))
+    # this list will contain an entry per protein, which will be a tuple constisting of:
+    # - the uniprot_id
+    # - the contingency table
+    # - the odds ratio
+    # - the pvalue of the Fischer's exact test
 
+    return res
     
     '''
     perform annotation test. annotation file and filter file have columns uniprot_id,
