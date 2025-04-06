@@ -99,16 +99,16 @@ if __name__ == '__main__':
         df_rvas = map_to_protein(args.rvas_data_to_map, args.which_proteins, args.genome_build)
     elif args.rvas_data_mapped is not None:
         df_rvas = pd.read_csv(args.rvas_data_mapped, sep='\t')
-        df_rvas = df_rvas.rename(columns = {
-            args.ac_case_col: 'ac_case',
-            args.ac_control_col: 'ac_control',
-            'Uniprot_ID': 'uniprot_id',
-        })
         if args.pdb_filename is not None:
             df_rvas['pdb_filename'] = args.pdb_filename
     else:
         raise Exception('either --rvas-data-to-map or --rvas-data-mapped must be defined')
-        
+    
+    df_rvas = df_rvas.rename(columns = {
+        args.ac_case_col: 'ac_case',
+        args.ac_control_col: 'ac_control',
+        'Uniprot_ID': 'uniprot_id',
+    })    
 
     if args.scan_test:
         scan_test(df_rvas, args.reference_dir, args.neighborhood_radius, args.results_dir)
