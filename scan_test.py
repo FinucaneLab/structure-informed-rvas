@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 import numpy as np
 from scipy.stats import chi2_contingency, fisher_exact, binom
@@ -54,19 +55,14 @@ def get_all_pvals(
         n_sim = 1000,
         radius = 15,
 ):
-    print('getting adjacency_matrix')
     adjacency_matrix = get_adjacency_matrix(pdb_file, radius)
     n_res = adjacency_matrix.shape[0]
-    print('getting allele counts and permuting')
     case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(df, n_res, n_sim)
     n_case = case_ac_matrix[:,0].sum()
     n_control = control_ac_matrix[:,0].sum()
-    print('aggregating counts in neighborhoods')
     n_case_nbhd_mat = get_nbhd_counts(adjacency_matrix, case_ac_matrix)
     n_control_nbhd_mat = get_nbhd_counts(adjacency_matrix, control_ac_matrix)
-    print('precomputing pvals')
     pval_lookup = get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_control)
-    print('computing pvals')
     pval_matrix = pval_lookup[n_case_nbhd_mat, n_control_nbhd_mat]
     pval_columns = ['p_value'] + [f'null_pval_{i}' for i in range(n_sim)]
     df_pvals = pd.DataFrame(columns = pval_columns, data = pval_matrix)
@@ -82,13 +78,13 @@ def compute_fdr(df_pvals):
     df_pvals['fdr'] = [x / (i+1) for i, x in enumerate(false_discoveries_avg)]
     df_pvals['fdr'] = df_pvals['fdr'][::-1].cummin()[::-1]
     df_results = df_pvals[['aa_pos', 'p_value', 'fdr']]
-    print(df_results[0:20])
     return df_results
 
 def scan_test_one_protein(df, pdb_file, results_df_path, radius, n_sims):
     df_pvals = get_all_pvals(df, pdb_file, n_sims, radius)
     df_results = compute_fdr(df_pvals)
     df_results.to_csv(results_df_path, sep='\t', index=False)
+    return df_results
 
 def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims=1000):
     '''
@@ -96,13 +92,27 @@ def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims=1000):
     should perform the scan test for all proteins and return a data frame with all the results.
     '''
     uniprot_id_list = np.unique(df_rvas.uniprot_id)
-    for uniprot_id in uniprot_id_list:
-        df = df_rvas[df_rvas.uniprot_id == uniprot_id]
-        if len(np.unique(df.pdb_filename)) > 1:
-            print('skipping when there is more than one pdb file')
-            continue
-        pdb_filename = np.unique(df.pdb_filename)[0]
-        df = df[df.pdb_filename == pdb_filename].reset_index(drop=True)
-        full_pdb_filename = f'{reference_dir}/pdb_files/{pdb_filename}'
-        results_df_path = f'{results_dir}/{uniprot_id}.scan_test.results.tsv'
-        scan_test_one_protein(df, full_pdb_filename, results_df_path, radius, n_sims)
+    n_proteins = len(uniprot_id_list)
+    min_fdr_filename = f'{results_dir}/min_fdr.tsv'
+    with open(min_fdr_filename, 'w') as min_fdr_file:
+        for i, uniprot_id in enumerate(uniprot_id_list):
+            print('\n', uniprot_id, f'number {i} out of {n_proteins}')
+            try:
+                df = df_rvas[df_rvas.uniprot_id == uniprot_id]
+                if len(np.unique(df.pdb_filename)) > 1:
+                    print('skipping when there is more than one pdb file')
+                    continue
+                pdb_filename = np.unique(df.pdb_filename)[0]
+                df = df[df.pdb_filename == pdb_filename].reset_index(drop=True)
+                full_pdb_filename = f'{reference_dir}/pdb_files/{pdb_filename}'
+                if not os.path.exists(full_pdb_filename):
+                    print('missing pdb file. skipping.')
+                    continue
+                results_df_path = f'{results_dir}/{uniprot_id}.scan_test.results.tsv'
+                df_results = scan_test_one_protein(df, full_pdb_filename, results_df_path, radius, n_sims)
+                min_fdr = df_results.fdr.min()
+                print(f'min fdr: {min_fdr}')
+                min_fdr_file.write(f'{uniprot_id}\t{min_fdr}\n')
+            except Exception as e:
+                print(f'Error for {uniprot_id}: {e}')
+                continue
