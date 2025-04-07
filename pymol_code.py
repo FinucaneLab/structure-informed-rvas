@@ -25,13 +25,15 @@ def write_full_pdb(full_pdb, output_path):
 
 
 def get_one_pdb(info_tsv, uniprot_id, reference_directory):
-    info_df = pd.read_csv(info_tsv, sep='\t')
+    info_tsv_p = os.path.join(reference_directory, info_tsv)
+    info_df = pd.read_csv(info_tsv_p, sep='\t')
     info_df['pos_covered'] = info_df['pos_covered'].apply(ast.literal_eval)
     pdbs = [item for item in os.listdir(reference_directory) if item.endswith('.gz') and uniprot_id in item]
     full_pdb = []
     pdbs.sort(key=lambda item: item.split('-')[2][-1])
     for item in pdbs:
         p = os.path.join(reference_directory, item)
+        print('pdb:', p)
         if 'F1' in item:
             with gzip.open(p, "rt") as handle:
                 structure = PDBParser(QUIET=True).get_structure("protein", handle)
@@ -59,10 +61,12 @@ def get_one_pdb(info_tsv, uniprot_id, reference_directory):
 def pymol_rvas(info_tsv, df_rvas, reference_directory):
     # make a pymol session with case and control mutations
     # output a gif and a .pse file
-
-    df_rvas = pd.read_csv(df_rvas, sep='\t')
+    df_rvas_p =  os.path.join(reference_directory, df_rvas)
+    df_rvas = pd.read_csv(df_rvas_p, sep='\t')
     pdbs = set(df_rvas['pdb_filename'].tolist())
     uniprot_ids = set(df_rvas['uniprot_id'].tolist())
+    cmd.set('ribbon_as_cylinders')
+    cmd.set("ribbon_radius", 0.5) 
 
     for item in pdbs:
         p = os.path.join(reference_directory, item)
@@ -86,7 +90,6 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory):
             cmd.color("blue", f"residue_{aa_pos_file}")
             cmd.label(f"residue_{aa_pos_file} and name CA", f'"{aa_ref}->{aa_alt}"')
 
-        
         for _, row in tmp_df_case.iterrows():
             aa_ref = row['aa_ref']
             aa_alt = row['aa_alt']
@@ -94,7 +97,6 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory):
             cmd.select(f"residue_{aa_pos_file}", f"resi {aa_pos_file}")
             cmd.color("red", f"residue_{aa_pos_file}")
             cmd.label(f"residue_{aa_pos_file} and name CA", f'"{aa_ref}->{aa_alt}"')
-
     
         for _, row in tmp_df_both.iterrows():
             aa_ref = row['aa_ref']
@@ -104,60 +106,72 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory):
             cmd.color("purple", f"residue_{aa_pos_file}")
             cmd.label(f"residue_{aa_pos_file} and name CA", f'"{aa_ref}->{aa_alt}"')
         
-        cmd.save(f"{uniprot_id}_{item.split('.')[0]}.pse")
+        objects = cmd.get_names("objects")
+        for obj in objects:
+            cmd.hide('cartoon', obj)
+            cmd.show('ribbon', obj)
 
-        uniprot_ids = set(df_rvas['uniprot_id'].tolist())
-        for uniprot_id in uniprot_ids:
-            print(uniprot_id)
-            get_one_pdb(info_tsv, uniprot_id, reference_directory)
-            cmd.load(f"{uniprot_id}.pdb", "structure")
-            tmp_df = df_rvas[df_rvas['uniprot_id'] == uniprot_id]
-            uniprot_id = tmp_df['uniprot_id'].values[0]
+        pse_pdb_p = os.path.join(reference_directory, f"{uniprot_id}_{item.split('.')[0]}.pse")
+        cmd.save(pse_pdb_p)
 
-            control_mask = (tmp_df['ac_control'] > 1) & (tmp_df['ac_case'] == 0)
-            case_mask = (tmp_df['ac_case'] > 1) & (tmp_df['ac_control'] == 0)
-            both_mask = (tmp_df['ac_case'] > 1) & (tmp_df['ac_control'] > 1)
-            tmp_df_control = tmp_df[control_mask]
-            tmp_df_case = tmp_df[case_mask]
-            tmp_df_both = tmp_df[both_mask]
-            
-            for _, row in tmp_df_control.iterrows():
-                aa_ref = row['aa_ref']
-                aa_alt = row['aa_alt']
-                aa_pos = row['aa_pos']
-                cmd.select(f"residue_{aa_pos}", f"resi {aa_pos}")
-                cmd.color("blue", f"residue_{aa_pos}")
-                cmd.label(f"residue_{aa_pos} and name CA", f'"{aa_ref}->{aa_alt}"')
+    for uniprot_id in uniprot_ids:
+        print(uniprot_id)
+        get_one_pdb(info_tsv, uniprot_id, reference_directory)
+        pdb_p = os.path.join(reference_directory, uniprot_id + '.pdb')
+        cmd.load(pdb_p, "structure")
+        tmp_df = df_rvas[df_rvas['uniprot_id'] == uniprot_id]
+        uniprot_id = tmp_df['uniprot_id'].values[0]
 
-            
-            for _, row in tmp_df_case.iterrows():
-                aa_ref = row['aa_ref']
-                aa_alt = row['aa_alt']
-                aa_pos = row['aa_pos']
-                cmd.select(f"residue_{aa_pos}", f"resi {aa_pos}")
-                cmd.color("red", f"residue_{aa_pos}")
-                cmd.label(f"residue_{aa_pos} and name CA", f'"{aa_ref}->{aa_alt}"')
+        control_mask = (tmp_df['ac_control'] > 1) & (tmp_df['ac_case'] == 0)
+        case_mask = (tmp_df['ac_case'] > 1) & (tmp_df['ac_control'] == 0)
+        both_mask = (tmp_df['ac_case'] > 1) & (tmp_df['ac_control'] > 1)
+        tmp_df_control = tmp_df[control_mask]
+        tmp_df_case = tmp_df[case_mask]
+        tmp_df_both = tmp_df[both_mask]
+        
+        for _, row in tmp_df_control.iterrows():
+            aa_ref = row['aa_ref']
+            aa_alt = row['aa_alt']
+            aa_pos = row['aa_pos']
+            cmd.select(f"residue_{aa_pos}", f"resi {aa_pos}")
+            cmd.color("blue", f"residue_{aa_pos}")
+            cmd.label(f"residue_{aa_pos} and name CA", f'"{aa_ref}->{aa_alt}"')
 
         
-            for _, row in tmp_df_both.iterrows():
-                aa_ref = row['aa_ref']
-                aa_alt = row['aa_alt']
-                aa_pos = row['aa_pos']
-                cmd.select(f"residue_{aa_pos}", f"resi {aa_pos}")
-                cmd.color("purple", f"residue_{aa_pos}")
-                cmd.label(f"residue_{aa_pos} and name CA", f'"{aa_ref}->{aa_alt}"')
+        for _, row in tmp_df_case.iterrows():
+            aa_ref = row['aa_ref']
+            aa_alt = row['aa_alt']
+            aa_pos = row['aa_pos']
+            cmd.select(f"residue_{aa_pos}", f"resi {aa_pos}")
+            cmd.color("red", f"residue_{aa_pos}")
+            cmd.label(f"residue_{aa_pos} and name CA", f'"{aa_ref}->{aa_alt}"')
 
-                cmd.save(f"{uniprot_id}.pse")
-            
+    
+        for _, row in tmp_df_both.iterrows():
+            aa_ref = row['aa_ref']
+            aa_alt = row['aa_alt']
+            aa_pos = row['aa_pos']
+            cmd.select(f"residue_{aa_pos}", f"resi {aa_pos}")
+            cmd.color("purple", f"residue_{aa_pos}")
+            cmd.label(f"residue_{aa_pos} and name CA", f'"{aa_ref}->{aa_alt}"')
+
+        objects = cmd.get_names("objects")  
+        for obj in objects:
+            cmd.hide('cartoon', obj)
+            cmd.show('ribbon', obj)
+
+        pse_p = os.path.join(reference_directory, f'{uniprot_id}.pse')
+        cmd.save(pse_p)
 
 def pymol_annotation(annot_file, reference_directory):
     # visualize the annotation
-    annot_df = pd.read_csv(annot_file, sep='\t')
+    annot_df_p = os.path.join(reference_directory, annot_file)
+    annot_df = pd.read_csv(annot_df_p, sep='\t')
     uniprot_ids = set(annot_df['uniprot_id'].tolist())
     for uniprot_id in uniprot_ids:
         p = os.path.join(reference_directory,  f'{uniprot_id}.pse')
         if os.path.exists(p):
-            cmd.load(f'{uniprot_id}.pse')
+            cmd.load(p)
             tmp_annot = annot_df[annot_df['uniprot_id'] == uniprot_id]
             tmp_annot_pos = tmp_annot['aa_pos'].tolist()
             for item in tmp_annot_pos:
@@ -215,9 +229,10 @@ def pymol_neighborhood(df_results, reference_directory):
             cmd.select(f"residue_{resi}", selection)
             cmd.label(f"residue_{resi} and name CA", f'"case: {nbhd_case}; control: {nbhd_ctrl}"')
             cmd.zoom(selection)
-    cmd.save(f"{uniprot_id}_result.pse")
+    result_pse_p = os.path.join(reference_directory, f'{uniprot_id}_result.pse')
+    cmd.save(result_pse_p)
 
-# pymol_rvas('info.tsv','sample_df_rvas.tsv', '/Users/liaoruqi/Desktop/structure-informed-rvas/')
-# pymol_annotation('ClinVar_PLP_uniprot_canonical.tsv', '/Users/liaoruqi/Desktop/structure-informed-rvas/')
-# pymol_scan_test('O15047_results.tsv', '/Users/liaoruqi/Desktop/structure-informed-rvas/')
-# pymol_neighborhood('O15047_results.tsv', '/Users/liaoruqi/Desktop/structure-informed-rvas/')
+# pymol_rvas('info.tsv','sample_df_rvas.tsv', '/Users/liaoruqi/Desktop/structure-informed-rvas/examples')
+# pymol_annotation('ClinVar_PLP_uniprot_canonical.tsv', '/Users/liaoruqi/Desktop/structure-informed-rvas/examples')
+# pymol_scan_test('O15047_results.tsv', '/Users/liaoruqi/Desktop/structure-informed-rvas/examples')
+# pymol_neighborhood('O15047_results.tsv', '/Users/liaoruqi/Desktop/structure-informed-rvas/examples')
