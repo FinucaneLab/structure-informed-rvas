@@ -81,6 +81,12 @@ def map_to_protein(
             rvas_data['chr'] = rvas_data['Variant ID'].str.split('-').str[0]
         if 'pos' not in rvas_data:
             rvas_data['pos'] = rvas_data['Variant ID'].str.split('-').str[1].astype(int)
+    elif ('locus' in rvas_data) and ('alleles' in rvas_data):
+        rvas_data['chr'] = rvas_data['locus'].str.split(':').str[0]
+        rvas_data['pos'] = rvas_data['locus'].str.split(':').str[1].astype(int)
+        rvas_data['ref'] = rvas_data['alleles'].str.split('"').str[1]
+        rvas_data['alt'] = rvas_data['alleles'].str.split('"').str[3]
+        rvas_data['Variant ID'] = rvas_data['chr'] + '-' + rvas_data['pos'].astype(str) + '-' + rvas_data['ref'] + '-' + rvas_data['alt']
     else:
         rvas_data['Variant ID'] = rvas_data['chr'] + '-' + rvas_data['pos'].astype(str) + '-' + rvas_data['ref'] + '-' + rvas_data['alt']
 
