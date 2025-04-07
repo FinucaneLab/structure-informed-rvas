@@ -16,7 +16,6 @@ def get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_
             ])
             if valid_for_fisher(contingency_table):
                 _, p = fisher_exact(contingency_table)
-                # _, p, _, _ = chi2_contingency(contingency_table)
                 pvals[n_case_nbhd, n_ctrl_nbhd] = p
     return pvals
 
@@ -52,21 +51,22 @@ def get_case_control_ac_matrix(df, n_res, n_sim):
 def get_all_pvals(
         df,
         pdb_file,
-        n_sim = 1000,
+        n_sims,
         radius = 15,
 ):
     adjacency_matrix = get_adjacency_matrix(pdb_file, radius)
     n_res = adjacency_matrix.shape[0]
-    case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(df, n_res, n_sim)
+    
+    case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(df, n_res, n_sims)
     n_case = case_ac_matrix[:,0].sum()
     n_control = control_ac_matrix[:,0].sum()
     n_case_nbhd_mat = get_nbhd_counts(adjacency_matrix, case_ac_matrix)
     n_control_nbhd_mat = get_nbhd_counts(adjacency_matrix, control_ac_matrix)
     pval_lookup = get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_control)
     pval_matrix = pval_lookup[n_case_nbhd_mat, n_control_nbhd_mat]
-    pval_columns = ['p_value'] + [f'null_pval_{i}' for i in range(n_sim)]
+    pval_columns = ['p_value'] + [f'null_pval_{i}' for i in range(n_sims)]
     df_pvals = pd.DataFrame(columns = pval_columns, data = pval_matrix)
-    return df_pvals
+    return df_pvals, case_ac_matrix[:,0], control_ac_matrix[:,0], adjacency_matrix, n_case_nbhd_mat[:,0], n_control_nbhd_mat[:,0]
 
 def compute_fdr(df_pvals):
     null_ps = df_pvals.iloc[:, 1:].values
@@ -80,39 +80,40 @@ def compute_fdr(df_pvals):
     df_results = df_pvals[['aa_pos', 'p_value', 'fdr']]
     return df_results
 
-def scan_test_one_protein(df, pdb_file, results_df_path, radius, n_sims):
-    df_pvals = get_all_pvals(df, pdb_file, n_sims, radius)
+def scan_test_one_protein(df, pdb_file, results_df_path, radius, n_sims, save_data):
+    df_pvals, case_ac, control_ac, adj_mat, case_nbhd, control_nbhd = get_all_pvals(df, pdb_file, n_sims, radius)
     df_results = compute_fdr(df_pvals)
     df_results.to_csv(results_df_path, sep='\t', index=False)
+    if save_data:
+        np.save(results_df_path.replace('scan_test.results.tsv', 'case_ac.npy'), case_ac)
+        np.save(results_df_path.replace('scan_test.results.tsv', 'control_ac.npy'), control_ac)
+        np.save(results_df_path.replace('scan_test.results.tsv', 'adj_mat.npy'), adj_mat)
+        np.save(results_df_path.replace('scan_test.results.tsv', 'case_nbhd.npy'), case_nbhd)
+        np.save(results_df_path.replace('scan_test.results.tsv', 'control_nbhd.npy'), control_nbhd)
     return df_results
 
-def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims=1000):
+def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims, save_data):
     '''
     df_rvas is the output of map_to_protein. reference_dir has the pdb structures. this function
     should perform the scan test for all proteins and return a data frame with all the results.
     '''
     uniprot_id_list = np.unique(df_rvas.uniprot_id)
     n_proteins = len(uniprot_id_list)
-    min_fdr_filename = f'{results_dir}/min_fdr.tsv'
-    with open(min_fdr_filename, 'w') as min_fdr_file:
-        for i, uniprot_id in enumerate(uniprot_id_list):
-            print('\n', uniprot_id, f'number {i} out of {n_proteins}')
-            try:
-                df = df_rvas[df_rvas.uniprot_id == uniprot_id]
-                if len(np.unique(df.pdb_filename)) > 1:
-                    print('skipping when there is more than one pdb file')
-                    continue
-                pdb_filename = np.unique(df.pdb_filename)[0]
-                df = df[df.pdb_filename == pdb_filename].reset_index(drop=True)
-                full_pdb_filename = f'{reference_dir}/pdb_files/{pdb_filename}'
-                if not os.path.exists(full_pdb_filename):
-                    print('missing pdb file. skipping.')
-                    continue
-                results_df_path = f'{results_dir}/{uniprot_id}.scan_test.results.tsv'
-                df_results = scan_test_one_protein(df, full_pdb_filename, results_df_path, radius, n_sims)
-                min_fdr = df_results.fdr.min()
-                print(f'min fdr: {min_fdr}')
-                min_fdr_file.write(f'{uniprot_id}\t{min_fdr}\n')
-            except Exception as e:
-                print(f'Error for {uniprot_id}: {e}')
+    for i, uniprot_id in enumerate(uniprot_id_list):
+        print('\n', uniprot_id, f'number {i} out of {n_proteins}')
+        try:
+            df = df_rvas[df_rvas.uniprot_id == uniprot_id]
+            if len(np.unique(df.pdb_filename)) > 1:
+                print('skipping when there is more than one pdb file')
                 continue
+            pdb_filename = np.unique(df.pdb_filename)[0]
+            df = df[df.pdb_filename == pdb_filename].reset_index(drop=True)
+            full_pdb_filename = f'{reference_dir}/pdb_files/{pdb_filename}'
+            if not os.path.exists(full_pdb_filename):
+                print('missing pdb file. skipping.')
+                continue
+            results_df_path = f'{results_dir}/{uniprot_id}.scan_test.results.tsv'
+            df_results = scan_test_one_protein(df, full_pdb_filename, results_df_path, radius, n_sims, save_data)
+        except Exception as e:
+            print(f'Error for {uniprot_id}: {e}')
+            continue

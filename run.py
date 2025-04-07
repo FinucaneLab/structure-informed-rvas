@@ -71,6 +71,18 @@ if __name__ == '__main__':
         help='neighborhood radius for clinvar or annotation tests',
     )
     parser.add_argument(
+        '--n-sims',
+        type=int,
+        default=1,
+        help='how many null simulations to do',
+    )
+    parser.add_argument(
+        '--save-data',
+        action='store_true',
+        default=False,
+        help='write out data from the scan test',
+    )
+    parser.add_argument(
         '--filter-file',
         type=str,
         default=None,
@@ -98,6 +110,12 @@ if __name__ == '__main__':
         type=str,
         help='directory to write results',
     )
+    parser.add_argument(
+        '--no-ac-filter',
+        action='store_true',
+        default=False,
+        help='use this flag if you *do* want to include variants with AC>10.'
+    )
     args = parser.parse_args()
 
     if args.rvas_data_to_map is not None:
@@ -124,10 +142,15 @@ if __name__ == '__main__':
     else:
         raise Exception('either --rvas-data-to-map or --rvas-data-mapped must be defined')
     
+    if not args.which_proteins=='all':
+        which_proteins = args.which_proteins.split(',')
+        df_rvas = df_rvas[df_rvas.uniprot_id.isin(which_proteins)]
 
+    if not args.no_ac_filter:
+        df_rvas = df_rvas[df_rvas.ac_case + df_rvas.ac_control < 10]
 
     if args.scan_test:
-        scan_test(df_rvas, args.reference_dir, args.neighborhood_radius, args.results_dir)
+        scan_test(df_rvas, args.reference_dir, args.neighborhood_radius, args.results_dir, args.n_sims, args.save_data)
     
     elif args.clinvar_test:
         print('Performing ClinVar test.')
