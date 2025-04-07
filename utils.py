@@ -1,6 +1,7 @@
 import numpy as np
 from Bio.PDB import PDBParser
 import gzip
+import sklearn.metrics
 
 def get_pairwise_distances(pdb_file):
     parser = PDBParser(QUIET=True)
@@ -18,7 +19,7 @@ def get_pairwise_distances(pdb_file):
                 if 'CA' in residue:
                     ca_atoms.append(residue['CA'].get_coord())
     ca_atoms = np.array(ca_atoms)
-    pairwise_distances = np.sqrt(np.sum((ca_atoms[:, np.newaxis] - ca_atoms) ** 2, axis=-1))
+    pairwise_distances = sklearn.metrics.pairwise_distances(ca_atoms)
     return pairwise_distances
 
 def get_adjacency_matrix(pdb_file, radius):
