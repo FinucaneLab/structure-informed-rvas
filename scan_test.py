@@ -2,6 +2,7 @@ import os
 import pandas as pd
 import numpy as np
 import glob
+import bisect
 from scipy.stats import fisher_exact, binom
 from utils import get_adjacency_matrix, valid_for_fisher
     
@@ -74,7 +75,9 @@ def get_all_pvals(
 
 def compute_fdr(results_dir):
     to_concat = []
-    for f in glob.glob(f'{results_dir}/*.df_pvals.tsv'):
+    file_list = glob.glob(f'{results_dir}/*.df_pvals.tsv')
+    for i, f in enumerate(file_list):
+        print(i, len(file_list))
         uniprot_id = f.split('/')[-1].split('.')[0]
         df = pd.read_csv(f, sep='\t')
         df['uniprot_id'] = uniprot_id
@@ -83,9 +86,11 @@ def compute_fdr(results_dir):
     df_pvals = pd.concat(to_concat)
     null_pval_cols = [c for c in df_pvals.columns if c.startswith('null_pval')]
     null_ps = df_pvals.loc[:, null_pval_cols].values
-    n_sim = len(null_pval_cols)
+    null_ps = np.sort(null_ps.flatten())
+    n_sims = len(null_pval_cols)
+    df_pvals.drop(null_pval_cols, inplace=True, axis=1)
     df_pvals = df_pvals.sort_values(by='p_value').reset_index(drop=True)
-    false_discoveries_avg = [np.sum(null_ps <= p)/n_sim for p in df_pvals.p_value]
+    false_discoveries_avg = [bisect.bisect_right(null_ps, p)/n_sims for p in df_pvals.p_value]
     df_pvals['false_discoveries_avg'] = false_discoveries_avg
     df_pvals['fdr'] = [x / (i+1) for i, x in enumerate(false_discoveries_avg)]
     df_pvals['fdr'] = df_pvals['fdr'][::-1].cummin()[::-1]
