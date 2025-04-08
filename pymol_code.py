@@ -56,11 +56,11 @@ def get_one_pdb(info_tsv, uniprot_id, reference_directory):
 
     write_full_pdb(full_pdb, os.path.join(reference_directory, uniprot_id + '.pdb'))
 
-def pymol_rvas(info_tsv, df_rvas, reference_directory):
+def pymol_rvas(info_tsv, df_rvas_filename, reference_directory, results_directory):
     # make a pymol session with case and control mutations
     # output a gif and a .pse file
 
-    df_rvas = pd.read_csv(df_rvas, sep='\t')
+    df_rvas = pd.read_csv(df_rvas_filename, sep='\t')
     pdbs = set(df_rvas['pdb_filename'].tolist())
     uniprot_ids = set(df_rvas['uniprot_id'].tolist())
 
@@ -104,13 +104,17 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory):
             cmd.color("purple", f"residue_{aa_pos_file}")
             cmd.label(f"residue_{aa_pos_file} and name CA", f'"{aa_ref}->{aa_alt}"')
         
-        cmd.save(f"{uniprot_id}_{item.split('.')[0]}.pse")
+        cmd.save(f"{results_directory}/{uniprot_id}_{item.split('.')[0]}.pse")
 
         uniprot_ids = set(df_rvas['uniprot_id'].tolist())
         for uniprot_id in uniprot_ids:
             print(uniprot_id)
-            get_one_pdb(info_tsv, uniprot_id, reference_directory)
-            cmd.load(f"{uniprot_id}.pdb", "structure")
+            if info_tsv is None:
+                pdb_filename = df_rvas['pdb_filename'].values[0]
+                cmd.load(pdb_filename, "structure")
+            else:
+                get_one_pdb(info_tsv, uniprot_id, reference_directory)
+                cmd.load(f"{uniprot_id}.pdb", "structure")
             tmp_df = df_rvas[df_rvas['uniprot_id'] == uniprot_id]
             uniprot_id = tmp_df['uniprot_id'].values[0]
 
@@ -147,17 +151,18 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory):
                 cmd.color("purple", f"residue_{aa_pos}")
                 cmd.label(f"residue_{aa_pos} and name CA", f'"{aa_ref}->{aa_alt}"')
 
-                cmd.save(f"{uniprot_id}.pse")
+                cmd.save(f"{results_directory}/{uniprot_id}.pse")
             
 
-def pymol_annotation(annot_file, reference_directory):
+def pymol_annotation(annot_file, results_directory):
     # visualize the annotation
     annot_df = pd.read_csv(annot_file, sep='\t')
     uniprot_ids = set(annot_df['uniprot_id'].tolist())
     for uniprot_id in uniprot_ids:
-        p = os.path.join(reference_directory,  f'{uniprot_id}.pse')
+        p = os.path.join(results_directory,  f'{uniprot_id}.pse')
         if os.path.exists(p):
-            cmd.load(f'{uniprot_id}.pse')
+            # cmd.load(f'{uniprot_id}.pse')
+            cmd.load(p)
             tmp_annot = annot_df[annot_df['uniprot_id'] == uniprot_id]
             tmp_annot_pos = tmp_annot['aa_pos'].tolist()
             for item in tmp_annot_pos:
@@ -166,11 +171,11 @@ def pymol_annotation(annot_file, reference_directory):
             cmd.save(p)
 
     
-def pymol_scan_test(df_results, reference_directory):
+def pymol_scan_test(df_results_filename, results_directory):
     # color by case/control ratio of the neighborhood
     uniprot_id = df_results.split('_')[0]
-    df_results_p = os.path.join(reference_directory, df_results)
-    pse_p = os.path.join(reference_directory, uniprot_id + '.pse')
+    df_results_p = os.path.join(results_directory, df_results_filename)
+    pse_p = os.path.join(results_directory, uniprot_id + '.pse')
     df_results = pd.read_csv(df_results_p, sep='\t')
     df_results['ratio_normalized'] = df_results['ratio'] / df_results['ratio'].max()
     df_results['ratio_normalized'].to_csv('test.csv', sep='\t', index=False)
@@ -193,17 +198,17 @@ def pymol_scan_test(df_results, reference_directory):
     
     cmd.spectrum("b", "blue_white_red", objects, byres=1)
 
-    result_pse_p = os.path.join(reference_directory, f'{uniprot_id}_result.pse')
+    result_pse_p = os.path.join(results_directory, f'{uniprot_id}_result.pse')
     cmd.save(result_pse_p)
 
 
-def pymol_neighborhood(df_results, reference_directory):
+def pymol_neighborhood(df_results, results_directory):
     # for each significant neighborhood, zoom in and show the case and control mutations
     # just in that neighborhood.
     uniprot_id = df_results.split('_')[0]
-    df_results_p = os.path.join(reference_directory, df_results)
+    df_results_p = os.path.join(results_directory, df_results)
     df_results = pd.read_csv(df_results_p, sep='\t')
-    pse_p = os.path.join(reference_directory, uniprot_id + '_result.pse')
+    pse_p = os.path.join(results_directory, uniprot_id + '_result.pse')
     cmd.load(pse_p)
     for _, row in df_results.iterrows():
         resi = int(row['aa_pos'])

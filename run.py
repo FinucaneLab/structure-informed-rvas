@@ -73,14 +73,8 @@ if __name__ == '__main__':
     parser.add_argument(
         '--n-sims',
         type=int,
-        default=1,
+        default=1000,
         help='how many null simulations to do',
-    )
-    parser.add_argument(
-        '--save-data',
-        action='store_true',
-        default=False,
-        help='write out data from the scan test',
     )
     parser.add_argument(
         '--filter-file',
@@ -150,7 +144,7 @@ if __name__ == '__main__':
         df_rvas = df_rvas[df_rvas.ac_case + df_rvas.ac_control < 10]
 
     if args.scan_test:
-        scan_test(df_rvas, args.reference_dir, args.neighborhood_radius, args.results_dir, args.n_sims, args.save_data)
+        scan_test(df_rvas, args.reference_dir, args.neighborhood_radius, args.results_dir, args.n_sims)
     
     elif args.clinvar_test:
         print('Performing ClinVar test.')

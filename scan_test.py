@@ -1,7 +1,8 @@
 import os
 import pandas as pd
 import numpy as np
-from scipy.stats import chi2_contingency, fisher_exact, binom
+import glob
+from scipy.stats import fisher_exact, binom
 from utils import get_adjacency_matrix, valid_for_fisher
     
 def get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_ctrl):
@@ -66,33 +67,38 @@ def get_all_pvals(
     pval_matrix = pval_lookup[n_case_nbhd_mat, n_control_nbhd_mat]
     pval_columns = ['p_value'] + [f'null_pval_{i}' for i in range(n_sims)]
     df_pvals = pd.DataFrame(columns = pval_columns, data = pval_matrix)
-    return df_pvals, case_ac_matrix[:,0], control_ac_matrix[:,0], adjacency_matrix, n_case_nbhd_mat[:,0], n_control_nbhd_mat[:,0]
+    df_pvals['nbhd_case'] = n_case_nbhd_mat[:,0]
+    df_pvals['nbhd_control'] = n_control_nbhd_mat[:,0]
+    df_pvals['ratio'] = (df_pvals['nbhd_case'] + 1) / (df_pvals['nbhd_control'] + 1)
+    return df_pvals, adjacency_matrix
 
-def compute_fdr(df_pvals):
-    null_ps = df_pvals.iloc[:, 1:].values
-    n_sim = len(df_pvals.columns) - 1
-    df_pvals['aa_pos'] = 1 + np.arange(len(df_pvals))
+def compute_fdr(results_dir):
+    to_concat = []
+    for f in glob.glob(f'{results_dir}/*.df_pvals.tsv'):
+        uniprot_id = f.split('/')[-1].split('.')[0]
+        df = pd.read_csv(f, sep='\t')
+        df['uniprot_id'] = uniprot_id
+        df['aa_pos'] = 1+np.arange(len(df))
+        to_concat.append(df)
+    df_pvals = pd.concat(to_concat)
+    null_pval_cols = [c for c in df_pvals.columns if c.startswith('null_pval')]
+    null_ps = df_pvals.loc[:, null_pval_cols].values
+    n_sim = len(null_pval_cols)
     df_pvals = df_pvals.sort_values(by='p_value').reset_index(drop=True)
     false_discoveries_avg = [np.sum(null_ps <= p)/n_sim for p in df_pvals.p_value]
     df_pvals['false_discoveries_avg'] = false_discoveries_avg
     df_pvals['fdr'] = [x / (i+1) for i, x in enumerate(false_discoveries_avg)]
     df_pvals['fdr'] = df_pvals['fdr'][::-1].cummin()[::-1]
-    df_results = df_pvals[['aa_pos', 'p_value', 'fdr']]
+    df_results = df_pvals[['uniprot_id', 'aa_pos', 'p_value', 'fdr', 'nbhd_case', 'nbhd_control', 'ratio']]
     return df_results
 
-def scan_test_one_protein(df, pdb_file, results_df_path, radius, n_sims, save_data):
-    df_pvals, case_ac, control_ac, adj_mat, case_nbhd, control_nbhd = get_all_pvals(df, pdb_file, n_sims, radius)
-    df_results = compute_fdr(df_pvals)
-    df_results.to_csv(results_df_path, sep='\t', index=False)
-    if save_data:
-        np.save(results_df_path.replace('scan_test.results.tsv', 'case_ac.npy'), case_ac)
-        np.save(results_df_path.replace('scan_test.results.tsv', 'control_ac.npy'), control_ac)
-        np.save(results_df_path.replace('scan_test.results.tsv', 'adj_mat.npy'), adj_mat)
-        np.save(results_df_path.replace('scan_test.results.tsv', 'case_nbhd.npy'), case_nbhd)
-        np.save(results_df_path.replace('scan_test.results.tsv', 'control_nbhd.npy'), control_nbhd)
-    return df_results
+def scan_test_one_protein(df, pdb_file, results_prefix, radius, n_sims):
+    df_pvals, adj_mat = get_all_pvals(df, pdb_file, n_sims, radius)
+    np.save(f'{results_prefix}.adj_mat.npy', adj_mat)
+    df.to_csv(f'{results_prefix}.df_rvas.tsv', sep='\t', index=False)
+    df_pvals.to_csv(f'{results_prefix}.df_pvals.tsv', sep='\t', index=False)
 
-def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims, save_data):
+def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims):
     '''
     df_rvas is the output of map_to_protein. reference_dir has the pdb structures. this function
     should perform the scan test for all proteins and return a data frame with all the results.
@@ -112,8 +118,11 @@ def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims, save_data):
             if not os.path.exists(full_pdb_filename):
                 print('missing pdb file. skipping.')
                 continue
-            results_df_path = f'{results_dir}/{uniprot_id}.scan_test.results.tsv'
-            df_results = scan_test_one_protein(df, full_pdb_filename, results_df_path, radius, n_sims, save_data)
+            results_prefix = f'{results_dir}/{uniprot_id}'
+            scan_test_one_protein(df, full_pdb_filename, results_prefix, radius, n_sims)
         except Exception as e:
             print(f'Error for {uniprot_id}: {e}')
             continue
+    df_results = compute_fdr(results_dir)
+    df_results.to_csv(f'{results_dir}/all_proteins.fdr.tsv', sep='\t', index=False)
+    
