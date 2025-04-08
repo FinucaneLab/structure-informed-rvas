@@ -1,3 +1,4 @@
+import glob
 from pymol import cmd
 import pandas as pd
 import os
@@ -65,11 +66,11 @@ def get_one_pdb(info_tsv, uniprot_id, reference_directory):
     except Exception as e:
         print(f"[ERROR] in get_one_pdb(): {e}")
 
-def pymol_rvas(info_tsv, df_rvas, reference_directory):
+def pymol_rvas(info_tsv, df_rvas, reference_directory, results_directory):
     # make a pymol session with case and control mutations
     # output a gif and a .pse file
     try:
-        df_rvas_p =  os.path.join(reference_directory, df_rvas)
+        df_rvas_p =  os.path.join(results_directory, df_rvas)
         if not os.path.exists(df_rvas_p):
             print(f"[WARNING] RVAS file not found: {df_rvas_p}")
             return
@@ -81,7 +82,7 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory):
         cmd.set("ribbon_radius", 0.5) 
 
         for item in pdbs:
-            p = os.path.join(reference_directory, item)
+            p = os.path.join(reference_directory, f'pdb_files/{item}')
             if not os.path.exists(p):
                 print(f"[ERROR] PDB file not found: {p}")
                 continue
@@ -104,7 +105,7 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory):
                 aa_pos_file = row['aa_pos_file']
                 cmd.select(f"residue_{aa_pos_file}", f"resi {aa_pos_file}")
                 cmd.color("blue", f"residue_{aa_pos_file}")
-                cmd.label(f"residue_{aa_pos_file} and name CA", f'"{aa_ref}->{aa_alt}"')
+                # cmd.label(f"residue_{aa_pos_file} and name CA", f'"{aa_ref}->{aa_alt}"')
 
             for _, row in tmp_df_case.iterrows():
                 aa_ref = row['aa_ref']
@@ -112,7 +113,7 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory):
                 aa_pos_file = row['aa_pos_file']
                 cmd.select(f"residue_{aa_pos_file}", f"resi {aa_pos_file}")
                 cmd.color("red", f"residue_{aa_pos_file}")
-                cmd.label(f"residue_{aa_pos_file} and name CA", f'"{aa_ref}->{aa_alt}"')
+                # cmd.label(f"residue_{aa_pos_file} and name CA", f'"{aa_ref}->{aa_alt}"')
         
             for _, row in tmp_df_both.iterrows():
                 aa_ref = row['aa_ref']
@@ -120,64 +121,65 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory):
                 aa_pos_file = row['aa_pos_file']
                 cmd.select(f"residue_{aa_pos_file}", f"resi {aa_pos_file}")
                 cmd.color("purple", f"residue_{aa_pos_file}")
-                cmd.label(f"residue_{aa_pos_file} and name CA", f'"{aa_ref}->{aa_alt}"')
+                # cmd.label(f"residue_{aa_pos_file} and name CA", f'"{aa_ref}->{aa_alt}"')
             
             objects = cmd.get_names("objects")
             for obj in objects:
                 cmd.hide('cartoon', obj)
                 cmd.show('ribbon', obj)
 
-            pse_pdb_p = os.path.join(reference_directory, f"{uniprot_id}_{item.split('.')[0]}.pse")
+            pse_pdb_p = os.path.join(results_directory, f"{uniprot_id}_{item.split('.')[0]}.pse")
             cmd.save(pse_pdb_p)
-
-        for uniprot_id in uniprot_ids:
-            print(uniprot_id)
-            get_one_pdb(info_tsv, uniprot_id, reference_directory)
-            pdb_p = os.path.join(reference_directory, uniprot_id + '.pdb')
-            cmd.load(pdb_p, "structure")
-            tmp_df = df_rvas[df_rvas['uniprot_id'] == uniprot_id]
-            uniprot_id = tmp_df['uniprot_id'].values[0]
-
-            control_mask = (tmp_df['ac_control'] > 1) & (tmp_df['ac_case'] == 0)
-            case_mask = (tmp_df['ac_case'] > 1) & (tmp_df['ac_control'] == 0)
-            both_mask = (tmp_df['ac_case'] > 1) & (tmp_df['ac_control'] > 1)
-            tmp_df_control = tmp_df[control_mask]
-            tmp_df_case = tmp_df[case_mask]
-            tmp_df_both = tmp_df[both_mask]
-            
-            for _, row in tmp_df_control.iterrows():
-                aa_ref = row['aa_ref']
-                aa_alt = row['aa_alt']
-                aa_pos = row['aa_pos']
-                cmd.select(f"residue_{aa_pos}", f"resi {aa_pos}")
-                cmd.color("blue", f"residue_{aa_pos}")
-                cmd.label(f"residue_{aa_pos} and name CA", f'"{aa_ref}->{aa_alt}"')
-
-            
-            for _, row in tmp_df_case.iterrows():
-                aa_ref = row['aa_ref']
-                aa_alt = row['aa_alt']
-                aa_pos = row['aa_pos']
-                cmd.select(f"residue_{aa_pos}", f"resi {aa_pos}")
-                cmd.color("red", f"residue_{aa_pos}")
-                cmd.label(f"residue_{aa_pos} and name CA", f'"{aa_ref}->{aa_alt}"')
-
         
-            for _, row in tmp_df_both.iterrows():
-                aa_ref = row['aa_ref']
-                aa_alt = row['aa_alt']
-                aa_pos = row['aa_pos']
-                cmd.select(f"residue_{aa_pos}", f"resi {aa_pos}")
-                cmd.color("purple", f"residue_{aa_pos}")
-                cmd.label(f"residue_{aa_pos} and name CA", f'"{aa_ref}->{aa_alt}"')
+        if info_tsv is not None:
+            for uniprot_id in uniprot_ids:
+                print(uniprot_id)
+                get_one_pdb(info_tsv, uniprot_id, reference_directory)
+                pdb_p = os.path.join(reference_directory, f'pdb_files/{uniprot_id}.pdb')
+                cmd.load(pdb_p, "structure")
+                tmp_df = df_rvas[df_rvas['uniprot_id'] == uniprot_id]
+                uniprot_id = tmp_df['uniprot_id'].values[0]
 
-            objects = cmd.get_names("objects")  
-            for obj in objects:
-                cmd.hide('cartoon', obj)
-                cmd.show('ribbon', obj)
+                control_mask = (tmp_df['ac_control'] > 1) & (tmp_df['ac_case'] == 0)
+                case_mask = (tmp_df['ac_case'] > 1) & (tmp_df['ac_control'] == 0)
+                both_mask = (tmp_df['ac_case'] > 1) & (tmp_df['ac_control'] > 1)
+                tmp_df_control = tmp_df[control_mask]
+                tmp_df_case = tmp_df[case_mask]
+                tmp_df_both = tmp_df[both_mask]
+                
+                for _, row in tmp_df_control.iterrows():
+                    aa_ref = row['aa_ref']
+                    aa_alt = row['aa_alt']
+                    aa_pos = row['aa_pos']
+                    cmd.select(f"residue_{aa_pos}", f"resi {aa_pos}")
+                    cmd.color("blue", f"residue_{aa_pos}")
+                    cmd.label(f"residue_{aa_pos} and name CA", f'"{aa_ref}->{aa_alt}"')
 
-            pse_p = os.path.join(reference_directory, f'{uniprot_id}.pse')
-            cmd.save(pse_p)
+                
+                for _, row in tmp_df_case.iterrows():
+                    aa_ref = row['aa_ref']
+                    aa_alt = row['aa_alt']
+                    aa_pos = row['aa_pos']
+                    cmd.select(f"residue_{aa_pos}", f"resi {aa_pos}")
+                    cmd.color("red", f"residue_{aa_pos}")
+                    cmd.label(f"residue_{aa_pos} and name CA", f'"{aa_ref}->{aa_alt}"')
+
+            
+                for _, row in tmp_df_both.iterrows():
+                    aa_ref = row['aa_ref']
+                    aa_alt = row['aa_alt']
+                    aa_pos = row['aa_pos']
+                    cmd.select(f"residue_{aa_pos}", f"resi {aa_pos}")
+                    cmd.color("purple", f"residue_{aa_pos}")
+                    cmd.label(f"residue_{aa_pos} and name CA", f'"{aa_ref}->{aa_alt}"')
+
+                objects = cmd.get_names("objects")  
+                for obj in objects:
+                    cmd.hide('cartoon', obj)
+                    cmd.show('ribbon', obj)
+
+                pse_p = os.path.join(reference_directory, f'{uniprot_id}.pse')
+                cmd.save(pse_p)
     except Exception as e:
         print(f"[ERROR] in pymol_rvas(): {e}")
 
@@ -208,15 +210,21 @@ def pymol_annotation(annot_file, reference_directory):
         print(f"[ERROR] in pymol_annotation(): {e}")
 
     
-def pymol_scan_test(df_results, reference_directory):
+def pymol_scan_test(info_tsv, df_rvas, df_results, reference_directory, results_directory):
     # color by case/control ratio of the neighborhood
     try:
-        uniprot_id = df_results.split('_')[0]
-        df_results_p = os.path.join(reference_directory, df_results)
+        uniprot_id = df_results.split('.')[0]
+        df_results_p = os.path.join(results_directory, df_results)
         if not os.path.exists(df_results_p):
             print(f"[WARNING] Scan test result file not found: {df_results_p}")
             return
-        pse_p = os.path.join(reference_directory, uniprot_id + '.pse')
+        if info_tsv is not None:
+            pse_p = os.path.join(results_directory, uniprot_id + '.pse')
+        else:
+            df_rvas_p = os.path.join(results_directory, df_rvas)
+            df_rvas = pd.read_csv(df_rvas_p, sep='\t')
+            pdb_filename = df_rvas['pdb_filename'].values[0]
+            pse_p = os.path.join(results_directory, f"{uniprot_id}_{pdb_filename.split('.')[0]}.pse")
         if not os.path.exists(pse_p):
             print(f"[WARNING] PSE file from pymol_rvas() not found: {pse_p}")
             return
@@ -243,7 +251,7 @@ def pymol_scan_test(df_results, reference_directory):
         
         cmd.spectrum("b", "blue_white_red", objects, byres=1)
 
-        result_pse_p = os.path.join(reference_directory, f'{uniprot_id}_result.pse')
+        result_pse_p = os.path.join(results_directory, f'{uniprot_id}_result.pse')
         cmd.save(result_pse_p)
     except Exception as e:
         print(f"[ERROR] in pymol_scan_test(): {e}")
@@ -278,7 +286,16 @@ def pymol_neighborhood(df_results, reference_directory):
         cmd.save(result_pse_p)
     except Exception as e:  
         print(f"[ERROR] in pymol_neighborhood(): {e}")
-# pymol_rvas('info.tsv','sample_df_rvas.tsv', '/Users/liaoruqi/Desktop/structure-informed-rvas/examples')
-# pymol_annotation('ClinVar_PLP_uniprot_canonical.tsv', '/Users/liaoruqi/Desktop/structure-informed-rvas/examples')
-# pymol_scan_test('O15047_results.tsv', '/Users/liaoruqi/Desktop/structure-informed-rvas/examples')
-# pymol_neighborhood('O15047_results.tsv', '/Users/liaoruqi/Desktop/structure-informed-rvas/examples')
+
+def run_all(results_directory, reference_directory, info_tsv=None):
+    filelist = glob.glob(f'{results_directory}/*.df_rvas.tsv')
+    uniprot_list = [x.split('/')[-1].split('.')[0] for x in filelist]
+    for uniprot_id in uniprot_list:
+        df_rvas = f'{uniprot_id}.df_rvas.tsv'
+        df_results = f'{uniprot_id}.df_pvals.tsv'
+        pymol_rvas(info_tsv, df_rvas, reference_directory, results_directory)
+        pymol_scan_test(info_tsv, df_rvas, df_results, reference_directory, results_directory)
+        cmd.reinitialize()
+reference_directory = '../sir-reference-data/'
+results_directory = 'results/'
+run_all(results_directory, reference_directory)

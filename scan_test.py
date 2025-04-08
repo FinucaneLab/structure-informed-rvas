@@ -70,7 +70,9 @@ def get_all_pvals(
     df_pvals = pd.DataFrame(columns = pval_columns, data = pval_matrix)
     df_pvals['nbhd_case'] = n_case_nbhd_mat[:,0]
     df_pvals['nbhd_control'] = n_control_nbhd_mat[:,0]
-    df_pvals['ratio'] = (df_pvals['nbhd_case'] + 1) / (df_pvals['nbhd_control'] + 1)
+    df_pvals['ratio'] = (df_pvals['nbhd_case'] + 2) / (df_pvals['nbhd_control'] + 2 * n_control / n_case)
+    df_pvals['aa_pos'] = 1+np.arange(len(df_pvals))
+    df_pvals = df_pvals[['aa_pos', 'nbhd_case', 'nbhd_control'] + pval_columns + ['ratio']]
     return df_pvals, adjacency_matrix
 
 def compute_fdr(results_dir):
@@ -81,7 +83,6 @@ def compute_fdr(results_dir):
         uniprot_id = f.split('/')[-1].split('.')[0]
         df = pd.read_csv(f, sep='\t')
         df['uniprot_id'] = uniprot_id
-        df['aa_pos'] = 1+np.arange(len(df))
         to_concat.append(df)
     df_pvals = pd.concat(to_concat)
     null_pval_cols = [c for c in df_pvals.columns if c.startswith('null_pval')]
