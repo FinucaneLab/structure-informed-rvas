@@ -89,6 +89,8 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory, results_directory):
             print('Reading pdb:', p)
 
             cmd.load(p, "structure")
+            cmd.color("grey")
+                
             tmp_df = df_rvas[df_rvas['pdb_filename'] == item]
             uniprot_id = tmp_df['uniprot_id'].values[0]
 
