@@ -76,6 +76,8 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory, results_directory):
             return
 
         df_rvas = pd.read_csv(df_rvas_p, sep='\t')
+        if not 'aa_pos_file' in df_rvas:
+            df_rvas['aa_pos_file'] = df_rvas['aa_pos']
         pdbs = set(df_rvas['pdb_filename'].tolist())
         uniprot_ids = set(df_rvas['uniprot_id'].tolist())
         cmd.set('ribbon_as_cylinders')
@@ -298,6 +300,7 @@ def run_all(results_directory, reference_directory, info_tsv=None):
         pymol_rvas(info_tsv, df_rvas, reference_directory, results_directory)
         pymol_scan_test(info_tsv, df_rvas, df_results, reference_directory, results_directory)
         cmd.reinitialize()
-reference_directory = '../sir-reference-data/'
+# reference_directory = '../sir-reference-data/'
+reference_directory = './'
 results_directory = 'results/'
 run_all(results_directory, reference_directory)

@@ -59,13 +59,19 @@ def get_all_pvals(
     adjacency_matrix = get_adjacency_matrix(pdb_file, radius)
     n_res = adjacency_matrix.shape[0]
     
+    print('getting case control ac matrix')
     case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(df, n_res, n_sims)
+    print('done')
     n_case = case_ac_matrix[:,0].sum()
     n_control = control_ac_matrix[:,0].sum()
+    print('getting nbhd counts')
     n_case_nbhd_mat = get_nbhd_counts(adjacency_matrix, case_ac_matrix)
     n_control_nbhd_mat = get_nbhd_counts(adjacency_matrix, control_ac_matrix)
+    print('getting pval lookup')
     pval_lookup = get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_control)
+    print('getting pval matrix')
     pval_matrix = pval_lookup[n_case_nbhd_mat, n_control_nbhd_mat]
+    print('done')
     pval_columns = ['p_value'] + [f'null_pval_{i}' for i in range(n_sims)]
     df_pvals = pd.DataFrame(columns = pval_columns, data = pval_matrix)
     df_pvals['nbhd_case'] = n_case_nbhd_mat[:,0]
@@ -100,11 +106,15 @@ def compute_fdr(results_dir):
 
 def scan_test_one_protein(df, pdb_file, results_prefix, radius, n_sims):
     df_pvals, adj_mat = get_all_pvals(df, pdb_file, n_sims, radius)
+    print('saving adj mat')
     np.save(f'{results_prefix}.adj_mat.npy', adj_mat)
+    print('printing df_rvas')
     df.to_csv(f'{results_prefix}.df_rvas.tsv', sep='\t', index=False)
+    print('printing pvals')
     df_pvals.to_csv(f'{results_prefix}.df_pvals.tsv', sep='\t', index=False)
+    print('done')
 
-def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims):
+def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims, no_fdr):
     '''
     df_rvas is the output of map_to_protein. reference_dir has the pdb structures. this function
     should perform the scan test for all proteins and return a data frame with all the results.
@@ -129,6 +139,7 @@ def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims):
         except Exception as e:
             print(f'Error for {uniprot_id}: {e}')
             continue
-    df_results = compute_fdr(results_dir)
-    df_results.to_csv(f'{results_dir}/all_proteins.fdr.tsv', sep='\t', index=False)
+    if not no_fdr:
+        df_results = compute_fdr(results_dir)
+        df_results.to_csv(f'{results_dir}/all_proteins.fdr.tsv', sep='\t', index=False)
     

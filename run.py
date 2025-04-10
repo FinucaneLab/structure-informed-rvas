@@ -1,5 +1,6 @@
 import argparse
 import pandas as pd
+import os
 from scan_test import scan_test
 from read_data import map_to_protein
 # from annotation_test import annotation_test
@@ -110,6 +111,12 @@ if __name__ == '__main__':
         default=False,
         help='use this flag if you *do* want to include variants with AC>10.'
     )
+    parser.add_argument(
+        '--no-fdr',
+        action='store_true',
+        default=False,
+        help='skip fdr computation for scan test.'
+    )
     args = parser.parse_args()
 
     if args.rvas_data_to_map is not None:
@@ -125,8 +132,6 @@ if __name__ == '__main__':
         )
     elif args.rvas_data_mapped is not None:
         df_rvas = pd.read_csv(args.rvas_data_mapped, sep='\t')
-        if args.pdb_filename is not None:
-            df_rvas['pdb_filename'] = args.pdb_filename
         df_rvas = df_rvas.rename(columns = {
             args.ac_case_col: 'ac_case',
             args.ac_control_col: 'ac_control',
@@ -135,16 +140,20 @@ if __name__ == '__main__':
         })
     else:
         raise Exception('either --rvas-data-to-map or --rvas-data-mapped must be defined')
-    
+    if args.pdb_filename is not None:
+        df_rvas['pdb_filename'] = args.pdb_filename
     if not args.which_proteins=='all':
-        which_proteins = args.which_proteins.split(',')
+        if os.path.exists(args.which_proteins):
+            which_proteins = [x.rstrip() for x in open(args.which_proteins).readlines()]
+        else:
+            which_proteins = args.which_proteins.split(',')
         df_rvas = df_rvas[df_rvas.uniprot_id.isin(which_proteins)]
 
     if not args.no_ac_filter:
         df_rvas = df_rvas[df_rvas.ac_case + df_rvas.ac_control < 10]
 
     if args.scan_test:
-        scan_test(df_rvas, args.reference_dir, args.neighborhood_radius, args.results_dir, args.n_sims)
+        scan_test(df_rvas, args.reference_dir, args.neighborhood_radius, args.results_dir, args.n_sims, args.no_fdr)
     
     elif args.clinvar_test:
         print('Performing ClinVar test.')
