@@ -413,6 +413,7 @@ def run_all(results_directory, reference_directory, info_tsv=None):
         df_results = f'{uniprot_id}.df_pvals.tsv'
         pymol_rvas(info_tsv, df_rvas, reference_directory, results_directory)
         pymol_scan_test(info_tsv, df_rvas, df_results, reference_directory, results_directory)
+        make_movie(results_directory, uniprot_id)
         cmd.reinitialize()
 reference_directory = '../sir-reference-data/'
 results_directory = 'results/'
