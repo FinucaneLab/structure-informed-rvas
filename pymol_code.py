@@ -6,7 +6,7 @@ import ast
 import gzip
 from Bio.PDB import PDBParser
 from Bio.PDB import StructureBuilder, PDBIO, Model, Chain
-
+from utils import read_p_values
 
 def write_full_pdb(full_pdb, output_path):
     try:
@@ -32,7 +32,7 @@ def get_one_pdb(info_tsv, uniprot_id, reference_directory):
     info_tsv_p = os.path.join(reference_directory, info_tsv)
     try:
         info_df = pd.read_csv(info_tsv_p, sep='\t')
-        if not os.path.exists(info_tsv_p):
+        if not os.path.isfile(info_tsv_p):
             print(f"[WARNING] Info TSV not found: {info_tsv_p}")
             return
     
@@ -71,7 +71,7 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory, results_directory):
     # output a gif and a .pse file
     try:
         df_rvas_p =  os.path.join(results_directory, df_rvas)
-        if not os.path.exists(df_rvas_p):
+        if not os.path.isfile(df_rvas_p):
             print(f"[WARNING] RVAS file not found: {df_rvas_p}")
             return
 
@@ -83,7 +83,7 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory, results_directory):
 
         for item in pdbs:
             p = os.path.join(reference_directory, f'pdb_files/{item}')
-            if not os.path.exists(p):
+            if not os.path.isfile(p):
                 print(f"[ERROR] PDB file not found: {p}")
                 continue
             print('Reading pdb:', p)
@@ -189,7 +189,7 @@ def pymol_annotation(annot_file, reference_directory):
     # visualize the annotation
     try:
         annot_df_p = os.path.join(reference_directory, annot_file)
-        if not os.path.exists(annot_df_p):
+        if not os.path.isfile(annot_df_p):
             print(f"[WARNING] Annotation file not found: {annot_df_p}")
             return
         
@@ -197,7 +197,7 @@ def pymol_annotation(annot_file, reference_directory):
         uniprot_ids = set(annot_df['uniprot_id'].tolist())
         for uniprot_id in uniprot_ids:
             p = os.path.join(reference_directory,  f'{uniprot_id}.pse')
-            if not os.path.exists(p):
+            if not os.path.isfile(p):
                 print(f"[WARNING] PSE file from pymol_rvas() not found: {p}")
                 continue
             cmd.load(p)
@@ -212,12 +212,11 @@ def pymol_annotation(annot_file, reference_directory):
         print(f"[ERROR] in pymol_annotation(): {e}")
 
     
-def pymol_scan_test(info_tsv, df_rvas, df_results, reference_directory, results_directory):
+def pymol_scan_test(info_tsv, df_rvas, uniprot_id, reference_directory, results_directory):
     # color by case/control ratio of the neighborhood
     try:
-        uniprot_id = df_results.split('.')[0]
-        df_results_p = os.path.join(results_directory, df_results)
-        if not os.path.exists(df_results_p):
+        df_results_p = os.path.join(results_directory, 'p_values.h5')
+        if not os.path.isfile(df_results_p):
             print(f"[WARNING] Scan test result file not found: {df_results_p}")
             return
         if info_tsv is not None:
@@ -227,11 +226,13 @@ def pymol_scan_test(info_tsv, df_rvas, df_results, reference_directory, results_
             df_rvas = pd.read_csv(df_rvas_p, sep='\t')
             pdb_filename = df_rvas['pdb_filename'].values[0]
             pse_p = os.path.join(results_directory, f"{uniprot_id}_{pdb_filename.split('.')[0]}.pse")
-        if not os.path.exists(pse_p):
+        if not os.path.isfile(pse_p):
             print(f"[WARNING] PSE file from pymol_rvas() not found: {pse_p}")
             return
         
-        df_results = pd.read_csv(df_results_p, sep='\t')
+        with h5py.File(df_results_p, 'r') as fid:
+            df_results = read_p_values(fid, uniprot_id)
+
         df_results['ratio_normalized'] = df_results['ratio'] / df_results['ratio'].max()
         df_results['ratio_normalized'].to_csv('test.csv', sep='\t', index=False)
         
@@ -264,12 +265,12 @@ def pymol_neighborhood(df_results, reference_directory):
     try:
         uniprot_id = df_results.split('_')[0]
         df_results_p = os.path.join(reference_directory, df_results)
-        if not os.path.exists(df_results_p):
+        if not os.path.isfile(df_results_p):
             print(f"[WARNING] Scan test result file not found: {df_results_p}")
             return
         df_results = pd.read_csv(df_results_p, sep='\t')
         pse_p = os.path.join(reference_directory, uniprot_id + '_result.pse')
-        if not os.path.exists(pse_p):
+        if not os.path.isfile(pse_p):
             print(f"[WARNING] PSE file from pymol_scan_test() not found: {pse_p}")
             return
         
@@ -294,9 +295,8 @@ def run_all(results_directory, reference_directory, info_tsv=None):
     uniprot_list = [x.split('/')[-1].split('.')[0] for x in filelist]
     for uniprot_id in uniprot_list:
         df_rvas = f'{uniprot_id}.df_rvas.tsv'
-        df_results = f'{uniprot_id}.df_pvals.tsv'
         pymol_rvas(info_tsv, df_rvas, reference_directory, results_directory)
-        pymol_scan_test(info_tsv, df_rvas, df_results, reference_directory, results_directory)
+        pymol_scan_test(info_tsv, df_rvas, uniprot_id, reference_directory, results_directory)
         cmd.reinitialize()
 reference_directory = '../sir-reference-data/'
 results_directory = 'results/'
