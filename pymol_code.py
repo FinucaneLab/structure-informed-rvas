@@ -429,3 +429,4 @@ def run_all(results_directory, reference_directory, info_tsv=None):
 reference_directory = './'
 results_directory = 'results/'
 run_all(results_directory, reference_directory)
+
