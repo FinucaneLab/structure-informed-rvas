@@ -103,7 +103,7 @@ def compute_fdr(results_dir, large_p_threshold = 0.05):
 
 def write_df_pvals(results_dir, uniprot_id, df_pvals):
     with h5py.File(os.path.join(results_dir, 'p_values.h5'), 'a') as fid:
-        uniprot_id = f.split('/')[-1].split('.')[0]
+        # uniprot_id = f.split('/')[-1].split('.')[0]
         null_pval_cols = [c for c in df_pvals.columns if c.startswith('null_pval')]
         write_dataset(fid, f'{uniprot_id}', df_pvals[['p_value', 'ratio']])
         write_dataset(fid, f'{uniprot_id}_null_pval', df_pvals[null_pval_cols])
@@ -125,21 +125,21 @@ def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims):
     n_proteins = len(uniprot_id_list)
     for i, uniprot_id in enumerate(uniprot_id_list):
         print('\n', uniprot_id, f'number {i} out of {n_proteins}')
-        try:
-            df = df_rvas[df_rvas.uniprot_id == uniprot_id]
-            if len(np.unique(df.pdb_filename)) > 1:
-                print('skipping when there is more than one pdb file')
-                continue
-            pdb_filename = np.unique(df.pdb_filename)[0]
-            df = df[df.pdb_filename == pdb_filename].reset_index(drop=True)
-            full_pdb_filename = os.path.join(reference_dir, 'pdb_files', pdb_filename)
-            if not os.path.isfile(full_pdb_filename):
-                print('missing pdb file. skipping.')
-                continue
-            scan_test_one_protein(df, full_pdb_filename, results_dir, uniprot_id, radius, n_sims)
-        except Exception as e:
-            print(f'Error for {uniprot_id}: {e}')
+        # try:
+        df = df_rvas[df_rvas.uniprot_id == uniprot_id]
+        if len(np.unique(df.pdb_filename)) > 1:
+            print('skipping when there is more than one pdb file')
             continue
+        pdb_filename = np.unique(df.pdb_filename)[0]
+        df = df[df.pdb_filename == pdb_filename].reset_index(drop=True)
+        full_pdb_filename = os.path.join(reference_dir, 'pdb_files', pdb_filename)
+        if not os.path.isfile(full_pdb_filename):
+            print('missing pdb file. skipping.')
+            continue
+        scan_test_one_protein(df, full_pdb_filename, results_dir, uniprot_id, radius, n_sims)
+        # except Exception as e:
+        #     print(f'Error for {uniprot_id}: {e}')
+        #     continue
     df_results = compute_fdr(results_dir)
     df_results.to_csv(os.path.join(results_dir, 'all_proteins.fdr.tsv'), sep='\t', index=False)
     
