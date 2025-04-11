@@ -38,6 +38,8 @@ def valid_for_fisher(contingency_table):
         return False
 
 def write_dataset(fid, name, data, clevel=5):
+    if name in fid:
+        del fid[name]
     dset = fid.create_dataset(
         name,
         data = data,
