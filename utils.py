@@ -1,7 +1,9 @@
 import numpy as np
+import pandas as pd
 from Bio.PDB import PDBParser
 import gzip
 import sklearn.metrics
+import hdf5plugin
 
 def get_pairwise_distances(pdb_file):
     parser = PDBParser(QUIET=True)
@@ -35,17 +37,25 @@ def valid_for_fisher(contingency_table):
     else:
         return False
 
-def get_pairwise_distance_matrix(pdb_file):
-    '''
-    return all pairwise distances
-    '''
-    
-def fdr_uncorrelated():
-    '''
-    compute fdr from a list of p-values. used to correct across genes.
-    '''
+def write_dataset(fid, name, data, clevel=5):
+    dset = fid.create_dataset(
+        name,
+        data = data,
+        compression = hdf5plugin.Zstd(clevel=clevel)
+    )
 
-def empirical_fdr():
-    '''
-    compute fdr from null permutations
-    '''
+
+def read_p_values(fid, uniprot_id):
+    """
+    Reads the p values for one uniprot_id from an HDF5 results file,
+    with the exception of the null values.
+    """
+    pvalue_ratio = fid[uniprot_id][:]
+    case_control = fid[f'{uniprot_id}_nbhd'][:]
+    df = pd.DataFrame({'uniprot_id': uniprot_id,
+                       'aa_pos': np.arange(1, pvalue_ratio.shape[0]+1),
+                       'p_value': pvalue_ratio[:, 0],
+                       'ratio': pvalue_ratio[:, 1],
+                       'nbhd_case': case_control[:, 0],
+                       'nbhd_control': case_control[:, 1]})
+    return df

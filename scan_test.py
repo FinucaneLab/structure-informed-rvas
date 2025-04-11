@@ -3,8 +3,9 @@ import pandas as pd
 import numpy as np
 import glob
 import bisect
+import h5py
 from scipy.stats import fisher_exact, binom
-from utils import get_adjacency_matrix, valid_for_fisher
+from utils import get_adjacency_matrix, valid_for_fisher, write_dataset, read_p_values
     
 def get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_ctrl):
     max_n_case_nbhd = np.max(n_case_nbhd_mat)
@@ -77,42 +78,51 @@ def get_all_pvals(
     df_pvals['nbhd_case'] = n_case_nbhd_mat[:,0]
     df_pvals['nbhd_control'] = n_control_nbhd_mat[:,0]
     df_pvals['ratio'] = (df_pvals['nbhd_case'] + 2) / (df_pvals['nbhd_control'] + 2 * n_control / n_case)
-    df_pvals['aa_pos'] = 1+np.arange(len(df_pvals))
-    df_pvals = df_pvals[['aa_pos', 'nbhd_case', 'nbhd_control'] + pval_columns + ['ratio']]
+    df_pvals = df_pvals[['nbhd_case', 'nbhd_control'] + pval_columns + ['ratio']]
     return df_pvals, adjacency_matrix
 
-def compute_fdr(results_dir):
+def compute_fdr(results_dir, large_p_threshold = 0.05):
     to_concat = []
-    file_list = glob.glob(f'{results_dir}/*.df_pvals.tsv')
-    for i, f in enumerate(file_list):
-        print(i, len(file_list))
-        uniprot_id = f.split('/')[-1].split('.')[0]
-        df = pd.read_csv(f, sep='\t')
-        df['uniprot_id'] = uniprot_id
-        to_concat.append(df)
-    df_pvals = pd.concat(to_concat)
-    null_pval_cols = [c for c in df_pvals.columns if c.startswith('null_pval')]
-    null_ps = df_pvals.loc[:, null_pval_cols].values
-    null_ps = np.sort(null_ps.flatten())
-    n_sims = len(null_pval_cols)
-    df_pvals.drop(null_pval_cols, inplace=True, axis=1)
-    df_pvals = df_pvals.sort_values(by='p_value').reset_index(drop=True)
-    false_discoveries_avg = [bisect.bisect_right(null_ps, p)/n_sims for p in df_pvals.p_value]
+    with h5py.File(os.path.join(results_dir, 'p_values.h5'), 'a') as fid:
+        uniprot_ids = [k for k in fid.keys() if '_' not in k]
+        for uniprot_id in uniprot_ids:
+            df = read_p_values(fid, uniprot_id)
+            to_concat.append(df)
+        df_pvals = pd.concat(to_concat)
+        to_concat = None
+        df_pvals = df_pvals.sort_values(by='p_value').reset_index(drop=True)
+        
+        false_discoveries_avg = np.zeros(df_pvals.shape[0])
+        num_large_p = 0
+        for uniprot_id in uniprot_ids:
+            null_pvals = fid[f'{uniprot_id}_null_pval'][:].flatten()
+            num_large_p += np.sum( null_pvals >= large_p_threshold )
+            null_pvals = null_pvals[ null_pvals < large_p_threshold ]
+            null_pvals = np.sort(null_pvals)
+            n_sims = fid[f'{uniprot_id}_null_pval'].shape[1]
+            false_discoveries_avg += [bisect.bisect_right(null_pvals, p)/n_sims if p<=large_p_threshold else df_pvals.shape[0] for p in df_pvals.p_value]
     df_pvals['false_discoveries_avg'] = false_discoveries_avg
     df_pvals['fdr'] = [x / (i+1) for i, x in enumerate(false_discoveries_avg)]
     df_pvals['fdr'] = df_pvals['fdr'][::-1].cummin()[::-1]
     df_results = df_pvals[['uniprot_id', 'aa_pos', 'p_value', 'fdr', 'nbhd_case', 'nbhd_control', 'ratio']]
     return df_results
 
-def scan_test_one_protein(df, pdb_file, results_prefix, radius, n_sims):
+def write_df_pvals(results_dir, uniprot_id, df_pvals):
+    with h5py.File(os.path.join(results_dir, 'p_values.h5'), 'a') as fid:
+        # uniprot_id = f.split('/')[-1].split('.')[0]
+        null_pval_cols = [c for c in df_pvals.columns if c.startswith('null_pval')]
+        write_dataset(fid, f'{uniprot_id}', df_pvals[['p_value', 'ratio']])
+        write_dataset(fid, f'{uniprot_id}_null_pval', df_pvals[null_pval_cols])
+        write_dataset(fid, f'{uniprot_id}_nbhd', df_pvals[['nbhd_case', 'nbhd_control']])
+
+def scan_test_one_protein(df, pdb_file, results_dir, uniprot_id, radius, n_sims):
+    results_prefix = os.path.join(results_dir, 'uniprot_id')
     df_pvals, adj_mat = get_all_pvals(df, pdb_file, n_sims, radius)
     print('saving adj mat')
     np.save(f'{results_prefix}.adj_mat.npy', adj_mat)
     print('printing df_rvas')
     df.to_csv(f'{results_prefix}.df_rvas.tsv', sep='\t', index=False)
-    print('printing pvals')
-    df_pvals.to_csv(f'{results_prefix}.df_pvals.tsv', sep='\t', index=False)
-    print('done')
+    write_df_pvals(results_dir, uniprot_id, df_pvals)
 
 def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims, no_fdr):
     '''
@@ -130,16 +140,15 @@ def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims, no_fdr):
                 continue
             pdb_filename = np.unique(df.pdb_filename)[0]
             df = df[df.pdb_filename == pdb_filename].reset_index(drop=True)
-            full_pdb_filename = f'{reference_dir}/pdb_files/{pdb_filename}'
-            if not os.path.exists(full_pdb_filename):
+            full_pdb_filename = os.path.join(reference_dir, 'pdb_files', pdb_filename)
+            if not os.path.isfile(full_pdb_filename):
                 print('missing pdb file. skipping.')
                 continue
-            results_prefix = f'{results_dir}/{uniprot_id}'
-            scan_test_one_protein(df, full_pdb_filename, results_prefix, radius, n_sims)
+            scan_test_one_protein(df, full_pdb_filename, results_dir, uniprot_id, radius, n_sims)
         except Exception as e:
             print(f'Error for {uniprot_id}: {e}')
             continue
     if not no_fdr:
         df_results = compute_fdr(results_dir)
-        df_results.to_csv(f'{results_dir}/all_proteins.fdr.tsv', sep='\t', index=False)
+        df_results.to_csv(os.path.join(results_dir, 'all_proteins.fdr.tsv'), sep='\t', index=False)
     

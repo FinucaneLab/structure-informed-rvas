@@ -29,7 +29,7 @@ def annotation_test(
         expanded_annot_residues = list()
         for ipdb in annot_residues_file.pdb_filename.unique():
             pdb_file = f'{reference_directory}/{ipdb}'
-            if not os.path.exists(pdb_file):
+            if not os.path.isfile(pdb_file):
                 return None
     
             parser = PDBParser(QUIET=True)
