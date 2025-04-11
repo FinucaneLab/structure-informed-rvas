@@ -7,8 +7,9 @@ import gzip
 from Bio.PDB import PDBParser
 from Bio.PDB import StructureBuilder, PDBIO, Model, Chain
 from moviepy import VideoFileClip, clips_array
+import re
 
-from utils import read_p_values
+# from utils import read_p_values
 
 def write_full_pdb(full_pdb, output_path):
     try:
@@ -43,7 +44,8 @@ def get_one_pdb(info_tsv, uniprot_id, reference_directory):
         info_df['pos_covered'] = info_df['pos_covered'].apply(ast.literal_eval)
         pdbs = [item for item in os.listdir(reference_directory) if item.endswith('.gz') and uniprot_id in item]
         full_pdb = []
-        pdbs.sort(key=lambda item: item.split('-')[2][-1])
+        pdbs.sort(key=lambda item: int(re.findall(r'\d+', item.split('-')[2])[0]))
+
         for item in pdbs:
             p = os.path.join(reference_directory, item)
             print('Reading pdb:', p)
@@ -53,7 +55,9 @@ def get_one_pdb(info_tsv, uniprot_id, reference_directory):
                     structure = PDBParser(QUIET=True).get_structure("protein", handle)
                 residues = [res for model in structure for chain in model for res in chain]
                 
-                if 'F1' in item:
+                num = re.findall(r'\d+', item.split('-')[2])
+
+                if int(num[0]) == 1:
                     full_pdb.extend(residues)
                     current_res_id = full_pdb[-1].id[1]
 
@@ -429,4 +433,5 @@ def run_all(results_directory, reference_directory, info_tsv=None):
 reference_directory = './'
 results_directory = 'results/'
 run_all(results_directory, reference_directory)
+
 
