@@ -170,7 +170,7 @@ def compute_fdr(results_dir, df_fdr_filter, large_p_threshold = 0.05):
         num_large_p = 0
         for uniprot_id in uniprot_ids:
             null_pvals = fid[f'{uniprot_id}_null_pval'][:]
-            if df_fdr_filter is not None:
+            if index_filter is not None:
                 f = index_filter[uniprot_id]
                 null_pvals = null_pvals[f,:]
             null_pvals = null_pvals.flatten()
