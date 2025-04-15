@@ -146,6 +146,7 @@ def compute_fdr(results_dir, df_fdr_filter, large_p_threshold = 0.05):
     to_concat = []
 
     index_filter = None
+    uniprot_filter_list = None
     if df_fdr_filter is not None:
         uniprot_filter_list = np.unique(df_fdr_filter['uniprot_id'])
         if 'aa_pos' in df_fdr_filter.columns:
@@ -153,7 +154,8 @@ def compute_fdr(results_dir, df_fdr_filter, large_p_threshold = 0.05):
     
     with h5py.File(os.path.join(results_dir, 'p_values.h5'), 'a') as fid:
         uniprot_ids = [k for k in fid.keys() if '_' not in k]
-        uniprot_ids = list(set(uniprot_ids) & set(uniprot_filter_list))
+        if uniprot_filter_list is not None:
+            uniprot_ids = list(set(uniprot_ids) & set(uniprot_filter_list))
         for uniprot_id in uniprot_ids:
             df = read_p_values(fid, uniprot_id)
             
