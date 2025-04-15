@@ -112,10 +112,10 @@ if __name__ == '__main__':
         help='use this flag if you *do* want to include variants with AC>10.'
     )
     parser.add_argument(
-        '--df-aa-pos',
+        '--df-fdr-filter',
         type=str,
         default=None,
-        help='tsv with columns uniprot_id and aa_pos to filter to during fdr computation'
+        help='tsv to filter to during fdr computation. must have uniprot_id and can also have aa_pos column.'
     )
     parser.add_argument(
         '--no-fdr',
@@ -166,10 +166,15 @@ if __name__ == '__main__':
     if (df_rvas is not None) and (not args.no_ac_filter):
         df_rvas = df_rvas[df_rvas.ac_case + df_rvas.ac_control < 10]
 
-    if args.df_aa_pos is not None:
-        df_aa_pos = pd.read_csv(args.df_aa_pos, sep='\t').drop_duplicates()
+    if args.df_fdr_filter is not None:
+        df_fdr_filter = pd.read_csv(args.df_fdr_filter, sep='\t')
+        if 'aa_pos' in df_fdr_filter.columns:
+            df_fdr_filter = df_fdr_filter[['uniprot_id', 'aa_pos']]
+        else:
+            df_fdr_filter = df_fdr_filter[['uniprot_id']]
+        df_fdr_filter = df_fdr_filter.drop_duplicates()
     else:
-        df_aa_pos = None
+        df_fdr_filter = None
 
     if args.scan_test: 
         scan_test(
@@ -180,7 +185,7 @@ if __name__ == '__main__':
             args.n_sims,
             args.no_fdr,
             args.fdr_only,
-            df_aa_pos,
+            df_fdr_filter,
         )
     
     elif args.clinvar_test:

@@ -5,9 +5,10 @@ import glob
 import bisect
 import h5py
 from scipy.stats import fisher_exact, binom
+from scipy import special
 from utils import get_adjacency_matrix, valid_for_fisher, write_dataset, read_p_values
     
-def get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_ctrl):
+def get_pval_lookup_case_control_old(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_ctrl):
     max_n_case_nbhd = np.max(n_case_nbhd_mat)
     max_n_control_nbhd = np.max(n_control_nbhd_mat)
     pvals = np.ones((max_n_case_nbhd+1, max_n_control_nbhd+1))
@@ -20,6 +21,71 @@ def get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_
             if valid_for_fisher(contingency_table):
                 _, p = fisher_exact(contingency_table)
                 pvals[n_case_nbhd, n_ctrl_nbhd] = p
+    return pvals
+
+def get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_ctrl):
+    # from Claude
+    max_n_case_nbhd = np.max(n_case_nbhd_mat)
+    max_n_control_nbhd = np.max(n_control_nbhd_mat)
+    
+    # Create the output array - default to 1.0 for all p-values
+    pvals = np.ones((max_n_case_nbhd+1, max_n_control_nbhd+1))
+    
+    # Create meshgrid for all combinations
+    case_nbhd_range = np.arange(max_n_case_nbhd + 1)
+    ctrl_nbhd_range = np.arange(max_n_control_nbhd + 1)
+    n_case_grid, n_ctrl_grid = np.meshgrid(case_nbhd_range, ctrl_nbhd_range, indexing='ij')
+    
+    # Calculate all values needed for Fisher's exact test
+    a = n_case_grid
+    b = n_ctrl_grid
+    c = n_case - a
+    d = n_ctrl - b
+    
+    # Construct contingency tables for validity check
+    col1_sum = a + c
+    col2_sum = b + d
+    valid_columns = (col1_sum > 0) & (col2_sum > 0)
+    
+    row1_sum = a + b
+    row2_sum = c + d
+    valid_rows = (row1_sum > 0) & (row2_sum > 0)
+    
+    all_non_neg = (a >= 0) & (b >= 0) & (c >= 0) & (d >= 0)
+    
+    # Combine all validity criteria
+    valid_mask = valid_columns & valid_rows & all_non_neg
+    
+    # First-pass filter: Use Chi-square approximation to identify potential candidates
+    # Calculate expected values under null hypothesis
+    n_total = n_case + n_ctrl
+    expected_a = row1_sum * col1_sum / n_total
+    expected_b = row1_sum * col2_sum / n_total
+    expected_c = row2_sum * col1_sum / n_total
+    expected_d = row2_sum * col2_sum / n_total
+    
+    # Chi-square statistic - zeroing out invalid positions
+    valid_array = valid_mask.astype(float)
+    chi2 = valid_array * (
+        ((a - expected_a)**2 / np.maximum(1e-10, expected_a)) + 
+        ((b - expected_b)**2 / np.maximum(1e-10, expected_b)) + 
+        ((c - expected_c)**2 / np.maximum(1e-10, expected_c)) + 
+        ((d - expected_d)**2 / np.maximum(1e-10, expected_d))
+    )
+    
+    # Use a more lenient threshold for chi-square to catch all potential p < 0.05
+    # chi2_threshold corresponds to p-value slightly higher than 0.05 (e.g., 0.1)
+    # For df=1, chi2 value of 2.706 corresponds to p=0.1
+    chi2_threshold = 2.706
+    potential_significant = (chi2 > chi2_threshold) & valid_mask
+    
+    # Second pass: Calculate exact p-values only for potentially significant cells
+    indices = np.where(potential_significant)
+    for i, j in zip(indices[0], indices[1]):
+        table = np.array([[i, j], [n_case - i, n_ctrl - j]])
+        _, p = fisher_exact(table)
+        pvals[i, j] = p
+    
     return pvals
 
 def get_nbhd_counts(adjacency_matrix, ac_per_residue):
@@ -60,19 +126,13 @@ def get_all_pvals(
     adjacency_matrix = get_adjacency_matrix(pdb_file, radius)
     n_res = adjacency_matrix.shape[0]
     
-    print('getting case control ac matrix')
     case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(df, n_res, n_sims)
-    print('done')
     n_case = case_ac_matrix[:,0].sum()
     n_control = control_ac_matrix[:,0].sum()
-    print('getting nbhd counts')
     n_case_nbhd_mat = get_nbhd_counts(adjacency_matrix, case_ac_matrix)
     n_control_nbhd_mat = get_nbhd_counts(adjacency_matrix, control_ac_matrix)
-    print('getting pval lookup')
     pval_lookup = get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_control)
-    print('getting pval matrix')
     pval_matrix = pval_lookup[n_case_nbhd_mat, n_control_nbhd_mat]
-    print('done')
     pval_columns = ['p_value'] + [f'null_pval_{i}' for i in range(n_sims)]
     df_pvals = pd.DataFrame(columns = pval_columns, data = pval_matrix)
     df_pvals['nbhd_case'] = n_case_nbhd_mat[:,0]
@@ -81,19 +141,24 @@ def get_all_pvals(
     df_pvals = df_pvals[['nbhd_case', 'nbhd_control'] + pval_columns + ['ratio']]
     return df_pvals, adjacency_matrix
 
-def compute_fdr(results_dir, df_aa_pos, large_p_threshold = 0.05):
+def compute_fdr(results_dir, df_fdr_filter, large_p_threshold = 0.05):
     print('computing fdr')
     to_concat = []
 
-    if df_aa_pos is not None:
-        index_filter = {}
+    index_filter = None
+    if df_fdr_filter is not None:
+        uniprot_filter_list = np.unique(df_fdr_filter['uniprot_id'])
+        if 'aa_pos' in df_fdr_filter.columns:
+            index_filter = {}
+    
     with h5py.File(os.path.join(results_dir, 'p_values.h5'), 'a') as fid:
         uniprot_ids = [k for k in fid.keys() if '_' not in k]
+        uniprot_ids = list(set(uniprot_ids) & set(uniprot_filter_list))
         for uniprot_id in uniprot_ids:
             df = read_p_values(fid, uniprot_id)
             
-            if df_aa_pos is not None:
-                aa_pos_keep = set(df_aa_pos.loc[df_aa_pos.uniprot_id == uniprot_id, 'aa_pos'].values)
+            if index_filter is not None:
+                aa_pos_keep = set(df_fdr_filter.loc[df_fdr_filter.uniprot_id == uniprot_id, 'aa_pos'].values)
                 index_filter[uniprot_id] = np.array([x+1 in aa_pos_keep for x in range(len(df))])
                 df = df[index_filter[uniprot_id]]
             to_concat.append(df)
@@ -105,7 +170,7 @@ def compute_fdr(results_dir, df_aa_pos, large_p_threshold = 0.05):
         num_large_p = 0
         for uniprot_id in uniprot_ids:
             null_pvals = fid[f'{uniprot_id}_null_pval'][:]
-            if df_aa_pos is not None:
+            if df_fdr_filter is not None:
                 f = index_filter[uniprot_id]
                 null_pvals = null_pvals[f,:]
             null_pvals = null_pvals.flatten()
@@ -129,15 +194,13 @@ def write_df_pvals(results_dir, uniprot_id, df_pvals):
         write_dataset(fid, f'{uniprot_id}_nbhd', df_pvals[['nbhd_case', 'nbhd_control']])
 
 def scan_test_one_protein(df, pdb_file, results_dir, uniprot_id, radius, n_sims):
-    results_prefix = os.path.join(results_dir, 'uniprot_id')
+    results_prefix = os.path.join(results_dir, uniprot_id)
     df_pvals, adj_mat = get_all_pvals(df, pdb_file, n_sims, radius)
-    print('saving adj mat')
     np.save(f'{results_prefix}.adj_mat.npy', adj_mat)
-    print('printing df_rvas')
     df.to_csv(f'{results_prefix}.df_rvas.tsv', sep='\t', index=False)
     write_df_pvals(results_dir, uniprot_id, df_pvals)
 
-def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims, no_fdr, fdr_only, df_aa_pos):
+def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims, no_fdr, fdr_only, df_fdr_filter):
     '''
     df_rvas is the output of map_to_protein. reference_dir has the pdb structures. this function
     should perform the scan test for all proteins and return a data frame with all the results.
@@ -145,13 +208,13 @@ def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims, no_fdr, fdr_o
     print('performing scan test')
 
     if fdr_only:
-        df_results = compute_fdr(results_dir, df_aa_pos)
+        df_results = compute_fdr(results_dir, df_fdr_filter)
         df_results.to_csv(os.path.join(results_dir, 'all_proteins.fdr.tsv'), sep='\t', index=False)
         return
     
     uniprot_id_list = np.unique(df_rvas.uniprot_id)
-    if df_aa_pos is not None:
-        uniprot_id_list = np.intersect1d(uniprot_id_list, np.unique(df_aa_pos.uniprot_id))
+    if df_fdr_filter is not None:
+        uniprot_id_list = np.intersect1d(uniprot_id_list, np.unique(df_fdr_filter.uniprot_id))
         
 
     n_proteins = len(uniprot_id_list)
@@ -173,6 +236,6 @@ def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims, no_fdr, fdr_o
             print(f'Error for {uniprot_id}: {e}')
             continue
     if not no_fdr:
-        df_results = compute_fdr(results_dir, df_aa_pos)
+        df_results = compute_fdr(results_dir, df_fdr_filter)
         df_results.to_csv(os.path.join(results_dir, 'all_proteins.fdr.tsv'), sep='\t', index=False)
     
