@@ -26,7 +26,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--rvas-data-mapped',
         type=str,
-        default='None',
+        default=None,
         help='''
             data frame that already includes uniprot canonical coordinates
             include exactly one of --rvas-data-to-map or --rvas-data-mapped.
@@ -112,10 +112,22 @@ if __name__ == '__main__':
         help='use this flag if you *do* want to include variants with AC>10.'
     )
     parser.add_argument(
+        '--df-fdr-filter',
+        type=str,
+        default=None,
+        help='tsv to filter to during fdr computation. must have uniprot_id and can also have aa_pos column.'
+    )
+    parser.add_argument(
         '--no-fdr',
         action='store_true',
         default=False,
         help='skip fdr computation for scan test.'
+    )
+    parser.add_argument(
+        '--fdr-only',
+        action='store_true',
+        default=False,
+        help='only compute the scan test fdr from a directory of results'
     )
     args = parser.parse_args()
 
@@ -139,9 +151,11 @@ if __name__ == '__main__':
             'Uniprot_ID': 'uniprot_id',
         })
     else:
-        raise Exception('either --rvas-data-to-map or --rvas-data-mapped must be defined')
+        df_rvas = None
+
     if args.pdb_filename is not None:
         df_rvas['pdb_filename'] = args.pdb_filename
+
     if not args.which_proteins=='all':
         if os.path.exists(args.which_proteins):
             which_proteins = [x.rstrip() for x in open(args.which_proteins).readlines()]
@@ -149,11 +163,30 @@ if __name__ == '__main__':
             which_proteins = args.which_proteins.split(',')
         df_rvas = df_rvas[df_rvas.uniprot_id.isin(which_proteins)]
 
-    if not args.no_ac_filter:
+    if (df_rvas is not None) and (not args.no_ac_filter):
         df_rvas = df_rvas[df_rvas.ac_case + df_rvas.ac_control < 10]
 
-    if args.scan_test:
-        scan_test(df_rvas, args.reference_dir, args.neighborhood_radius, args.results_dir, args.n_sims, args.no_fdr)
+    if args.df_fdr_filter is not None:
+        df_fdr_filter = pd.read_csv(args.df_fdr_filter, sep='\t')
+        if 'aa_pos' in df_fdr_filter.columns:
+            df_fdr_filter = df_fdr_filter[['uniprot_id', 'aa_pos']]
+        else:
+            df_fdr_filter = df_fdr_filter[['uniprot_id']]
+        df_fdr_filter = df_fdr_filter.drop_duplicates()
+    else:
+        df_fdr_filter = None
+
+    if args.scan_test: 
+        scan_test(
+            df_rvas,
+            args.reference_dir,
+            args.neighborhood_radius,
+            args.results_dir,
+            args.n_sims,
+            args.no_fdr,
+            args.fdr_only,
+            df_fdr_filter,
+        )
     
     elif args.clinvar_test:
         print('Performing ClinVar test.')
