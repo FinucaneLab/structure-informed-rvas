@@ -141,7 +141,7 @@ def get_all_pvals(
     df_pvals = df_pvals[['nbhd_case', 'nbhd_control'] + pval_columns + ['ratio']]
     return df_pvals, adjacency_matrix
 
-def compute_fdr(results_dir, df_fdr_filter, large_p_threshold = 0.05):
+def compute_fdr(results_dir, df_fdr_filter, large_p_threshold = 0.001):
     print('computing fdr')
     to_concat = []
 
@@ -156,31 +156,46 @@ def compute_fdr(results_dir, df_fdr_filter, large_p_threshold = 0.05):
         uniprot_ids = [k for k in fid.keys() if '_' not in k]
         if uniprot_filter_list is not None:
             uniprot_ids = list(set(uniprot_ids) & set(uniprot_filter_list))
+
+        print('reading pvals')
         for uniprot_id in uniprot_ids:
             df = read_p_values(fid, uniprot_id)
-            
             if index_filter is not None:
                 aa_pos_keep = set(df_fdr_filter.loc[df_fdr_filter.uniprot_id == uniprot_id, 'aa_pos'].values)
                 index_filter[uniprot_id] = np.array([x+1 in aa_pos_keep for x in range(len(df))])
                 df = df[index_filter[uniprot_id]]
             to_concat.append(df)
+        n_sims = fid[f'{uniprot_id}_null_pval'].shape[1]
+
+        print('concatenating and sorting p-vals')
         df_pvals = pd.concat(to_concat)
-        to_concat = None
         df_pvals = df_pvals.sort_values(by='p_value').reset_index(drop=True)
         
+        print('computing average false discoveries')
+        mask = df_pvals.p_value <= large_p_threshold
         false_discoveries_avg = np.zeros(df_pvals.shape[0])
-        num_large_p = 0
-        for uniprot_id in uniprot_ids:
-            null_pvals = fid[f'{uniprot_id}_null_pval'][:]
+        
+        null_pvals = []
+        for i, uniprot_id in enumerate(uniprot_ids):
+            null_pvals_one_uniprot = fid[f'{uniprot_id}_null_pval'][:]
             if index_filter is not None:
                 f = index_filter[uniprot_id]
-                null_pvals = null_pvals[f,:]
-            null_pvals = null_pvals.flatten()
-            num_large_p += np.sum( null_pvals >= large_p_threshold )
-            null_pvals = null_pvals[ null_pvals < large_p_threshold ]
-            null_pvals = np.sort(null_pvals)
-            n_sims = fid[f'{uniprot_id}_null_pval'].shape[1]
-            false_discoveries_avg += [bisect.bisect_right(null_pvals, p)/n_sims if p<=large_p_threshold else df_pvals.shape[0] for p in df_pvals.p_value]
+                null_pvals_one_uniprot = null_pvals_one_uniprot[f,:]
+            null_pvals_one_uniprot = null_pvals_one_uniprot.flatten()
+            null_pvals.extend(null_pvals_one_uniprot[ null_pvals_one_uniprot < large_p_threshold ])
+            
+            
+            if (i%100 == 99) or (i == (len(uniprot_ids) - 1)):
+                print(f'computing false discoveries from protein {i} out of {len(uniprot_ids)}')
+                null_pvals = np.sort(np.array(null_pvals))
+                false_disc = np.empty(len(df_pvals.p_value))
+                if np.any(mask):
+                    false_disc[mask] = np.searchsorted(null_pvals, df_pvals.p_value[mask], side='right') / n_sims
+                if np.any(~mask):
+                    false_disc[~mask] = df_pvals.shape[0]
+                false_discoveries_avg += false_disc.tolist()
+                null_pvals = []
+    print('computing fdr')
     df_pvals['false_discoveries_avg'] = false_discoveries_avg
     df_pvals['fdr'] = [x / (i+1) for i, x in enumerate(false_discoveries_avg)]
     df_pvals['fdr'] = df_pvals['fdr'][::-1].cummin()[::-1]
@@ -226,6 +241,9 @@ def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims, no_fdr, fdr_o
             df = df_rvas[df_rvas.uniprot_id == uniprot_id]
             if len(np.unique(df.pdb_filename)) > 1:
                 print('skipping when there is more than one pdb file')
+                continue
+            if (sum(df.ac_case) < 5) or (sum(df.ac_control) < 5):
+                print('there must be at least 5 case and 5 control alleles. skipping.')
                 continue
             pdb_filename = np.unique(df.pdb_filename)[0]
             df = df[df.pdb_filename == pdb_filename].reset_index(drop=True)
