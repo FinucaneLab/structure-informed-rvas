@@ -11,7 +11,7 @@ import re
 
 # from utils import read_p_values
 
-def write_full_pdb(full_pdb, output_path):
+def write_full_pdb(full_pdb, output_path, pdb_overlap = 1200):
     try:
         builder = StructureBuilder.StructureBuilder()
         builder.init_structure("new_structure")
@@ -22,7 +22,7 @@ def write_full_pdb(full_pdb, output_path):
         chain = model['A']
 
         for residue in full_pdb:
-            if residue.id[1] == 1201:
+            if residue.id[1] == pdb_overlap + 1:
                 print(residue)
             chain.add(residue.copy())  
 
@@ -33,7 +33,7 @@ def write_full_pdb(full_pdb, output_path):
         print(f"[ERROR] Failed to write PDB file: {e}")
 
 
-def get_one_pdb(info_tsv, uniprot_id, reference_directory):
+def get_one_pdb(info_tsv, uniprot_id, reference_directory, pdb_overlap = 1200):
     info_tsv_p = os.path.join(reference_directory, info_tsv)
     try:
         info_df = pd.read_csv(info_tsv_p, sep='\t')
@@ -42,27 +42,26 @@ def get_one_pdb(info_tsv, uniprot_id, reference_directory):
             return
     
         info_df['pos_covered'] = info_df['pos_covered'].apply(ast.literal_eval)
-        pdbs = [item for item in os.listdir(reference_directory) if item.endswith('.gz') and uniprot_id in item]
+        pdbs = [{'filename': item, 'index': int(re.findall(r'\d+', item.split('-')[2])[0])}
+                     for item in glob.glob(f'{reference_directory}/*{uniprot_id}*.gz')]
         full_pdb = []
-        pdbs.sort(key=lambda item: int(re.findall(r'\d+', item.split('-')[2])[0]))
+        pdbs.sort(key=lambda pdb: pdb['index'])
 
-        for item in pdbs:
-            p = os.path.join(reference_directory, item)
-            print('Reading pdb:', p)
+        for pdb in pdbs:
+            path = os.path.join(reference_directory, pdb['filename'])
+            print('Reading pdb:', path)
 
             try:
-                with gzip.open(p, "rt") as handle:
+                with gzip.open(path, "rt") as handle:
                     structure = PDBParser(QUIET=True).get_structure("protein", handle)
                 residues = [res for model in structure for chain in model for res in chain]
                 
-                num = re.findall(r'\d+', item.split('-')[2])
-
-                if int(num[0]) == 1:
+                if pdb['index'] == 1:
                     full_pdb.extend(residues)
                     current_res_id = full_pdb[-1].id[1]
 
                 else:
-                    new_residue = residues[1200:]
+                    new_residue = residues[pdb_overlap:]
                     for i, res in enumerate(new_residue):
                         res_id = list(res.id)
                         res_id[1] = current_res_id + 1
@@ -74,7 +73,7 @@ def get_one_pdb(info_tsv, uniprot_id, reference_directory):
                 print(f"[ERROR] Failed to parse {p}: {e}")
 
         output_path = os.path.join(reference_directory, 'pdb_files', uniprot_id + '.pdb')
-        write_full_pdb(full_pdb, output_path)
+        write_full_pdb(full_pdb, output_path, pdb_overlap)
 
     except Exception as e:
         print(f"[ERROR] in get_one_pdb(): {e}")
