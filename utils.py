@@ -77,11 +77,6 @@ def get_distance_matrix_structure(pdb_file_pos_guide, pdb_dir, uniprot_id):
             i_in_pdb = i-(info.startAA[pdb]-1)
             j_in_pdb = j-(info.startAA[pdb]-1)
             nAA_in_pdb = j_in_pdb - i_in_pdb + 1
-            print(nAA_in_pdb)
-            print(i_in_pdb)
-            print(j_in_pdb)
-            print(cum_nAA)
-            print("\n")
             distance_matrix[cum_nAA:cum_nAA+nAA_in_pdb, cum_nAA:cum_nAA+nAA_in_pdb] = get_pairwise_distances(pathfile, i_in_pdb, j_in_pdb)
             cum_nAA = cum_nAA + nAA_in_pdb 
 
