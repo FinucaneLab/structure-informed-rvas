@@ -8,6 +8,11 @@ import os
 import re
 
 def get_pairwise_distances(pdb_file, *args):
+    # optional arguments i and j:
+    # i: start from aminoacid i (inclusive)
+    # j: end with aminoacid j (inclusive)
+    # if only one argument i is provided, it computes starting from i till the end of the chain
+    
     parser = PDBParser(QUIET=True)
     if pdb_file.endswith('.gz'):
         with gzip.open(pdb_file, 'rt') as handle:
