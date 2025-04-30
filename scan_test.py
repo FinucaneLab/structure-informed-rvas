@@ -143,67 +143,6 @@ def get_all_pvals(
     df_pvals = df_pvals[['nbhd_case', 'nbhd_control'] + pval_columns + ['ratio']]
     return df_pvals, adjacency_matrix
 
-def compute_fdr(results_dir, df_fdr_filter, large_p_threshold = 0.001):
-    print('computing fdr')
-    to_concat = []
-
-    index_filter = None
-    uniprot_filter_list = None
-    if df_fdr_filter is not None:
-        uniprot_filter_list = np.unique(df_fdr_filter['uniprot_id'])
-        if 'aa_pos' in df_fdr_filter.columns:
-            index_filter = {}
-    
-    with h5py.File(os.path.join(results_dir, 'p_values.h5'), 'a') as fid:
-        uniprot_ids = [k for k in fid.keys() if '_' not in k]
-        if uniprot_filter_list is not None:
-            uniprot_ids = list(set(uniprot_ids) & set(uniprot_filter_list))
-
-        print('reading pvals')
-        for uniprot_id in uniprot_ids:
-            df = read_p_values(fid, uniprot_id)
-            if index_filter is not None:
-                aa_pos_keep = set(df_fdr_filter.loc[df_fdr_filter.uniprot_id == uniprot_id, 'aa_pos'].values)
-                index_filter[uniprot_id] = np.array([x+1 in aa_pos_keep for x in range(len(df))])
-                df = df[index_filter[uniprot_id]]
-            to_concat.append(df)
-        n_sims = fid[f'{uniprot_id}_null_pval'].shape[1]
-
-        print('concatenating and sorting p-vals')
-        df_pvals = pd.concat(to_concat)
-        df_pvals = df_pvals.sort_values(by='p_value').reset_index(drop=True)
-        
-        print('computing average false discoveries')
-        mask = df_pvals.p_value <= large_p_threshold
-        false_discoveries_avg = np.zeros(df_pvals.shape[0])
-        
-        null_pvals = []
-        for i, uniprot_id in enumerate(uniprot_ids):
-            null_pvals_one_uniprot = fid[f'{uniprot_id}_null_pval'][:]
-            if index_filter is not None:
-                f = index_filter[uniprot_id]
-                null_pvals_one_uniprot = null_pvals_one_uniprot[f,:]
-            null_pvals_one_uniprot = null_pvals_one_uniprot.flatten()
-            null_pvals.extend(null_pvals_one_uniprot[ null_pvals_one_uniprot < large_p_threshold ])
-            
-            
-            if (i%100 == 99) or (i == (len(uniprot_ids) - 1)):
-                print(f'computing false discoveries from protein {i} out of {len(uniprot_ids)}')
-                null_pvals = np.sort(np.array(null_pvals))
-                false_disc = np.empty(len(df_pvals.p_value))
-                if np.any(mask):
-                    false_disc[mask] = np.searchsorted(null_pvals, df_pvals.p_value[mask], side='right') / n_sims
-                if np.any(~mask):
-                    false_disc[~mask] = df_pvals.shape[0]
-                false_discoveries_avg += false_disc.tolist()
-                null_pvals = []
-    print('computing fdr')
-    df_pvals['false_discoveries_avg'] = false_discoveries_avg
-    df_pvals['fdr'] = [x / (i+1) for i, x in enumerate(false_discoveries_avg)]
-    df_pvals['fdr'] = df_pvals['fdr'][::-1].cummin()[::-1]
-    df_results = df_pvals[['uniprot_id', 'aa_pos', 'p_value', 'fdr', 'nbhd_case', 'nbhd_control', 'ratio']]
-    return df_results
-
 def write_df_pvals(results_dir, uniprot_id, df_pvals):
     with h5py.File(os.path.join(results_dir, 'p_values.h5'), 'a') as fid:
         # uniprot_id = f.split('/')[-1].split('.')[0]
@@ -226,15 +165,139 @@ def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, results_dir, uniprot_
     df.to_csv(f'{results_prefix}.df_rvas.tsv', sep='\t', index=False)
     write_df_pvals(results_dir, uniprot_id, df_pvals)
 
-def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims, no_fdr, fdr_only, df_fdr_filter):
+def summarize_results(df_results, fdr_cutoff, reference_dir, annot_file):
+
+    if annot_file is not None:
+        print()
+        print('merging with annotations')
+        df_ba = pd.read_csv(annot_file, sep='\t')
+        df_ba_extra_cols = list([x for x in df_ba.columns if not x in ['uniprot_id', 'aa_pos']])
+        df_results = pd.merge(df_results, df_ba, how='left', indicator=True)
+        df_results['annotated'] = df_results['_merge'] == 'both'
+
+    df_gene = pd.read_csv(f'{reference_dir}/gene_to_uniprot_id.tsv', sep='\t')
+    df_results = df_results.merge(df_gene, how='left', on='uniprot_id')
+    
+    top_hits = df_results.loc[df_results.groupby('uniprot_id')['fdr'].idxmin()]
+    top_hits_sig = top_hits[top_hits.fdr<fdr_cutoff]
+    print()
+    print(f'''
+        {len(top_hits_sig)} out of {len(top_hits)} proteins have a neighborhood
+        significant at {fdr_cutoff}.
+    ''')
+    
+    if annot_file is not None:
+        overall_num_annot = df_results.annotated.sum()
+        overall_prop_annot = overall_num_annot / len(df_results)
+        df_sig = df_results[df_results.fdr<fdr_cutoff]
+        prop_sig_annot = df_sig.annotated.mean()
+        num_prot_with_sig_annot = df_sig.groupby('uniprot_id')['annotated'].max().sum()
+        num_proteins_sig = len(top_hits_sig)
+        top_hits_sig_annot = top_hits_sig.annotated.sum()
+        
+        c = [
+            [
+                top_hits_sig_annot,
+                num_proteins_sig - top_hits_sig_annot
+            ],[
+                overall_num_annot - top_hits_sig_annot,
+                len(df_results) - overall_num_annot - (num_proteins_sig - top_hits_sig_annot)
+            ]
+        ]
+        _, p = fisher_exact(c)
+
+        print('overall prop annotated:', overall_prop_annot)
+        print('proportion significant residues annotated:', prop_sig_annot)
+        print(f'{num_prot_with_sig_annot}/{num_proteins_sig} ({num_prot_with_sig_annot/num_proteins_sig*100}%) have a significant annotated residue.')
+        print(f'{top_hits_sig_annot}/{num_proteins_sig} ({top_hits_sig_annot/num_proteins_sig*100}%) top significant residues annotated.')
+        print(f'P = {p}')
+        print()
+
+        df_to_print = df_results.loc[
+                df_results.annotated & (df_results.fdr<fdr_cutoff),
+                ['gene_name', 'uniprot_id', 'p_value', 'fdr']+df_ba_extra_cols
+            ].drop_duplicates().copy()
+        df_to_print = df_to_print.loc[df_to_print.groupby('uniprot_id')['fdr'].idxmin()]
+        print(df_to_print[0:20]
+        )
+
+
+def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, annot_file=None, large_p_threshold=0.05):
+    print('computing fdr')
+    to_concat = []
+
+    index_filter = None
+    uniprot_filter_list = None
+    if df_fdr_filter is not None:
+        uniprot_filter_list = np.unique(df_fdr_filter['uniprot_id'])
+        if 'aa_pos' in df_fdr_filter.columns:
+            index_filter = {}
+    
+    with h5py.File(os.path.join(results_dir, 'p_values.h5'), 'a') as fid:
+        uniprot_ids = [k for k in fid.keys() if '_' not in k]
+        if uniprot_filter_list is not None:
+            uniprot_ids = list(set(uniprot_ids) & set(uniprot_filter_list))
+
+        print('  reading pvals')
+        for uniprot_id in uniprot_ids:
+            df = read_p_values(fid, uniprot_id)
+            if index_filter is not None:
+                aa_pos_keep = set(df_fdr_filter.loc[df_fdr_filter.uniprot_id == uniprot_id, 'aa_pos'].values)
+                index_filter[uniprot_id] = np.array([x+1 in aa_pos_keep for x in range(len(df))])
+                df = df[index_filter[uniprot_id]]
+            to_concat.append(df)
+        n_sims = fid[f'{uniprot_id}_null_pval'].shape[1]
+
+        print('  concatenating and sorting p-vals')
+        df_pvals = pd.concat(to_concat)
+        df_pvals = df_pvals.sort_values(by='p_value').reset_index(drop=True)
+        
+        print('  computing average false discoveries')
+        mask = df_pvals.p_value <= large_p_threshold
+        false_discoveries_avg = np.zeros(df_pvals.shape[0])
+        
+        null_pvals = []
+        for i, uniprot_id in enumerate(uniprot_ids):
+            null_pvals_one_uniprot = fid[f'{uniprot_id}_null_pval'][:]
+            if index_filter is not None:
+                f = index_filter[uniprot_id]
+                null_pvals_one_uniprot = null_pvals_one_uniprot[f,:]
+            null_pvals_one_uniprot = null_pvals_one_uniprot.flatten()
+            null_pvals.extend(null_pvals_one_uniprot[ null_pvals_one_uniprot < large_p_threshold ])
+            
+            
+            if (i%100 == 99) or (i == (len(uniprot_ids) - 1)):
+                if len(uniprot_ids) > 100:
+                    print(f'    computing false discoveries from protein {i} out of {len(uniprot_ids)}')
+                null_pvals = np.sort(np.array(null_pvals))
+                false_disc = np.empty(len(df_pvals.p_value))
+                if np.any(mask):
+                    false_disc[mask] = np.searchsorted(null_pvals, df_pvals.p_value[mask], side='right') / n_sims
+                if np.any(~mask):
+                    false_disc[~mask] = df_pvals.shape[0]
+                false_discoveries_avg += false_disc.tolist()
+                null_pvals = []
+    print('  computing fdr')
+    df_pvals['false_discoveries_avg'] = false_discoveries_avg
+    df_pvals['fdr'] = [x / (i+1) for i, x in enumerate(false_discoveries_avg)]
+    df_pvals['fdr'] = df_pvals['fdr'][::-1].cummin()[::-1]
+    df_results = df_pvals[['uniprot_id', 'aa_pos', 'p_value', 'fdr', 'nbhd_case', 'nbhd_control', 'ratio']]
+
+    
+    summarize_results(df_results, fdr_cutoff, reference_dir, annot_file)
+
+    return df_results
+
+def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims, no_fdr, fdr_only, fdr_cutoff, df_fdr_filter):
     '''
     df_rvas is the output of map_to_protein. reference_dir has the pdb structures. this function
     should perform the scan test for all proteins and return a data frame with all the results.
     '''
     print('performing scan test')
 
+    annot_file = f'{reference_dir}/annotations/g2p_binding_site_active_site.tsv'
     if fdr_only:
-        df_results = compute_fdr(results_dir, df_fdr_filter)
+        df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, annot_file=annot_file)
         df_results.to_csv(os.path.join(results_dir, 'all_proteins.fdr.tsv'), sep='\t', index=False)
         return
     
@@ -250,13 +313,13 @@ def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims, no_fdr, fdr_o
         if (sum(df.ac_case) < 5) or (sum(df.ac_control) < 5):
             print('there must be at least 5 case and 5 control alleles. skipping.')
             continue
-        pdb_file_pos_guide = f'{reference_dir}/pdb_file_pos_guide.tsv'
+        pdb_file_pos_guide = f'{reference_dir}/pdb_pae_file_pos_guide.tsv'
         pdb_dir = f'{reference_dir}/pdb_files/'
         scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, results_dir, uniprot_id, radius, n_sims)
         # except Exception as e:
         #     print(f'Error for {uniprot_id}: {e}')
             # continue
     if not no_fdr:
-        df_results = compute_fdr(results_dir, df_fdr_filter)
+        df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, annot_file=annot_file)
         df_results.to_csv(os.path.join(results_dir, 'all_proteins.fdr.tsv'), sep='\t', index=False)
     

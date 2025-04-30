@@ -84,8 +84,12 @@ def map_to_protein(
     elif ('locus' in rvas_data) and ('alleles' in rvas_data):
         rvas_data['chr'] = rvas_data['locus'].str.split(':').str[0]
         rvas_data['pos'] = rvas_data['locus'].str.split(':').str[1].astype(int)
-        rvas_data['ref'] = rvas_data['alleles'].str.split('"').str[1]
-        rvas_data['alt'] = rvas_data['alleles'].str.split('"').str[3]
+        if '"' in rvas_data.alleles.iloc[0]:
+            rvas_data['ref'] = rvas_data['alleles'].str.split('"').str[1]
+            rvas_data['alt'] = rvas_data['alleles'].str.split('"').str[3]
+        else:
+            rvas_data['ref'] = rvas_data['alleles'].str.split(',').str[0].str[1:]
+            rvas_data['alt'] = rvas_data['alleles'].str.split(',').str[1].str[:-1]
         rvas_data['Variant ID'] = rvas_data['chr'] + '-' + rvas_data['pos'].astype(str) + '-' + rvas_data['ref'] + '-' + rvas_data['alt']
     else:
         rvas_data['Variant ID'] = rvas_data['chr'] + '-' + rvas_data['pos'].astype(str) + '-' + rvas_data['ref'] + '-' + rvas_data['alt']
@@ -103,7 +107,6 @@ def map_to_protein(
         rvas_data.rename( {identify_column('case'): 'ac_case'}, axis=1, inplace=True)
     if 'ac_control' not in rvas_data:
         rvas_data.rename( {identify_column('control'): 'ac_control'}, axis=1, inplace=True)
-
     # join to reference variants and identify relevant proteins
     result = []
     ref_path = f'{reference_directory}/all_missense_variants_gr38.h5'
@@ -112,7 +115,7 @@ def map_to_protein(
         if ref is None:
             continue
         joined = rvas_data_by_chr.join(ref, on='Variant ID', how='inner', rsuffix='_ref')
-        joined = joined[['uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt', 'pdb_filename', 'aa_pos_file', 'ac_case', 'ac_control']]
+        joined = joined[['Variant ID', 'uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt', 'pdb_filename', 'aa_pos_file', 'ac_case', 'ac_control']]
         result.append(joined)
 
     if len(result) > 0 and result[0].shape[0] == 0:

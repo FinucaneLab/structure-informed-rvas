@@ -129,6 +129,12 @@ if __name__ == '__main__':
         default=False,
         help='only compute the scan test fdr from a directory of results'
     )
+    parser.add_argument(
+        '--fdr-cutoff',
+        type=float,
+        default=0.05,
+        help='fdr cutoff for summarizing results'
+    )
     args = parser.parse_args()
 
     if args.rvas_data_to_map is not None:
@@ -185,6 +191,7 @@ if __name__ == '__main__':
             args.n_sims,
             args.no_fdr,
             args.fdr_only,
+            args.fdr_cutoff,
             df_fdr_filter,
         )
     

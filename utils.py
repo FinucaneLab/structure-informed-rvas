@@ -43,7 +43,7 @@ def get_pairwise_distances(pdb_file, *args):
 
 def get_distance_matrix_structure(pdb_file_pos_guide, pdb_dir, uniprot_id):
     info = pd.read_csv(pdb_file_pos_guide, sep="\t")
-    pdb_files = info.loc[info.pdb_filename.str.contains(uniprot_id),'filename']
+    pdb_files = info.loc[info.pdb_filename.str.contains(uniprot_id),'pdb_filename']
     ## Version 2: central on top of all
     if len(pdb_files)==0:
         raise Exception(f"Protein {uniprot_id} not found.")
