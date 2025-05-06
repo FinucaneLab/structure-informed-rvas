@@ -178,13 +178,15 @@ def summarize_results(df_results, fdr_cutoff, reference_dir, annot_file):
     df_gene = pd.read_csv(f'{reference_dir}/gene_to_uniprot_id.tsv', sep='\t')
     df_results = df_results.merge(df_gene, how='left', on='uniprot_id')
     
-    top_hits = df_results.loc[df_results.groupby('uniprot_id')['fdr'].idxmin()]
-    top_hits_sig = top_hits[top_hits.fdr<fdr_cutoff]
+    top_hits_all_genes = df_results.loc[df_results.groupby('uniprot_id')['fdr'].idxmin()]
+    top_hits_sig = top_hits_all_genes[top_hits_all_genes.fdr<fdr_cutoff]
+    top_hits_sig = top_hits_sig.sort_values(by='p_value')
     print()
     print(f'''
-        {len(top_hits_sig)} out of {len(top_hits)} proteins have a neighborhood
+        {len(top_hits_sig)} out of {len(top_hits_all_genes)} proteins have a neighborhood
         significant at {fdr_cutoff}.
     ''')
+    print(top_hits_sig[0:20])
     
     if annot_file is not None:
         overall_num_annot = df_results.annotated.sum()
