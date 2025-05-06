@@ -1,6 +1,6 @@
 ## Inputs
 
-You must have a reference directory with a subdirectory called `pdb_files` that contains all pdb files for your analysis. If you have not yet mapped your genetic data to protein coordinates, then your reference directory must have the mapping file [TODO: put the exact filename]. You can copy the reference directory from here. You then need to input the location of the reference directory with the `--reference-directory` flag.
+You must have a reference directory with a subdirectory called `pdb_files` that contains all pdb files for your analysis. If you have not yet mapped your genetic data to protein coordinates, then your reference directory must have the mapping file [TODO: put the exact filename]. You can copy the reference directory from here: https://www.dropbox.com/scl/fo/hpub8v6hk48ek4fphb0la/APrN0ERzROS3EfTMQ4S83lM?rlkey=9snjpn25algfokcpwxgelnlns&e=2&st=2crn9d6c&dl=0. You then need to input the location of the reference directory with the `--reference-directory` flag.
 
 If you have not yet mapped your rvas data to protein coordinates, use the `--rvas-data-to-map` argument to pass in a .tsv. The .tsv must have columns `chr`, `pos`, `ref`, `alt`. It must also have columns with allele count in cases and allele count in controls. The names of those columns can be `ac_case` and `ac_control`, or you can pass the names in using the flags `--ac-case-col` and `--ac-control-col`. The code will use the mapping file in the reference directory to do the mapping, and will use the pdb files already in the `pdb_files` directory.
 
