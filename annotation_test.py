@@ -1,6 +1,7 @@
 from Bio.PDB import PDBParser
 import os
 import warnings
+from datetime import datetime
 import gzip
 import functools
 import numpy as np
@@ -341,8 +342,13 @@ def annotation_test(
     
     df_fet = pd.DataFrame(fet, columns=['uniprot_id', 'in_case', 'out_case', 'in_control', 'out_control', 'or', 'p'])
     df_fet['p_fdr'] = p_fdr
-    df_fet['fdr_reject'] = fdr_reject    
+    df_fet['fdr_reject'] = fdr_reject
+    df_fet = df_fet.sort_values(by='p_fdr')
 
+    timestamp_format = "%M%d%m"
+    timestamp = datetime.now().strftime(timestamp_format)
+    df_fet.to_csv(os.path.join(results_dir, f'annotation_test_results_{timestamp}.fdr.tsv'), sep='\t', index=False, na_rep='NaN')
+    
     return df_fet
     
     '''
