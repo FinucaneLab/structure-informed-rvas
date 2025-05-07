@@ -54,8 +54,8 @@ def expand_annot_neighborhood(df_annot, pdb_file_pos_guide, pdb_dir, results_dir
     return np.where(is_neighbor>0)[0]
     
 
-def loop_proteins(uniprot_id, pdb_file_pos_guide, pdb_dir, results_dir, df_annot, df_filter, radius):
-    print(uniprot_id)
+def loop_proteins(uniprot_id, df_rvas, pdb_file_pos_guide, pdb_dir, results_dir, df_annot, df_filter, radius):
+
     ## some sanity checks
     info = pd.read_csv(pdb_file_pos_guide, sep="\t")
     pdb_files = info.loc[info.pdb_filename.str.contains(uniprot_id),'pdb_filename']
@@ -112,6 +112,7 @@ def annotation_test(
     pdb_dir = f'{reference_dir}/pdb_files/'
     
     try:
+        print(df_rvas)
         uniprot_id_list = df_rvas.uniprot_id.unique()
         print(f"Found {len(uniprot_id_list)} unique UniProt IDs")
     except AttributeError:
@@ -140,10 +141,10 @@ def annotation_test(
             print(f"Error reading file {filter_file}: {e}")
     else:
         df_filter = None
-
-    uniprot_id_list = df_rvas.uniprot_id.unique()
+        
     
     fet = list(map(functools.partial(loop_proteins, 
+                                         df_rvas=df_rvas,
                                          pdb_file_pos_guide=pdb_file_pos_guide, 
                                          pdb_dir=pdb_dir,
                                          results_dir=results_dir,
