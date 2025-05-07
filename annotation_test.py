@@ -141,7 +141,7 @@ def annotation_test(
     else:
         df_filter = None
 
-    uniprot_id_list = df_rvas.uniprot_id.unique()[1:10]
+    uniprot_id_list = df_rvas.uniprot_id.unique()
     
     fet = list(map(functools.partial(loop_proteins, 
                                          pdb_file_pos_guide=pdb_file_pos_guide, 
