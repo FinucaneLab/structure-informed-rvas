@@ -4,6 +4,7 @@ import os
 from scan_test import scan_test
 from annotation_test import annotation_test
 from read_data import map_to_protein
+from pymol_code import run_all
 # from annotation_test import annotation_test
 
 
@@ -136,6 +137,32 @@ if __name__ == '__main__':
         default=0.05,
         help='fdr cutoff for summarizing results'
     )
+    parser.add_argument(
+        '--visualization',
+        action='store_true',
+        default=False,
+        help='Run visualization tools on a specific UniProt ID'
+    )
+    parser.add_argument(
+        '--uniprot_id',
+        type=str,
+        default=None,
+        help='UniProt ID for visualization'
+    )
+
+    parser.add_argument(
+        '--reference_directory',
+        type=str,
+        default=None,
+        help='Directory with reference files (for visualization)'
+    )
+
+    parser.add_argument(
+        '--result_directory',
+        type=str,
+        default=None,
+        help='Directory with result files (for visualization)'
+    )
     args = parser.parse_args()
 
     if args.rvas_data_to_map is not None:
@@ -219,5 +246,14 @@ if __name__ == '__main__':
             args.filter_file,
         )
     
+    elif args.visualization:
+        if not (args.uniprot_id and args.reference_directory and args.result_directory):
+            raise ValueError("For visualization, you must provide --uniprot_id, --reference_directory and --result_directory")
+        # print(args.uniprot_id, args.result_directory, args.reference_directory)
+        run_all(args.uniprot_id, args.result_directory, args.reference_directory)
+
     else:
         raise Exception('no analysis specified')
+
+   
+
