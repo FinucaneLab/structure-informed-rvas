@@ -290,7 +290,19 @@ def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, annot_fil
 
     return df_results
 
-def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims, no_fdr, fdr_only, fdr_cutoff, df_fdr_filter):
+def scan_test(
+    df_rvas,
+    reference_dir,
+    radius,
+    results_dir,
+    n_sims,
+    no_fdr,
+    fdr_only,
+    fdr_cutoff,
+    df_fdr_filter,
+    ignore_ac,
+    fdr_file,
+):
     '''
     df_rvas is the output of map_to_protein. reference_dir has the pdb structures. this function
     should perform the scan test for all proteins and return a data frame with all the results.
@@ -300,8 +312,15 @@ def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims, no_fdr, fdr_o
     annot_file = f'{reference_dir}/annotations/g2p_binding_site_active_site.tsv'
     if fdr_only:
         df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, annot_file=annot_file)
-        df_results.to_csv(os.path.join(results_dir, 'all_proteins.fdr.tsv'), sep='\t', index=False)
+        df_results.to_csv(os.path.join(results_dir, fdr_file), sep='\t', index=False)
         return
+    
+    if ignore_ac:
+        df_rvas['ac_case'] = (df_rvas['ac_case'] > 0).astype(int)
+        df_rvas['ac_control'] = (df_rvas['ac_control'] > 0).astype(int)
+        df_rvas['to_drop'] = df_rvas['ac_case'] + df_rvas['ac_control'] > 1
+        df_rvas = df_rvas[~df_rvas.to_drop].copy()
+        df_rvas.drop('to_drop', axis=1, inplace=True)
     
     uniprot_id_list = np.unique(df_rvas.uniprot_id)
     if df_fdr_filter is not None:
@@ -323,5 +342,5 @@ def scan_test(df_rvas, reference_dir, radius, results_dir, n_sims, no_fdr, fdr_o
             # continue
     if not no_fdr:
         df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, annot_file=annot_file)
-        df_results.to_csv(os.path.join(results_dir, 'all_proteins.fdr.tsv'), sep='\t', index=False)
+        df_results.to_csv(os.path.join(results_dir, fdr_file), sep='\t', index=False)
     

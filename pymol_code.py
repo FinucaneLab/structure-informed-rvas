@@ -8,8 +8,8 @@ from Bio.PDB import PDBParser
 from Bio.PDB import StructureBuilder, PDBIO, Model, Chain
 from moviepy import VideoFileClip, clips_array
 import re
-
-# from utils import read_p_values
+from utils import read_p_values
+import h5py
 
 def write_full_pdb(full_pdb, output_path, pdb_overlap = 1200):
     try:
@@ -78,7 +78,7 @@ def get_one_pdb(info_tsv, uniprot_id, reference_directory, pdb_overlap = 1200):
     except Exception as e:
         print(f"[ERROR] in get_one_pdb(): {e}")
 
-def pymol_rvas(info_tsv, df_rvas, reference_directory, results_directory):
+def pymol_rvas(df_rvas, reference_directory, results_directory):
     # make a pymol session with case and control mutations
     # output a gif and a .pse file
     try:
@@ -91,7 +91,7 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory, results_directory):
         if not 'aa_pos_file' in df_rvas:
             df_rvas['aa_pos_file'] = df_rvas['aa_pos']
         pdbs = set(df_rvas['pdb_filename'].tolist())
-        uniprot_ids = set(df_rvas['uniprot_id'].tolist())
+        
         cmd.set('ribbon_as_cylinders')
         cmd.set("ribbon_radius", 0.5) 
 
@@ -103,24 +103,31 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory, results_directory):
             print('Reading pdb:', p)
 
             cmd.load(p, "structure")
+            pdb_filename = item.split('.')[0]
+
+            # create sherif style image
+            cmd.set('ambient', 0.5)
+            cmd.set('ray_shadows', 0)
+            cmd.set('ray_trace_mode', 1)
+            cmd.set('ray_trace_gain', 0.05)
+            cmd.bg_color("white")
+            cmd.ray(2400, 1800)
+            cmd.set("ray_opaque_background", 1)
+            cmd.png(f"{results_directory}/{pdb_filename}.png")
+
+            cmd.reset()
             cmd.color("grey")
-            uniprot_id = item.split('-')[1]
-            gray_pse = os.path.join(results_directory, f"{uniprot_id}_gray.pse")
+            gray_pse = os.path.join(results_directory, f"{pdb_filename}_gray.pse")
             print(gray_pse)
             cmd.save(gray_pse)
             print("Saved gray PSE file.")
 
-            # cmd.mset("1 x 60")
-            # cmd.scene("001","store")
-            # cmd.mview("store", 1, "001")
-            # # cmd.movie.produce("1-30.png")
-            cmd.movie.add_nutate(8,60,start=1)
-            gray_mv_p = os.path.join(results_directory, f"{uniprot_id}_gray.mov")
-            cmd.movie.produce(gray_mv_p)
-            # print('scene 001 stored')
+            # cmd.movie.add_nutate(8,60,start=1)
+            # gray_mv_p = os.path.join(results_directory, f"{pdb_filename}_gray.mov")
+            # cmd.movie.produce(gray_mv_p)
 
             tmp_df = df_rvas[df_rvas['pdb_filename'] == item]
-            uniprot_id = tmp_df['uniprot_id'].values[0]
+            # uniprot_id = tmp_df['uniprot_id'].values[0]
 
             control_mask = (tmp_df['ac_control'] >= 1) & (tmp_df['ac_case'] == 0)
             case_mask = (tmp_df['ac_case'] >= 1) & (tmp_df['ac_control'] == 0)
@@ -154,7 +161,8 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory, results_directory):
                 # aa_ref = row['aa_ref']
                 # aa_alt = row['aa_alt']
                 aa_pos_file = row['aa_pos_file']
-                cmd.select(f"residue_{aa_pos_file}", f"resi {aa_pos_file}")
+                cmd.select(f"residue_{aa_pos_file}", f"resi {aa_pos_file} and name CA")
+                cmd.show("spheres", f"residue_{aa_pos_file}")
                 cmd.color("blue", f"residue_{aa_pos_file}")
                 # cmd.label(f"residue_{aa_pos_file} and name CA", f'"{aa_ref}->{aa_alt}"')
                 # cmd.label(f"residue_{aa_pos_file} and name CA", f'{aa_pos_file}')
@@ -163,7 +171,8 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory, results_directory):
                 # aa_ref = row['aa_ref']
                 # aa_alt = row['aa_alt']
                 aa_pos_file = row['aa_pos_file']
-                cmd.select(f"residue_{aa_pos_file}", f"resi {aa_pos_file}")
+                cmd.select(f"residue_{aa_pos_file}", f"resi {aa_pos_file} and name CA")
+                cmd.show("spheres", f"residue_{aa_pos_file}")
                 cmd.color("red", f"residue_{aa_pos_file}")
                 # cmd.label(f"residue_{aa_pos_file} and name CA", f'"{aa_ref}->{aa_alt}"')
                 # cmd.label(f"residue_{aa_pos_file} and name CA", f'{aa_pos_file}')
@@ -172,94 +181,112 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory, results_directory):
                 # aa_ref = row['aa_ref']
                 # aa_alt = row['aa_alt']
                 aa_pos_file = row['aa_pos_file']
-                cmd.select(f"residue_{aa_pos_file}", f"resi {aa_pos_file}")
+                cmd.select(f"residue_{aa_pos_file}", f"resi {aa_pos_file} and name CA")
+                cmd.show("spheres", f"residue_{aa_pos_file}")
                 cmd.color("purple", f"residue_{aa_pos_file}")
                 # cmd.label(f"residue_{aa_pos_file} and name CA", f'"{aa_ref}->{aa_alt}"')
                 # cmd.label(f"residue_{aa_pos_file} and name CA", f'{aa_pos_file}')
             
-            # cmd.mset("61 x 120")
-            # cmd.scene("002","store")
-            # cmd.mview("store", 61, "002")
-            cmd.movie.add_nutate(12,60,start=1)
-            # cmd.movie.produce("31-60.png")
-            rib_mut_mv_p = os.path.join(results_directory, f"{uniprot_id}_rib_mut.mov")
-            cmd.movie.produce(rib_mut_mv_p)
+            cmd.ray(2400, 1800)
+            cmd.set("ray_opaque_background", 1)
+            cmd.png(f"{results_directory}/{pdb_filename}_mut.png")
 
-            objects = cmd.get_names("objects")
-            for obj in objects:
-                cmd.hide('cartoon', obj)
-                cmd.show('ribbon', obj)
+            # cmd.movie.add_nutate(12,60,start=1)
+            # rib_mut_mv_p = os.path.join(results_directory, f"{pdb_filename}_rib_mut.mov")
+            # cmd.movie.produce(rib_mut_mv_p)
 
-            pse_pdb_p = os.path.join(results_directory, f"{uniprot_id}.pse")
+            # objects = cmd.get_names("objects")
+            # for obj in objects:
+            #     cmd.hide('cartoon', obj)
+            #     cmd.show('ribbon', obj)
+
+            pse_pdb_p = os.path.join(results_directory, f"{pdb_filename}_rib_mut.pse")
             cmd.save(pse_pdb_p)
             print('save pse pdb')
         
-        if info_tsv is not None:
-            for uniprot_id in uniprot_ids:
-                get_one_pdb(info_tsv, uniprot_id, reference_directory)
-                pdb_p = os.path.join(reference_directory, f'pdb_files/{uniprot_id}.pdb')
-                cmd.load(pdb_p, "structure")
-                tmp_df = df_rvas[df_rvas['uniprot_id'] == uniprot_id]
-                uniprot_id = tmp_df['uniprot_id'].values[0]
+        # if info_tsv is not None:
+        #     for uniprot_id in uniprot_ids:
+        #         get_one_pdb(info_tsv, uniprot_id, reference_directory)
+        #         pdb_p = os.path.join(reference_directory, f'pdb_files/{uniprot_id}.pdb')
+        #         cmd.load(pdb_p, "structure")
+        #         tmp_df = df_rvas[df_rvas['uniprot_id'] == uniprot_id]
+        #         uniprot_id = tmp_df['uniprot_id'].values[0]
 
-                control_mask = (tmp_df['ac_control'] > 1) & (tmp_df['ac_case'] == 0)
-                case_mask = (tmp_df['ac_case'] > 1) & (tmp_df['ac_control'] == 0)
-                both_mask = (tmp_df['ac_case'] > 1) & (tmp_df['ac_control'] > 1)
-                tmp_df_control = tmp_df[control_mask]
-                tmp_df_case = tmp_df[case_mask]
-                tmp_df_both = tmp_df[both_mask]
+        #         control_mask = (tmp_df['ac_control'] > 1) & (tmp_df['ac_case'] == 0)
+        #         case_mask = (tmp_df['ac_case'] > 1) & (tmp_df['ac_control'] == 0)
+        #         both_mask = (tmp_df['ac_case'] > 1) & (tmp_df['ac_control'] > 1)
+        #         tmp_df_control = tmp_df[control_mask]
+        #         tmp_df_case = tmp_df[case_mask]
+        #         tmp_df_both = tmp_df[both_mask]
                 
-                for _, row in tmp_df_control.iterrows():
-                    # aa_ref = row['aa_ref']
-                    # aa_alt = row['aa_alt']
-                    aa_pos = row['aa_pos']
-                    cmd.select(f"residue_{aa_pos}", f"resi {aa_pos}")
-                    cmd.color("blue", f"residue_{aa_pos}")
-                    # cmd.label(f"residue_{aa_pos} and name CA", f'"{aa_ref}->{aa_alt}"')
-                    # cmd.label(f"residue_{aa_pos} and name CA", f'{aa_pos}')
+        #         for _, row in tmp_df_control.iterrows():
+        #             # aa_ref = row['aa_ref']
+        #             # aa_alt = row['aa_alt']
+        #             aa_pos = row['aa_pos']
+        #             cmd.select(f"residue_{aa_pos}", f"resi {aa_pos}")
+        #             cmd.color("blue", f"residue_{aa_pos}")
+        #             # cmd.label(f"residue_{aa_pos} and name CA", f'"{aa_ref}->{aa_alt}"')
+        #             # cmd.label(f"residue_{aa_pos} and name CA", f'{aa_pos}')
 
                 
-                for _, row in tmp_df_case.iterrows():
-                    # aa_ref = row['aa_ref']
-                    # aa_alt = row['aa_alt']
-                    aa_pos = row['aa_pos']
-                    cmd.select(f"residue_{aa_pos}", f"resi {aa_pos}")
-                    cmd.color("red", f"residue_{aa_pos}")
-                    # cmd.label(f"residue_{aa_pos} and name CA", f'"{aa_ref}->{aa_alt}"')
-                    # cmd.label(f"residue_{aa_pos} and name CA", f'{aa_pos}')
+        #         for _, row in tmp_df_case.iterrows():
+        #             # aa_ref = row['aa_ref']
+        #             # aa_alt = row['aa_alt']
+        #             aa_pos = row['aa_pos']
+        #             cmd.select(f"residue_{aa_pos}", f"resi {aa_pos}")
+        #             cmd.color("red", f"residue_{aa_pos}")
+        #             # cmd.label(f"residue_{aa_pos} and name CA", f'"{aa_ref}->{aa_alt}"')
+        #             # cmd.label(f"residue_{aa_pos} and name CA", f'{aa_pos}')
 
             
-                for _, row in tmp_df_both.iterrows():
-                    # aa_ref = row['aa_ref']
-                    # aa_alt = row['aa_alt']
-                    aa_pos = row['aa_pos']
-                    cmd.select(f"residue_{aa_pos}", f"resi {aa_pos}")
-                    cmd.color("purple", f"residue_{aa_pos}")
-                    # cmd.label(f"residue_{aa_pos} and name CA", f'"{aa_ref}->{aa_alt}"')
-                    # cmd.label(f"residue_{aa_pos} and name CA", f'{aa_pos}')
+        #         for _, row in tmp_df_both.iterrows():
+        #             # aa_ref = row['aa_ref']
+        #             # aa_alt = row['aa_alt']
+        #             aa_pos = row['aa_pos']
+        #             cmd.select(f"residue_{aa_pos}", f"resi {aa_pos}")
+        #             cmd.color("purple", f"residue_{aa_pos}")
+        #             # cmd.label(f"residue_{aa_pos} and name CA", f'"{aa_ref}->{aa_alt}"')
+        #             # cmd.label(f"residue_{aa_pos} and name CA", f'{aa_pos}')
                 
-                # cmd.mset("61 x 120")
-                # cmd.scene("002", "store")
-                # cmd.mview("store", 61, "002")
-                # cmd.movie.produce("31-60.png")
-                # cmd.movie.produce("31-60.mov")
-                cmd.movie.add_nutate(12,60,start=1)
-                rib_mut_mv_p = os.path.join(results_directory, f"{uniprot_id}_rib_mut.mov")
-                cmd.movie.produce(rib_mut_mv_p)
+        #         # cmd.mset("61 x 120")
+        #         # cmd.scene("002", "store")
+        #         # cmd.mview("store", 61, "002")
+        #         # cmd.movie.produce("31-60.png")
+        #         # cmd.movie.produce("31-60.mov")
+        #         cmd.movie.add_nutate(12,60,start=1)
+        #         rib_mut_mv_p = os.path.join(results_directory, f"{uniprot_id}_rib_mut.mov")
+        #         cmd.movie.produce(rib_mut_mv_p)
 
-                objects = cmd.get_names("objects")  
-                for obj in objects:
-                    cmd.hide('cartoon', obj)
-                    cmd.show('ribbon', obj)
+        #         objects = cmd.get_names("objects")  
+        #         for obj in objects:
+        #             cmd.hide('cartoon', obj)
+        #             cmd.show('ribbon', obj)
 
-                pse_p = os.path.join(results_directory, f'{uniprot_id}.pse')
-                cmd.save(pse_p)
+        #         pse_p = os.path.join(results_directory, f'{uniprot_id}.pse')
+        #         cmd.save(pse_p)
 
     except Exception as e:
         print(f"[ERROR] in pymol_rvas(): {e}")
 
-def pymol_annotation(annot_file, reference_directory, results_directory):
+def get_pdb_filename(annot_df, info_df):
+    print(info_df)
+    # get the pdb filename for the annotation
+    pdb_filenames = []
+    for _, r1 in annot_df.iterrows():
+        aa_pos = r1['aa_pos']
+        for _, r2 in info_df.iterrows():
+            pos_covered = r2['pos_covered']
+            pos_covered = ast.literal_eval(pos_covered)
+            if int(aa_pos) >= int(pos_covered[0]) and int(aa_pos) <= int(pos_covered[1]):
+                pdb_filename = r2['pdb_filename']
+                break
+        pdb_filenames.append(pdb_filename)
+    annot_df['pdb_filename'] = pdb_filenames
+    return annot_df
+
+def pymol_annotation(annot_file, reference_directory, results_directory, info_tsv=None, uniprot_id=None):
     # visualize the annotation
+
     try:
         annot_df_p = os.path.join(reference_directory, annot_file)
         if not os.path.isfile(annot_df_p):
@@ -267,19 +294,51 @@ def pymol_annotation(annot_file, reference_directory, results_directory):
             return
         
         annot_df = pd.read_csv(annot_df_p, sep='\t')
-        uniprot_ids = set(annot_df['uniprot_id'].tolist())
-        for uniprot_id in uniprot_ids:
-            p = os.path.join(results_directory,  f'{uniprot_id}.pse')
-            if not os.path.exists(p):
-                print(f"[WARNING] PSE file from pymol_rvas() not found: {p}")
-                continue
-            cmd.load(p)
+        
+        if info_tsv is not None:
+            info = os.path.join(reference_directory, info_tsv)
+            info_df = pd.read_csv(info, sep='\t')
+        else:
+            print(f"[WARNING] Info TSV not found: {info_tsv}")
+            return
+
+        # uniprot_ids = set(annot_df['uniprot_id'].tolist())
+        # for uniprot_id in uniprot_ids:
+        #     p = os.path.join(results_directory,  f'{uniprot_id}.pse')
+        #     if not os.path.exists(p):
+        #         print(f"[WARNING] PSE file from pymol_rvas() not found: {p}")
+        #         continue
+        #     cmd.load(p)
+        #     tmp_annot = annot_df[annot_df['uniprot_id'] == uniprot_id]
+        #     tmp_annot_pos = tmp_annot['aa_pos'].tolist()
+        #     for item in tmp_annot_pos:
+        #         cmd.select(f"annotation_residue_{item}", f"resi {item}")
+        #         cmd.label(f"annotation_residue_{item} and name CA", f'"annotation"')
+        #     cmd.save(p)
+        if uniprot_id is not None:
+            print(uniprot_id)
+            tmp_info = info_df[info_df['uniprot_id'] == uniprot_id]
             tmp_annot = annot_df[annot_df['uniprot_id'] == uniprot_id]
-            tmp_annot_pos = tmp_annot['aa_pos'].tolist()
-            for item in tmp_annot_pos:
-                cmd.select(f"annotation_residue_{item}", f"resi {item}")
-                cmd.label(f"annotation_residue_{item} and name CA", f'"annotation"')
-            cmd.save(p)
+            tmp_annot = get_pdb_filename(tmp_annot, tmp_info)
+            print(tmp_annot)
+            tmp_annot['visual_filename'] = tmp_annot['pdb_filename'].apply(lambda x: os.path.join(results_directory, x.split('.')[0]+ '.pse'))
+            tmp_visuals = set(tmp_annot['visual_filename'].tolist())
+            for v in tmp_visuals:
+                print(v)
+                tmp_annot_visuals = tmp_annot[tmp_annot['visual_filename'] == v]
+                print(tmp_annot_visuals)
+                tmp_annot_pos = tmp_annot_visuals['aa_pos'].tolist()
+                for item in tmp_annot_pos:
+                    if not os.path.exists(v):
+                        print(f"[WARNING] PSE file from pymol_rvas() not found: {v}")
+                        continue
+                    cmd.load(f'{v.split('.')[0]}_rib_mut.pse')
+                    item = str(item)
+                    cmd.select(f"annotation_residue_{item}", f"resi {item}")
+                    cmd.label(f"annotation_residue_{item} and name CA", f'"annotation"')
+                    cmd.save(f'{v.split('.')[0]}_rib_mut.pse')
+        else:
+            print('No uniprot id provided')
 
     except Exception as e:
         print(f"[ERROR] in pymol_annotation(): {e}")
@@ -288,149 +347,185 @@ def pymol_annotation(annot_file, reference_directory, results_directory):
 def pymol_scan_test(info_tsv, df_rvas, uniprot_id, reference_directory, results_directory):
     # color by case/control ratio of the neighborhood
     try:
-        df_results_p = os.path.join(results_directory, 'p_values.h5')
-        if not os.path.isfile(df_results_p):
-            print(f"[WARNING] Scan test result file not found: {df_results_p}")
-            return
-        if info_tsv is not None:
-            pse_p = os.path.join(results_directory, uniprot_id + '.pse')
-        else:
-            df_rvas_p = os.path.join(results_directory, df_rvas)
-            df_rvas = pd.read_csv(df_rvas_p, sep='\t')
-            pdb_filename = df_rvas['pdb_filename'].values[0]
-            pse_p = os.path.join(results_directory, f"{uniprot_id}_{pdb_filename.split('.')[0]}.pse")
-        if not os.path.isfile(pse_p):
-            print(f"[WARNING] PSE file from pymol_rvas() not found: {pse_p}")
-            return
+        # if not os.path.isfile(df_results_p):
+        #     print(f"[WARNING] Scan test result file not found: {df_results_p}")
+        #     return
         
+        # if info_tsv is not None:
+        #     pse_p = os.path.join(results_directory, uniprot_id + '.pse')
+        # else:
+        #     df_rvas_p = os.path.join(results_directory, df_rvas)
+        #     df_rvas = pd.read_csv(df_rvas_p, sep='\t')
+        #     pdb_filename = df_rvas['pdb_filename'].values[0]
+        #     pse_p = os.path.join(results_directory, f"{uniprot_id}_{pdb_filename.split('.')[0]}.pse")
+        # if not os.path.isfile(pse_p):
+        #     print(f"[WARNING] PSE file from pymol_rvas() not found: {pse_p}")
+        #     return
+
+        df_results_p = os.path.join(results_directory, 'p_values.h5')
         with h5py.File(df_results_p, 'r') as fid:
             df_results = read_p_values(fid, uniprot_id)
 
-        df_results['ratio_normalized'] = df_results['ratio'] / df_results['ratio'].max()
-        df_results['ratio_normalized'].to_csv('test.csv', sep='\t', index=False)
+        # df_results = pd.read_csv('results/O15047_results.tsv', sep='\t')
+        # df_results['uniprot_id'] = 'O15047'
         
-        cmd.load(pse_p)
-        objects = cmd.get_names('objects')[-1]
+        if info_tsv is not None:
+            info = os.path.join(reference_directory, info_tsv)
+            info_df = pd.read_csv(info, sep='\t')
+        else:
+            print(f"[WARNING] Info TSV not found: {info_tsv}")
+            return
 
-        for sel in cmd.get_names("selections"):
-            cmd.delete(sel)
-        for obj in cmd.get_names("objects"):
-            cmd.color("gray", obj)  
-        cmd.label("all", "")
+        tmp_info = info_df[info_df['uniprot_id'] == uniprot_id]
+        tmp_df = df_results[df_results['uniprot_id'] == uniprot_id]
+        tmp_df = get_pdb_filename(tmp_df, tmp_info)
+        print(tmp_df)
+        tmp_df['visual_filename'] = tmp_df['pdb_filename'].apply(lambda x: os.path.join(results_directory, x.split('.')[0]+ '.pse'))
+        tmp_df['ratio_normalized'] = tmp_df['ratio'] / tmp_df['ratio'].max()
+        # tmp_df['ratio_normalized'].to_csv('test.csv', sep='\t', index=False)
+        tmp_visuals = set(tmp_df['visual_filename'].tolist())
+        for v in tmp_visuals:
+            cmd.load(f'{v.split('.')[0]}_gray.pse')
+            objects = cmd.get_names('objects')[-1]
 
-        for _, row in df_results.iterrows():
-            resi = int(row['aa_pos'])
-            ratio = float(row['ratio_normalized'])
-            selection = f"{objects} and resi {resi}"
-            cmd.alter(selection, f"b={ratio}")
-            cmd.rebuild()
-        
-        cmd.spectrum("b", "yellow_orange_red", objects, byres=1)
+            # for sel in cmd.get_names("selections"):
+            #     cmd.delete(sel)
+            # for obj in cmd.get_names("objects"):
+            #     cmd.color("gray", obj)  
+            # cmd.label("all", "")
 
-        # cmd.mset("1 x 60")
-        # cmd.scene("003", "store")
-        # cmd.movie.produce("61-90.png")
+            tmp_df_visuals = tmp_df[tmp_df['visual_filename'] == v]
 
-        objects = cmd.get_names("objects")  
-        for obj in objects:
-            cmd.hide('ribbon', obj)
-            cmd.show('cartoon', obj)
+            for _, row in tmp_df_visuals.iterrows():
+                resi = int(row['aa_pos'])
+                ratio = float(row['ratio_normalized'])
+                selection = f"{objects} and resi {resi}"
+                cmd.alter(selection, f"b={ratio}")
+                cmd.rebuild()
+            
+            cmd.spectrum("b", "yellow_orange_red", objects, byres=1)
+            # cmd.show("spheres", "name CA")
 
-        cmd.movie.add_nutate(12,60,start=1)
-        ratio_mv_p = os.path.join(results_directory, f"{uniprot_id}_ratio.mov")
-        cmd.movie.produce(ratio_mv_p)
+            # cmd.mset("1 x 60")
+            # cmd.scene("003", "store")
+            # cmd.movie.produce("61-90.png")
 
+            cmd.save(f"{v.split('.')[0]}_ratio.pse")
 
-        objects = cmd.get_names("objects")  
-        for obj in objects:
-            cmd.hide('cartoon', obj)
-            cmd.show('ribbon', obj)
-        
-        result_pse_p = os.path.join(results_directory, f'{uniprot_id}_result.pse')
-        cmd.save(result_pse_p)
+            # cmd.movie.add_nutate(12,60,start=1)
+            # cmd.movie.produce(f"{v.split('.')[0]}_ratio.mov")
+
+            # objects = cmd.get_names("objects")  
+            # for obj in objects:
+            #     cmd.hide('cartoon', obj)
+            #     cmd.show('ribbon', obj)
+            # cmd.save(v)
+
     except Exception as e:
         print(f"[ERROR] in pymol_scan_test(): {e}")
 
-def pymol_neighborhood(df_results, results_directory):
+def pymol_neighborhood(uniprot_id, results_directory, info_tsv, reference_directory):
     # for each significant neighborhood, zoom in and show the case and control mutations
     # just in that neighborhood.
     try:
-        uniprot_id = df_results.split('_')[0]
-        df_results_p = os.path.join(reference_directory, df_results)
-        if not os.path.isfile(df_results_p):
-            print(f"[WARNING] Scan test result file not found: {df_results_p}")
-            return
-        df_results = pd.read_csv(df_results_p, sep='\t')
-        pse_p = os.path.join(reference_directory, uniprot_id + '_result.pse')
-        if not os.path.isfile(pse_p):
-            print(f"[WARNING] PSE file from pymol_scan_test() not found: {pse_p}")
+        df_results_p = os.path.join(results_directory, 'p_values.h5')
+
+        with h5py.File(df_results_p, 'r') as fid:
+            df_results = read_p_values(fid, uniprot_id)
+        
+        # df_results = pd.read_csv('results/O15047_results.tsv', sep='\t')
+        # df_results['uniprot_id'] = 'O15047'
+
+        if info_tsv is not None:
+            info = os.path.join(reference_directory, info_tsv)
+            info_df = pd.read_csv(info, sep='\t')
+        else:
+            print(f"[WARNING] Info TSV not found: {info_tsv}")
             return
         
-        cmd.load(pse_p)
-        for _, row in df_results.iterrows():
-            resi = int(row['aa_pos'])
-            p_value = float(row['p_value'])
-            if p_value < 0.05:
-                nbhd_case = row['nbhd_case']
-                nbhd_ctrl = row['nbhd_control']
-                selection = f"resi {resi}"
-                cmd.select(f"residue_{resi}", selection)
-                cmd.label(f"residue_{resi} and name CA", f'"case: {nbhd_case}; control: {nbhd_ctrl}"')
-                # cmd.zoom(selection)
-        
-        cmd.save(pse_p)
+        tmp_info = info_df[info_df['uniprot_id'] == uniprot_id]
+        tmp_df = df_results[df_results['uniprot_id'] == uniprot_id]
+        tmp_df = get_pdb_filename(tmp_df, tmp_info)
+
+        tmp_df['visual_filename'] = tmp_df['pdb_filename'].apply(lambda x: os.path.join(results_directory, x.split('.')[0]+ '.pse'))
+        # tmp_df['ratio_normalized'] = tmp_df['ratio'] / tmp_df['ratio'].max()
+        tmp_visuals = set(tmp_df['visual_filename'].tolist())
+        for v in tmp_visuals:
+            cmd.load(v.split('.')[0] + '_ratio.pse')
+            for _, row in tmp_df.iterrows():
+                resi = int(row['aa_pos'])
+                p_value = float(row['p_value'])
+                if p_value < 0.05:
+                    # nbhd_case = row['nbhd_case']
+                    # nbhd_ctrl = row['nbhd_control']
+                    selection = f"resi {resi} and name CA"
+                    cmd.select(f"residue_{resi}", selection)
+                    cmd.show("spheres", f"residue_{resi}")
+                    # cmd.label(f"residue_{resi} and name CA", f'"case: {nbhd_case}; control: {nbhd_ctrl}"')
+                    # cmd.zoom(selection)
+            cmd.save(v.split('.')[0] + '_ratio.pse')
     except Exception as e:  
         print(f"[ERROR] in pymol_neighborhood(): {e}")
 
-def make_movie(results_directory, uniprot_id):
+def make_movie(results_directory, uniprot_id, info_tsv=None):
 
-    gray_mv_p = os.path.join(results_directory, f'{uniprot_id}_gray.mov')
-    rib_mut_mv_p = os.path.join(results_directory, f'{uniprot_id}_rib_mut.mov')
-    ratio_mv_p = os.path.join(results_directory, f'{uniprot_id}_ratio.mov')
-
-    if not os.path.exists(gray_mv_p):
-        print(f"[WARNING] pymol_rvas() base movie file not found: {gray_mv_p}")
+    if info_tsv is not None:
+        info = os.path.join(reference_directory, info_tsv)
+        info_df = pd.read_csv(info, sep='\t')
+    else:
+        print(f"[WARNING] Info TSV not found: {info_tsv}")
         return
-    if not os.path.exists(rib_mut_mv_p): 
-        print(f"[WARNING] pymol_rvas() movie file not found: {rib_mut_mv_p}")
-        return
-    
-    if not os.path.exists(ratio_mv_p): 
-        print(f"[WARNING] pymol_neighborhood() movie file not found: {rib_mut_mv_p}")
-        return
-    
-    clip1 = VideoFileClip(gray_mv_p)
-    clip2 = VideoFileClip(rib_mut_mv_p)
-    clip3 = VideoFileClip(ratio_mv_p)
 
-    min_duration = min(clip1.duration, clip2.duration, clip3.duration)
-    clip1 = clip1.subclipped(0, min_duration)
-    clip2 = clip2.subclipped(0, min_duration)
-    clip3 = clip3.subclipped(0, min_duration)
+    tmp_info = info_df[info_df['uniprot_id'] == uniprot_id]
+    tmp_pdbs = set(tmp_info['pdb_filename'].tolist())
+    tmp_pses = [item.split('.')[0] for item in tmp_pdbs]
 
-    target_height = min(clip1.h, clip2.h, clip3.h)
-    clip1 = clip1.resized(height=target_height)
-    clip2 = clip2.resized(height=target_height)
-    clip3 = clip3.resized(height=target_height)
+    for item in tmp_pses:
+        gray_mv_p = os.path.join(results_directory, f'{item}_gray.mov')
+        rib_mut_mv_p = os.path.join(results_directory, f'{item}_rib_mut.mov')
+        ratio_mv_p = os.path.join(results_directory, f'{item}_ratio.mov')
 
-    final_clip = clips_array([[clip1, clip2, clip3]])
+        if not os.path.exists(gray_mv_p):
+            print(f"[WARNING] pymol_rvas() base movie file not found: {gray_mv_p}")
+            return
+        if not os.path.exists(rib_mut_mv_p): 
+            print(f"[WARNING] pymol_rvas() movie file not found: {rib_mut_mv_p}")
+            return
+        
+        if not os.path.exists(ratio_mv_p): 
+            print(f"[WARNING] pymol_neighborhood() movie file not found: {ratio_mv_p}")
+            return
+        
+        clip1 = VideoFileClip(gray_mv_p)
+        clip2 = VideoFileClip(rib_mut_mv_p)
+        clip3 = VideoFileClip(ratio_mv_p)
 
-    output_file = os.path.join(results_directory, f"{uniprot_id}.mov")
-    final_clip.write_videofile(output_file, codec="libx264", fps=24)
+        min_duration = min(clip1.duration, clip2.duration, clip3.duration)
+        clip1 = clip1.subclipped(0, min_duration)
+        clip2 = clip2.subclipped(0, min_duration)
+        clip3 = clip3.subclipped(0, min_duration)
+
+        target_height = min(clip1.h, clip2.h, clip3.h)
+        clip1 = clip1.resized(height=target_height)
+        clip2 = clip2.resized(height=target_height)
+        clip3 = clip3.resized(height=target_height)
+
+        final_clip = clips_array([[clip1, clip2, clip3]])
+
+        output_file = os.path.join(results_directory, f"{uniprot_id}.mov")
+        final_clip.write_videofile(output_file, codec="libx264", fps=24)
 
 
-def run_all(results_directory, reference_directory, info_tsv=None):
-    filelist = glob.glob(f'{results_directory}/*.df_rvas.tsv')
-    uniprot_list = [x.split('/')[-1].split('.')[0] for x in filelist]
-    for uniprot_id in uniprot_list:
-        df_rvas = f'{uniprot_id}.df_rvas.tsv'
-        pymol_rvas(info_tsv, df_rvas, reference_directory, results_directory)
-        pymol_scan_test(info_tsv, df_rvas, uniprot_id, reference_directory, results_directory)
-        make_movie(results_directory, uniprot_id)
-        cmd.reinitialize()
-# reference_directory = '../sir-reference-data/'
-reference_directory = './'
-results_directory = 'results/'
-run_all(results_directory, reference_directory)
+def run_all(uniprot_id, results_directory, reference_directory):
+    df_rvas = f'{uniprot_id}.df_rvas.tsv'
+    pymol_rvas(df_rvas, reference_directory, results_directory)
+    # pymol_annotation('ClinVar_PLP_uniprot_canonical.tsv', reference_directory , results_directory, 'pdb_pae_file_pos_guide.tsv', uniprot_id)
+    pymol_scan_test('pdb_pae_file_pos_guide.tsv', df_rvas, uniprot_id, reference_directory, results_directory)
+    pymol_neighborhood(uniprot_id, results_directory, 'pdb_pae_file_pos_guide.tsv', reference_directory)
+    # make_movie(results_directory, uniprot_id, 'pdb_pae_file_pos_guide.tsv')
+    # cmd.reinitialize()
+# reference_directory = 'reference'
+# results_directory = 'results/'
+# run_all('O15047',results_directory, reference_directory)
 
 

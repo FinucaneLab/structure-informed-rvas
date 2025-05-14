@@ -142,7 +142,7 @@ def annotation_test(
     else:
         df_filter = None
         
-    
+    uniprot_id_list = df_rvas.uniprot_id.unique()
     fet = list(map(functools.partial(loop_proteins, 
                                          df_rvas=df_rvas,
                                          pdb_file_pos_guide=pdb_file_pos_guide, 
@@ -152,13 +152,13 @@ def annotation_test(
                                          df_filter = df_filter,
                                          radius=neighborhood_radius), 
                        uniprot_id_list))
-    # this list will contain an entry per protein, which will be a tuple constisting of:
+    # this list will contain an entry per protein, which will be a tuple (size 7) constisting of:
     # - the uniprot_id
     # - the contingency table (4 entries)
     # - the odds ratio
     # - the pvalue of the Fischer's exact test
 
-    pvals = [item[3] for item in fet]
+    pvals = [item[6] for item in fet]
     p_fdr, fdr_reject = perform_fdr_corretion(pvals)
     
     df_fet = pd.DataFrame(fet, columns=['uniprot_id', 'in_case', 'out_case', 'in_control', 'out_control', 'or', 'p'])
