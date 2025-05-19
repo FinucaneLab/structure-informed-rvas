@@ -5,7 +5,8 @@ from scan_test import scan_test
 from annotation_test import annotation_test
 from read_data import map_to_protein
 from pymol_code import run_all
-# from annotation_test import annotation_test
+from pymol_code import make_movie_from_pse
+
 
 
 if __name__ == '__main__':
@@ -175,6 +176,21 @@ if __name__ == '__main__':
         default=None,
         help='Directory with result files (for visualization)'
     )
+
+    parser.add_argument(
+        '--make_movie',
+        action='store_true',
+        default=False,
+        help='make movie from a Pymol session file',
+    )
+    
+    parser.add_argument(
+        '--pse',
+        type=str,
+        default=None,
+        help='Pymol session to make a movie from'
+    )
+
     args = parser.parse_args()
 
     if args.rvas_data_to_map is not None:
@@ -265,6 +281,12 @@ if __name__ == '__main__':
             raise ValueError("For visualization, you must provide --uniprot_id, --reference_directory and --result_directory")
         # print(args.uniprot_id, args.result_directory, args.reference_directory)
         run_all(args.uniprot_id, args.result_directory, args.reference_directory)
+    
+    elif args.make_movie:
+        if not (args.pse and args.result_directory):
+            raise ValueError("For making a movie, you must provide --pse and --result_directory")
+        make_movie_from_pse(args.result_directory, args.pse)
+
 
     else:
         raise Exception('no analysis specified')
