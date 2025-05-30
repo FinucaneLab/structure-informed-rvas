@@ -26,6 +26,7 @@ def perform_fischer_exact(inCas, outCas, inCon, outCon, uniprot_id) :
 def perform_fdr_corretion(p):
     p = np.array(p)
     mask = np.isfinite(p)
+    print(f'Performing FDR correction on {(mask*1).sum()} proteins with valid Fischer test.')
     p_reject1, p_fdr1 = multitest.fdrcorrection(p[mask], alpha=0.05)
     p_fdr = np.full(p.shape, np.nan)
     p_fdr[mask] = p_fdr1
@@ -35,7 +36,6 @@ def perform_fdr_corretion(p):
     return p_fdr, p_reject
 
 def expand_annot_neighborhood(df_annot, pdb_file_pos_guide, pdb_dir, results_dir, uniprot_id, radius):
-    df_annot = df_annot[df_annot.uniprot_id == uniprot_id]
     resAnnot = np.sort(df_annot.aa_pos.unique())
     if len(resAnnot)==0:
         return np.array([])
@@ -56,32 +56,41 @@ def expand_annot_neighborhood(df_annot, pdb_file_pos_guide, pdb_dir, results_dir
 
 def loop_proteins(uniprot_id, df_rvas, pdb_file_pos_guide, pdb_dir, results_dir, df_annot, df_filter, radius):
 
-    ## some sanity checks
-    info = pd.read_csv(pdb_file_pos_guide, sep="\t")
-    pdb_files = info.loc[info.pdb_filename.str.contains(uniprot_id),'pdb_filename']
-    if len(pdb_files)==0:
-        warnings.warn(f"Warning: PDB file for '{uniprot_id}' not found. skipping.", UserWarning)
-        return (uniprot_id, np.array([]), np.nan, np.nan)
-    for file in pdb_files:
-        if not os.path.isfile(os.path.join(pdb_dir,file)):
-            warnings.warn(f"Warning: PDB file(s) for '{uniprot_id}' not found. skipping.")
-            return (uniprot_id, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
-        
-    expanded_annot_residues = expand_annot_neighborhood(df_annot, pdb_file_pos_guide, pdb_dir, results_dir, uniprot_id, radius)
-    n_res_annot = expanded_annot_residues.shape[0]
+#    ## some sanity checks
+#    info = pd.read_csv(pdb_file_pos_guide, sep="\t")
+#    pdb_files = info.loc[info.pdb_filename.str.contains(uniprot_id),'pdb_filename']
+#    if len(pdb_files)==0:
+#        warnings.warn(f"Warning: PDB file for '{uniprot_id}' not found. skipping.", UserWarning)
+#        return (uniprot_id, np.array([]), np.nan, np.nan)
+#    for file in pdb_files:
+#        if not os.path.isfile(os.path.join(pdb_dir,file)):
+#            warnings.warn(f"Warning: PDB file(s) for '{uniprot_id}' not found. skipping.")
+#            return (uniprot_id, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
+    
+    df_annot = df_annot[df_annot.uniprot_id == uniprot_id]
+    if radius>0:
+        expanded_annot_residues = expand_annot_neighborhood(df_annot, pdb_file_pos_guide, pdb_dir, results_dir, uniprot_id, radius)
+        n_annot = expanded_annot_residues.shape[0]
+        ## if expanding, specific aminoacid changes are no longer relevant - drop
+        df_annot = pd.DataFrame({'uniprot_id': [uniprot_id]*n_annot, 'aa_pos': expanded_annot_residues})
+    
+    df_rvas_curr = df_rvas[df_rvas.uniprot_id == uniprot_id].copy()
+    #df_rvas_curr['hasAnnot'] = 0
+    #df_rvas_curr.loc[df_rvas_curr.aa_pos.isin(expanded_annot_residues), 'hasAnnot'] = 1
+    df_rvas_curr = df_rvas_curr.merge(df_annot, how='left', indicator='hasAnnot')
+    ## after merging 'hasAnnot' is either "left_only" (no annotation) or "both" (has annotation)
+    df_rvas_curr.hasAnnot = list(map(lambda x: 1 if x=="both" else 0, df_rvas_curr.hasAnnot)) 
 
+    n_res_annot = (df_rvas_curr.hasAnnot*1).sum()
     if n_res_annot==0:
         ## If no annotation found for uniprot_id
         print(f'{uniprot_id}: No annotated variants found.')
         return (uniprot_id, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
-    
-    df_rvas_curr = df_rvas[df_rvas.uniprot_id == uniprot_id].copy()
-    df_rvas_curr['hasAnnot'] = 0
-    df_rvas_curr.loc[df_rvas_curr.aa_pos.isin(expanded_annot_residues), 'hasAnnot'] = 1
 
     ## Filter rvas data frame
     n_res_annot_filtered = np.nan
     if df_filter is not None:
+        df_filter = df_filter[df_filter.uniprot_id == uniprot_id]
         df_rvas_curr = df_rvas_curr.merge(df_filter, on=['uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt'], how='inner')
         n_res_annot_filtered =  df_rvas_curr.shape[0]
         
@@ -97,7 +106,19 @@ def loop_proteins(uniprot_id, df_rvas, pdb_file_pos_guide, pdb_dir, results_dir,
     outCon = df_rvas_curr.loc[~df_rvas_curr.hasAnnot.astype(bool), 'ac_control'].sum()
     
     return perform_fischer_exact(inCas, outCas, inCon, outCon, uniprot_id)
-    
+
+
+def check_pdb_files_exist(uniprot_id, pdb_dir, pdb_file_list):
+    pdb_files = pdb_file_list.loc[pdb_file_list.pdb_filename.str.contains(uniprot_id),'pdb_filename']
+    if len(pdb_files)==0:
+        warnings.warn(f"Warning: PDB file for '{uniprot_id}' not found. skipping.", UserWarning)
+        return None
+    if all(os.path.isfile(os.path.join(pdb_dir,file)) for file in pdb_files):
+        return uniprot_id
+    else:
+        warnings.warn(f"Warning: PDB file(s) for '{uniprot_id}' not found. skipping.")
+        return None
+
 
 def annotation_test(
         df_rvas,
@@ -142,7 +163,21 @@ def annotation_test(
     else:
         df_filter = None
         
+
     uniprot_id_list = df_rvas.uniprot_id.unique()
+    uniprot_id_list_annot = df_annot.uniprot_id.unique()
+
+    uniprot_id_list = uniprot_id_list = list(set(uniprot_id_list) & set(uniprot_id_list_annot))
+    
+    ## check if pdb files exist for uniprot_ids
+    #print(f'Checking PDB files for all proteins...')
+    #info = pd.read_csv(pdb_file_pos_guide, sep="\t")
+    #uniprot_id_list = list(map(functools.partial(check_pdb_files_exist,
+    #                                             pdb_dir=pdb_dir,
+    #                                             pdb_file_list=info),
+    #                    uniprot_id_list))
+
+    ## loop for all valid proteins
     fet = list(map(functools.partial(loop_proteins, 
                                          df_rvas=df_rvas,
                                          pdb_file_pos_guide=pdb_file_pos_guide, 
@@ -168,6 +203,7 @@ def annotation_test(
 
     timestamp_format = "%M%d%m"
     timestamp = datetime.now().strftime(timestamp_format)
+#    df_fet.to_csv(os.path.join(results_dir, f'annotation_test_results_genebass-p4-foldx2-ar_{timestamp}.fdr.tsv'), sep='\t', index=False, na_rep='NaN')
     df_fet.to_csv(os.path.join(results_dir, f'annotation_test_results_{timestamp}.fdr.tsv'), sep='\t', index=False, na_rep='NaN')
 
     return df_fet
