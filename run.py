@@ -164,14 +164,14 @@ if __name__ == '__main__':
     )
 
     parser.add_argument(
-        '--reference_directory',
+        '--reference_dir',
         type=str,
         default=None,
-        help='Directory with reference files (for visualization)'
+        help='Directory with reference files'
     )
 
     parser.add_argument(
-        '--result_directory',
+        '--results_dir',
         type=str,
         default=None,
         help='Directory with result files (for visualization)'
@@ -277,15 +277,14 @@ if __name__ == '__main__':
         )
     
     elif args.visualization:
-        if not (args.uniprot_id and args.reference_directory and args.result_directory):
-            raise ValueError("For visualization, you must provide --uniprot_id, --reference_directory and --result_directory")
-        # print(args.uniprot_id, args.result_directory, args.reference_directory)
-        run_all(args.uniprot_id, args.result_directory, args.reference_directory)
+        if not (args.uniprot_id and args.reference_dir and args.results_dir):
+            raise ValueError("For visualization, you must provide --uniprot_id, --reference_dir and --results_dir")
+        run_all(args.uniprot_id, args.results_dir, args.reference_dir)
     
     elif args.make_movie:
-        if not (args.pse and args.result_directory):
-            raise ValueError("For making a movie, you must provide --pse and --result_directory")
-        make_movie_from_pse(args.result_directory, args.pse)
+        if not (args.pse and args.results_dir):
+            raise ValueError("For making a movie, you must provide --pse and --results_dir")
+        make_movie_from_pse(args.results_dir, args.pse)
 
 
     else:

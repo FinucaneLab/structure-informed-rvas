@@ -6,12 +6,22 @@ import ast
 import gzip
 from Bio.PDB import PDBParser
 from Bio.PDB import StructureBuilder, PDBIO, Model, Chain
-# from moviepy import VideoFileClip, clips_array
+
 import re
 from utils import read_p_values
 import h5py
 
+
 def write_full_pdb(full_pdb, output_path, pdb_overlap = 1200):
+    '''
+    Write a list of Residue objects to a PDB file as a new structure.
+
+    Parameters:
+    - full_pdb (list): a list contains all residue objects from all pdb files of a uniprot id 
+    - output_path (str): Path to save the output PDB file.
+    - pdb_overlap (int): Number of overlapping residues between different pdb files of a uniprot id.
+    '''
+
     try:
         builder = StructureBuilder.StructureBuilder()
         builder.init_structure("new_structure")
@@ -34,6 +44,16 @@ def write_full_pdb(full_pdb, output_path, pdb_overlap = 1200):
 
 
 def get_one_pdb(info_tsv, uniprot_id, reference_directory, pdb_overlap = 1200):
+    '''
+    Reconstructs a full protein PDB file from multiple PDB files that cover the protein's sequence.
+
+    Parameters:
+    - info_tsv (str): Name of the annotation file (TSV).
+    - uniprot_id (str): UniProt ID of the protein to reconstruct.
+    - reference_directory (str): Directory containing annotation and PDB files.
+    - pdb_overlap (int): Number of overlapping residues between different pdb files of a uniprot id.
+    '''
+
     info_tsv_p = os.path.join(reference_directory, info_tsv)
     try:
         info_df = pd.read_csv(info_tsv_p, sep='\t')
@@ -81,8 +101,15 @@ def get_one_pdb(info_tsv, uniprot_id, reference_directory, pdb_overlap = 1200):
 def pymol_rvas(df_rvas, reference_directory, results_directory):
     # make a pymol session with case and control mutations
     # output a gif and a .pse file
+    '''
+    Create PyMOL visualizations for RVAS results. For each PDB file:
+    - Produces a basic image and PSE file.
+    - Highlights mutations for control-only (blue), case-only (red), both (purple).
+    - Outputs a second image and PSE file with mutations shown and colored.
+    '''
+
     try:
-        df_rvas_p =  os.path.join(results_directory, df_rvas)
+        df_rvas_p =  os.path.join(reference_directory, df_rvas)
         if not os.path.isfile(df_rvas_p):
             print(f"[WARNING] RVAS file not found: {df_rvas_p}")
             return
@@ -122,12 +149,7 @@ def pymol_rvas(df_rvas, reference_directory, results_directory):
             cmd.save(gray_pse)
             print("Saved gray PSE file.")
 
-            # cmd.movie.add_nutate(8,60,start=1)
-            # gray_mv_p = os.path.join(results_directory, f"{pdb_filename}_gray.mov")
-            # cmd.movie.produce(gray_mv_p)
-
             tmp_df = df_rvas[df_rvas['pdb_filename'] == item]
-            # uniprot_id = tmp_df['uniprot_id'].values[0]
 
             control_mask = (tmp_df['ac_control'] >= 1) & (tmp_df['ac_case'] == 0)
             case_mask = (tmp_df['ac_case'] >= 1) & (tmp_df['ac_control'] == 0)
@@ -153,49 +175,33 @@ def pymol_rvas(df_rvas, reference_directory, results_directory):
             tmp_df_both['ac_case_real'] = tmp_df_both.groupby('aa_pos')['ac_case'].transform('sum')
             tmp_df_both['ac_control_real'] = tmp_df_both.groupby('aa_pos')['ac_control'].transform('sum')
 
-            tmp_df_control.to_csv('tmp_df_control.csv', sep='\t', index=False)
-            tmp_df_case.to_csv('tmp_df_case.csv', sep='\t', index=False)
-            tmp_df_both.to_csv('tmp_df_both.csv', sep='\t', index=False)    
+            tmp_df_control.to_csv(f'{reference_directory}/tmp_df_control.csv', sep='\t', index=False)
+            tmp_df_case.to_csv(f'{reference_directory}/tmp_df_case.csv', sep='\t', index=False)
+            tmp_df_both.to_csv(f'{reference_directory}/tmp_df_both.csv', sep='\t', index=False)    
 
             for _, row in tmp_df_control.iterrows():
-                # aa_ref = row['aa_ref']
-                # aa_alt = row['aa_alt']
                 aa_pos_file = row['aa_pos_file']
                 cmd.select(f"residue_{aa_pos_file}", f"resi {aa_pos_file} and name CA")
                 cmd.show("spheres", f"residue_{aa_pos_file}")
                 cmd.color("blue", f"residue_{aa_pos_file}")
-                # cmd.label(f"residue_{aa_pos_file} and name CA", f'"{aa_ref}->{aa_alt}"')
-                # cmd.label(f"residue_{aa_pos_file} and name CA", f'{aa_pos_file}')
 
             for _, row in tmp_df_case.iterrows():
-                # aa_ref = row['aa_ref']
-                # aa_alt = row['aa_alt']
                 aa_pos_file = row['aa_pos_file']
                 cmd.select(f"residue_{aa_pos_file}", f"resi {aa_pos_file} and name CA")
                 cmd.show("spheres", f"residue_{aa_pos_file}")
                 cmd.color("red", f"residue_{aa_pos_file}")
-                # cmd.label(f"residue_{aa_pos_file} and name CA", f'"{aa_ref}->{aa_alt}"')
-                # cmd.label(f"residue_{aa_pos_file} and name CA", f'{aa_pos_file}')
         
             for _, row in tmp_df_both.iterrows():
-                # aa_ref = row['aa_ref']
-                # aa_alt = row['aa_alt']
                 aa_pos_file = row['aa_pos_file']
                 cmd.select(f"residue_{aa_pos_file}", f"resi {aa_pos_file} and name CA")
                 cmd.show("spheres", f"residue_{aa_pos_file}")
                 cmd.color("purple", f"residue_{aa_pos_file}")
-                # cmd.label(f"residue_{aa_pos_file} and name CA", f'"{aa_ref}->{aa_alt}"')
-                # cmd.label(f"residue_{aa_pos_file} and name CA", f'{aa_pos_file}')
             
             cmd.ray(2400, 1800)
             cmd.set("ray_opaque_background", 1)
             cmd.png(f"{results_directory}/{pdb_filename}_mut.png")
 
-            # cmd.movie.add_nutate(12,60,start=1)
-            # rib_mut_mv_p = os.path.join(results_directory, f"{pdb_filename}_rib_mut.mov")
-            # cmd.movie.produce(rib_mut_mv_p)
-
-            pse_pdb_p = os.path.join(results_directory, f"{pdb_filename}_rib_mut.pse")
+            pse_pdb_p = os.path.join(results_directory, f"{pdb_filename}_mut.pse")
             cmd.save(pse_pdb_p)
             print('save pse pdb')
 
@@ -203,8 +209,10 @@ def pymol_rvas(df_rvas, reference_directory, results_directory):
         print(f"[ERROR] in pymol_rvas(): {e}")
 
 def get_pdb_filename(annot_df, info_df):
-    print(info_df)
-    # get the pdb filename for the annotation
+    '''
+    Get the pdb filename for the annotation
+    '''
+
     pdb_filenames = []
     for _, r1 in annot_df.iterrows():
         aa_pos = r1['aa_pos']
@@ -220,7 +228,10 @@ def get_pdb_filename(annot_df, info_df):
 
 def pymol_annotation(annot_file, reference_directory, results_directory, info_tsv=None, uniprot_id=None):
     # visualize the annotation
-
+    '''
+    Create PyMOL visualizations for annotation file. For each PDB file:
+    - Label the residues that are annotated in the annotation file.
+    '''
     try:
         annot_df_p = os.path.join(reference_directory, annot_file)
         if not os.path.isfile(annot_df_p):
@@ -253,11 +264,11 @@ def pymol_annotation(annot_file, reference_directory, results_directory, info_ts
                     if not os.path.exists(v):
                         print(f"[WARNING] PSE file from pymol_rvas() not found: {v}")
                         continue
-                    cmd.load(f'{v.split('.')[0]}_rib_mut.pse')
+                    cmd.load(f'{v.split('.')[0]}_mut.pse')
                     item = str(item)
                     cmd.select(f"annotation_residue_{item}", f"resi {item}")
                     cmd.label(f"annotation_residue_{item} and name CA", f'"annotation"')
-                    cmd.save(f'{v.split('.')[0]}_rib_mut.pse')
+                    cmd.save(f'{v.split('.')[0]}_mut.pse')
         else:
             print('No uniprot id provided')
 
@@ -267,6 +278,12 @@ def pymol_annotation(annot_file, reference_directory, results_directory, info_ts
     
 def pymol_scan_test(info_tsv, uniprot_id, reference_directory, results_directory):
     # color by case/control ratio of the neighborhood
+
+    '''
+    Create PyMOL visualizations for scan test results. For each PDB file:
+    - Color residues based on their case/control ratio (yellow_orange_red).
+    - Outputs a third PSE file with ratio colored.
+    '''
     try:
 
         df_results_p = os.path.join(results_directory, 'p_values.h5')
@@ -302,13 +319,8 @@ def pymol_scan_test(info_tsv, uniprot_id, reference_directory, results_directory
                 cmd.rebuild()
             
             cmd.spectrum("b", "yellow_orange_red", objects, byres=1)
-            # cmd.show("spheres", "name CA")
 
             cmd.save(f"{v.split('.')[0]}_ratio.pse")
-
-            # cmd.movie.add_nutate(12,60,start=1)
-            # cmd.movie.produce(f"{v.split('.')[0]}_ratio.mov")
-
 
     except Exception as e:
         print(f"[ERROR] in pymol_scan_test(): {e}")
@@ -316,6 +328,11 @@ def pymol_scan_test(info_tsv, uniprot_id, reference_directory, results_directory
 def pymol_neighborhood(uniprot_id, results_directory, info_tsv, reference_directory):
     # for each significant neighborhood, zoom in and show the case and control mutations
     # just in that neighborhood.
+    '''
+    Create PyMOL visualizations for significant neighborhood in scan test results. For each PDB file:
+    - Load the PSE file with ratio colored and show spheres for residues with p-value < 0.05.
+    - Outputs a image with spheres for significant residues.
+    '''
     try:
         df_results_p = os.path.join(results_directory, 'p_values.h5')
 
@@ -334,7 +351,6 @@ def pymol_neighborhood(uniprot_id, results_directory, info_tsv, reference_direct
         tmp_df = get_pdb_filename(tmp_df, tmp_info)
 
         tmp_df['visual_filename'] = tmp_df['pdb_filename'].apply(lambda x: os.path.join(results_directory, x.split('.')[0]+ '.pse'))
-        # tmp_df['ratio_normalized'] = tmp_df['ratio'] / tmp_df['ratio'].max()
         tmp_visuals = set(tmp_df['visual_filename'].tolist())
         for v in tmp_visuals:
             cmd.load(v.split('.')[0] + '_ratio.pse')
@@ -342,18 +358,24 @@ def pymol_neighborhood(uniprot_id, results_directory, info_tsv, reference_direct
                 resi = int(row['aa_pos'])
                 p_value = float(row['p_value'])
                 if p_value < 0.05:
-                    # nbhd_case = row['nbhd_case']
-                    # nbhd_ctrl = row['nbhd_control']
                     selection = f"resi {resi} and name CA"
                     cmd.select(f"residue_{resi}", selection)
                     cmd.show("spheres", f"residue_{resi}")
 
             cmd.save(v.split('.')[0] + '_ratio.pse')
+
+            cmd.ray(2400, 1800)
+            cmd.set("ray_opaque_background", 1)
+            cmd.png(f"{v.split('.')[0]}_ratio.png")
+
     except Exception as e:  
         print(f"[ERROR] in pymol_neighborhood(): {e}")
 
 def make_movie_from_pse(result_directory, pse_name):
-    # make a movie from the PSE file
+    '''
+    Create a movie from a PyMOL session file (.pse).
+    '''
+
     pse = os.path.join(result_directory, f"{pse_name}.pse")
     try:
         cmd.load(pse)
@@ -417,12 +439,13 @@ def make_movie_from_pse(result_directory, pse_name):
 
 
 def run_all(uniprot_id, results_directory, reference_directory):
+    '''
+    Run all PyMOL visualizations for a given UniProt ID.
+    '''
     df_rvas = f'{uniprot_id}.df_rvas.tsv'
     pymol_rvas(df_rvas, reference_directory, results_directory)
     # pymol_annotation('ClinVar_PLP_uniprot_canonical.tsv', reference_directory , results_directory, 'pdb_pae_file_pos_guide.tsv', uniprot_id)
-    pymol_scan_test('pdb_pae_file_pos_guide.tsv', df_rvas, uniprot_id, reference_directory, results_directory)
+    pymol_scan_test('pdb_pae_file_pos_guide.tsv', uniprot_id, reference_directory, results_directory)
     pymol_neighborhood(uniprot_id, results_directory, 'pdb_pae_file_pos_guide.tsv', reference_directory)
-    # make_movie(results_directory, uniprot_id, 'pdb_pae_file_pos_guide.tsv')
-    # cmd.reinitialize()
 
 
