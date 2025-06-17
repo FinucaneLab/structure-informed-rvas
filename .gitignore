@@ -1,0 +1,12 @@
+# Ignore macOS system files
+.DS_Store
+
+# Ignore Python cache
+__pycache__/
+*.py[cod]
+
+# Ignore temporary or backup files
+*.log
+*.tmp
+*.swp
+
