@@ -264,11 +264,11 @@ def pymol_annotation(annot_file, reference_directory, results_directory, info_ts
                     if not os.path.exists(v):
                         print(f"[WARNING] PSE file from pymol_rvas() not found: {v}")
                         continue
-                    cmd.load(f'{v.split('.')[0]}_mut.pse')
+                    cmd.load(f"{v.split('.')[0]}_mut.pse")
                     item = str(item)
                     cmd.select(f"annotation_residue_{item}", f"resi {item}")
                     cmd.label(f"annotation_residue_{item} and name CA", f'"annotation"')
-                    cmd.save(f'{v.split('.')[0]}_mut.pse')
+                    cmd.save(f"{v.split('.')[0]}_mut.pse")
         else:
             print('No uniprot id provided')
 
@@ -306,7 +306,7 @@ def pymol_scan_test(info_tsv, uniprot_id, reference_directory, results_directory
         # tmp_df['ratio_normalized'].to_csv('test.csv', sep='\t', index=False)
         tmp_visuals = set(tmp_df['visual_filename'].tolist())
         for v in tmp_visuals:
-            cmd.load(f'{v.split('.')[0]}_gray.pse')
+            cmd.load(f"{v.split('.')[0]}_gray.pse")
             objects = cmd.get_names('objects')[-1]
 
             tmp_df_visuals = tmp_df[tmp_df['visual_filename'] == v]
