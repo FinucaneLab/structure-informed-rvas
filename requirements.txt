@@ -1,0 +1,21 @@
+# Core scientific computing
+numpy>=1.20.0
+pandas>=1.3.0
+scipy>=1.7.0
+
+# Statistics and machine learning
+scikit-learn>=1.0.0
+statsmodels>=0.13.0
+
+# Bioinformatics
+biopython>=1.79
+
+# Data storage and compression
+h5py>=3.6.0
+hdf5plugin>=3.0.0
+
+# Visualization and structure analysis
+pymol>=2.5.0
+
+# Video processing for visualizations
+moviepy>=1.0.3

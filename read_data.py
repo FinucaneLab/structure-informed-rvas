@@ -2,6 +2,9 @@ import pandas as pd
 import numpy as np
 import h5py
 import hdf5plugin
+from logger_config import get_logger
+
+logger = get_logger(__name__)
 
 def load_ref_for_chrom(path, chrom, pos_filter):
     with h5py.File(path,'r') as f:
@@ -9,7 +12,7 @@ def load_ref_for_chrom(path, chrom, pos_filter):
             chrom_names = list(f.keys())
             chrom_names = set(chrom.split('_')[0] for chrom in chrom_names)
             chrom_names = ', '.join(sorted(chrom_names))
-            print(f'Chromosome {chrom} not found in reference. Chromosomes in reference: {chrom_names}.')
+            logger.error(f'Chromosome {chrom} not found in reference. Chromosomes in reference: {chrom_names}.')
             return None
             
         ref_alt = f[f'{chrom}_ref_alt'][:]
@@ -119,9 +122,9 @@ def map_to_protein(
         result.append(joined)
 
     if len(result) > 0 and result[0].shape[0] == 0:
-        print('WARNING: could not identify proteins.')
+        logger.warning('Could not identify proteins.')
         if rvas_data.shape[0] > 0 and rvas_data_by_chr.shape[0] > 0:
-            print('Does variant id have the same format? Rvas_data: {rvas_data["Variant ID"].iloc[0]}, reference data: {rvas_data_by_chr.index[0]}')
+            logger.warning('Does variant id have the same format? Rvas_data: {rvas_data["Variant ID"].iloc[0]}, reference data: {rvas_data_by_chr.index[0]}')
 
     result = pd.concat(result)
     return result

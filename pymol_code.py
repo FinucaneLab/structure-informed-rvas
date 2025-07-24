@@ -8,6 +8,9 @@ from Bio.PDB import PDBParser
 from Bio.PDB import StructureBuilder, PDBIO, Model, Chain
 from moviepy import VideoFileClip, clips_array
 import re
+from logger_config import get_logger
+
+logger = get_logger(__name__)
 
 # from utils import read_p_values
 
@@ -23,14 +26,14 @@ def write_full_pdb(full_pdb, output_path, pdb_overlap = 1200):
 
         for residue in full_pdb:
             if residue.id[1] == pdb_overlap + 1:
-                print(residue)
+                logger.debug(f'Processing residue: {residue}')
             chain.add(residue.copy())  
 
         io = PDBIO()
         io.set_structure(builder.get_structure())
         io.save(output_path)
     except Exception as e:
-        print(f"[ERROR] Failed to write PDB file: {e}")
+        logger.error(f"Failed to write PDB file: {e}")
 
 
 def get_one_pdb(info_tsv, uniprot_id, reference_directory, pdb_overlap = 1200):
@@ -38,7 +41,7 @@ def get_one_pdb(info_tsv, uniprot_id, reference_directory, pdb_overlap = 1200):
     try:
         info_df = pd.read_csv(info_tsv_p, sep='\t')
         if not os.path.isfile(info_tsv_p):
-            print(f"[WARNING] Info TSV not found: {info_tsv_p}")
+            logger.warning(f"Info TSV not found: {info_tsv_p}")
             return
     
         info_df['pos_covered'] = info_df['pos_covered'].apply(ast.literal_eval)
@@ -49,7 +52,7 @@ def get_one_pdb(info_tsv, uniprot_id, reference_directory, pdb_overlap = 1200):
 
         for pdb in pdbs:
             path = os.path.join(reference_directory, pdb['filename'])
-            print('Reading pdb:', path)
+            logger.debug(f'Reading PDB: {path}')
 
             try:
                 with gzip.open(path, "rt") as handle:
@@ -70,13 +73,13 @@ def get_one_pdb(info_tsv, uniprot_id, reference_directory, pdb_overlap = 1200):
                         full_pdb.append(res)
 
             except Exception as e:
-                print(f"[ERROR] Failed to parse {p}: {e}")
+                logger.error(f"Failed to parse {p}: {e}")
 
         output_path = os.path.join(reference_directory, 'pdb_files', uniprot_id + '.pdb')
         write_full_pdb(full_pdb, output_path, pdb_overlap)
 
     except Exception as e:
-        print(f"[ERROR] in get_one_pdb(): {e}")
+        logger.error(f"Error in get_one_pdb(): {e}")
 
 def pymol_rvas(info_tsv, df_rvas, reference_directory, results_directory):
     # make a pymol session with case and control mutations
@@ -84,7 +87,7 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory, results_directory):
     try:
         df_rvas_p =  os.path.join(results_directory, df_rvas)
         if not os.path.isfile(df_rvas_p):
-            print(f"[WARNING] RVAS file not found: {df_rvas_p}")
+            logger.warning(f"RVAS file not found: {df_rvas_p}")
             return
 
         df_rvas = pd.read_csv(df_rvas_p, sep='\t')
@@ -98,17 +101,17 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory, results_directory):
         for item in pdbs:
             p = os.path.join(reference_directory, f'pdb_files/{item}')
             if not os.path.isfile(p):
-                print(f"[ERROR] PDB file not found: {p}")
+                logger.error(f"PDB file not found: {p}")
                 continue
-            print('Reading pdb:', p)
+            logger.debug(f'Reading PDB: {p}')
 
             cmd.load(p, "structure")
             cmd.color("grey")
             uniprot_id = item.split('-')[1]
             gray_pse = os.path.join(results_directory, f"{uniprot_id}_gray.pse")
-            print(gray_pse)
+            logger.debug(f'Gray PSE file: {gray_pse}')
             cmd.save(gray_pse)
-            print("Saved gray PSE file.")
+            logger.info('Saved gray PSE file')
 
             # cmd.mset("1 x 60")
             # cmd.scene("001","store")
@@ -117,7 +120,7 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory, results_directory):
             cmd.movie.add_nutate(8,60,start=1)
             gray_mv_p = os.path.join(results_directory, f"{uniprot_id}_gray.mov")
             cmd.movie.produce(gray_mv_p)
-            # print('scene 001 stored')
+            # logger.debug('Scene 001 stored')
 
             tmp_df = df_rvas[df_rvas['pdb_filename'] == item]
             uniprot_id = tmp_df['uniprot_id'].values[0]
@@ -192,7 +195,7 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory, results_directory):
 
             pse_pdb_p = os.path.join(results_directory, f"{uniprot_id}.pse")
             cmd.save(pse_pdb_p)
-            print('save pse pdb')
+            logger.debug('Saving PSE PDB')
         
         if info_tsv is not None:
             for uniprot_id in uniprot_ids:
@@ -256,14 +259,14 @@ def pymol_rvas(info_tsv, df_rvas, reference_directory, results_directory):
                 cmd.save(pse_p)
 
     except Exception as e:
-        print(f"[ERROR] in pymol_rvas(): {e}")
+        logger.error(f"Error in pymol_rvas(): {e}")
 
 def pymol_annotation(annot_file, reference_directory, results_directory):
     # visualize the annotation
     try:
         annot_df_p = os.path.join(reference_directory, annot_file)
         if not os.path.isfile(annot_df_p):
-            print(f"[WARNING] Annotation file not found: {annot_df_p}")
+            logger.warning(f"Annotation file not found: {annot_df_p}")
             return
         
         annot_df = pd.read_csv(annot_df_p, sep='\t')
@@ -271,7 +274,7 @@ def pymol_annotation(annot_file, reference_directory, results_directory):
         for uniprot_id in uniprot_ids:
             p = os.path.join(results_directory,  f'{uniprot_id}.pse')
             if not os.path.exists(p):
-                print(f"[WARNING] PSE file from pymol_rvas() not found: {p}")
+                logger.warning(f"PSE file from pymol_rvas() not found: {p}")
                 continue
             cmd.load(p)
             tmp_annot = annot_df[annot_df['uniprot_id'] == uniprot_id]
@@ -282,7 +285,7 @@ def pymol_annotation(annot_file, reference_directory, results_directory):
             cmd.save(p)
 
     except Exception as e:
-        print(f"[ERROR] in pymol_annotation(): {e}")
+        logger.error(f"Error in pymol_annotation(): {e}")
 
     
 def pymol_scan_test(info_tsv, df_rvas, uniprot_id, reference_directory, results_directory):
@@ -290,7 +293,7 @@ def pymol_scan_test(info_tsv, df_rvas, uniprot_id, reference_directory, results_
     try:
         df_results_p = os.path.join(results_directory, 'p_values.h5')
         if not os.path.isfile(df_results_p):
-            print(f"[WARNING] Scan test result file not found: {df_results_p}")
+            logger.warning(f"Scan test result file not found: {df_results_p}")
             return
         if info_tsv is not None:
             pse_p = os.path.join(results_directory, uniprot_id + '.pse')
@@ -300,7 +303,7 @@ def pymol_scan_test(info_tsv, df_rvas, uniprot_id, reference_directory, results_
             pdb_filename = df_rvas['pdb_filename'].values[0]
             pse_p = os.path.join(results_directory, f"{uniprot_id}_{pdb_filename.split('.')[0]}.pse")
         if not os.path.isfile(pse_p):
-            print(f"[WARNING] PSE file from pymol_rvas() not found: {pse_p}")
+            logger.warning(f"PSE file from pymol_rvas() not found: {pse_p}")
             return
         
         with h5py.File(df_results_p, 'r') as fid:
@@ -349,7 +352,7 @@ def pymol_scan_test(info_tsv, df_rvas, uniprot_id, reference_directory, results_
         result_pse_p = os.path.join(results_directory, f'{uniprot_id}_result.pse')
         cmd.save(result_pse_p)
     except Exception as e:
-        print(f"[ERROR] in pymol_scan_test(): {e}")
+        logger.error(f"Error in pymol_scan_test(): {e}")
 
 def pymol_neighborhood(df_results, results_directory):
     # for each significant neighborhood, zoom in and show the case and control mutations
@@ -358,12 +361,12 @@ def pymol_neighborhood(df_results, results_directory):
         uniprot_id = df_results.split('_')[0]
         df_results_p = os.path.join(reference_directory, df_results)
         if not os.path.isfile(df_results_p):
-            print(f"[WARNING] Scan test result file not found: {df_results_p}")
+            logger.warning(f"Scan test result file not found: {df_results_p}")
             return
         df_results = pd.read_csv(df_results_p, sep='\t')
         pse_p = os.path.join(reference_directory, uniprot_id + '_result.pse')
         if not os.path.isfile(pse_p):
-            print(f"[WARNING] PSE file from pymol_scan_test() not found: {pse_p}")
+            logger.warning(f"PSE file from pymol_scan_test() not found: {pse_p}")
             return
         
         cmd.load(pse_p)
@@ -380,7 +383,7 @@ def pymol_neighborhood(df_results, results_directory):
         
         cmd.save(pse_p)
     except Exception as e:  
-        print(f"[ERROR] in pymol_neighborhood(): {e}")
+        logger.error(f"Error in pymol_neighborhood(): {e}")
 
 def make_movie(results_directory, uniprot_id):
 
@@ -389,14 +392,14 @@ def make_movie(results_directory, uniprot_id):
     ratio_mv_p = os.path.join(results_directory, f'{uniprot_id}_ratio.mov')
 
     if not os.path.exists(gray_mv_p):
-        print(f"[WARNING] pymol_rvas() base movie file not found: {gray_mv_p}")
+        logger.warning(f"pymol_rvas() base movie file not found: {gray_mv_p}")
         return
     if not os.path.exists(rib_mut_mv_p): 
-        print(f"[WARNING] pymol_rvas() movie file not found: {rib_mut_mv_p}")
+        logger.warning(f"pymol_rvas() movie file not found: {rib_mut_mv_p}")
         return
     
     if not os.path.exists(ratio_mv_p): 
-        print(f"[WARNING] pymol_neighborhood() movie file not found: {rib_mut_mv_p}")
+        logger.warning(f"pymol_neighborhood() movie file not found: {rib_mut_mv_p}")
         return
     
     clip1 = VideoFileClip(gray_mv_p)

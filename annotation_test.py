@@ -8,16 +8,19 @@ import pandas as pd
 from utils import valid_for_fisher, get_adjacency_matrix
 from scipy import stats
 import statsmodels.stats.multitest as multitest
+from logger_config import get_logger
+
+logger = get_logger(__name__)
 
 
 
 def perform_fischer_exact(inCas, outCas, inCon, outCon, uniprot_id) :
     contingency_table = np.array([ [inCas, outCas], [inCon, outCon] ])
     if valid_for_fisher(contingency_table):
-        print(f'{uniprot_id}: Ran Fischer\'s exact test.')
+        logger.debug(f'{uniprot_id}: Ran Fischer\'s exact test.')
         o, p = stats.fisher_exact(contingency_table)
     else:
-        print(f'{uniprot_id}: Not valid for Fischer\'s exact test.')
+        logger.warning(f'{uniprot_id}: Not valid for Fischer\'s exact test.')
         o = np.nan
         p = np.nan
     return (uniprot_id, inCas, outCas, inCon, outCon, o, p)
@@ -26,7 +29,7 @@ def perform_fischer_exact(inCas, outCas, inCon, outCon, uniprot_id) :
 def perform_fdr_corretion(p):
     p = np.array(p)
     mask = np.isfinite(p)
-    print(f'Performing FDR correction on {(mask*1).sum()} proteins with valid Fischer test.')
+    logger.info(f'Performing FDR correction on {(mask*1).sum()} proteins with valid Fischer test.')
     p_reject1, p_fdr1 = multitest.fdrcorrection(p[mask], alpha=0.05)
     p_fdr = np.full(p.shape, np.nan)
     p_fdr[mask] = p_fdr1
@@ -84,7 +87,7 @@ def loop_proteins(uniprot_id, df_rvas, pdb_file_pos_guide, pdb_dir, pae_dir, res
     n_res_annot = (df_rvas_curr.hasAnnot*1).sum()
     if n_res_annot==0:
         ## If no annotation found for uniprot_id
-        print(f'{uniprot_id}: No annotated variants found.')
+        logger.warning(f'{uniprot_id}: No annotated variants found.')
         return (uniprot_id, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
 
     ## Filter rvas data frame
@@ -96,7 +99,7 @@ def loop_proteins(uniprot_id, df_rvas, pdb_file_pos_guide, pdb_dir, pae_dir, res
         
     if n_res_annot_filtered==0:
         ## If no annotated residues remain after filtering
-        print(f'{uniprot_id}: No variants remain after filtering.')
+        logger.warning(f'{uniprot_id}: No variants remain after filtering.')
         return (uniprot_id, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
 
     ### Perform Fischer's exact test
@@ -135,33 +138,33 @@ def annotation_test(
     pae_dir = f'{reference_dir}/pae_files/'
     
     try:
-        print(df_rvas)
+        logger.debug(f"df_rvas content: {df_rvas}")
         uniprot_id_list = df_rvas.uniprot_id.unique()
-        print(f"Found {len(uniprot_id_list)} unique UniProt IDs")
+        logger.info(f"Found {len(uniprot_id_list)} unique UniProt IDs")
     except AttributeError:
-        print("Error: df_rvas is not defined or doesn't have a 'uniprot_id' attribute")
+        logger.error("df_rvas is not defined or doesn't have a 'uniprot_id' attribute")
     except Exception as e:
-        print(f"Error extracting unique UniProt IDs from df_rvas: {e}")
+        logger.error(f"Error extracting unique UniProt IDs from df_rvas: {e}")
 
     # read annotation file
     try:
         df_annot = pd.read_csv(annotation_file, sep="\t")
     except FileNotFoundError:
-        print(f"Warning: File not found: {annotation_file}")
+        logger.warning(f"File not found: {annotation_file}")
     except pd.errors.EmptyDataError:
-        print(f"Warning: Empty file: {annotation_file}")
+        logger.warning(f"Empty file: {annotation_file}")
         return pd.DataFrame()
     except Exception as e:
-        print(f"Error reading file {annotation_file}: {e}")
+        logger.error(f"Error reading file {annotation_file}: {e}")
 
     # read filter file (or set to None)
     if filter_file is not None:
         try:
             df_filter = pd.read_csv(filter_file, sep="\t")
         except FileNotFoundError:
-            print(f"Warning: File not found: {filter_file}")
+            logger.warning(f"File not found: {filter_file}")
         except Exception as e:
-            print(f"Error reading file {filter_file}: {e}")
+            logger.error(f"Error reading file {filter_file}: {e}")
     else:
         df_filter = None
         
@@ -172,7 +175,7 @@ def annotation_test(
     uniprot_id_list = uniprot_id_list = list(set(uniprot_id_list) & set(uniprot_id_list_annot))
     
     ## check if pdb files exist for uniprot_ids
-    #print(f'Checking PDB files for all proteins...')
+    # logger.debug('Checking PDB files for all proteins...')
     #info = pd.read_csv(pdb_file_pos_guide, sep="\t")
     #uniprot_id_list = list(map(functools.partial(check_pdb_files_exist,
     #                                             pdb_dir=pdb_dir,

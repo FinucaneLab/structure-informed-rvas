@@ -8,6 +8,9 @@ import os
 import re
 import json
 import warnings
+from logger_config import get_logger
+
+logger = get_logger(__name__)
 
 def get_pairwise_distances(pdb_file, *args):
     # optional arguments i and j:
@@ -162,14 +165,17 @@ def get_pae_matrix_structure(pae_file_pos_guide, pae_dir, uniprot_id):
 #     return (distance_matrix < radius) * 1
 
 def get_adjacency_matrix(pdb_pae_file_pos_guide, pdb_dir, pae_dir, uniprot_id, radius, pae_cutoff):
+    logger.debug(f"Computing adjacency matrix for {uniprot_id} with radius={radius}, pae_cutoff={pae_cutoff}")
     distance_matrix = get_distance_matrix_structure(pdb_pae_file_pos_guide, pdb_dir, uniprot_id)
     pae_matrix = get_pae_matrix_structure(pdb_pae_file_pos_guide, pae_dir, uniprot_id)
     dist_thresh = (distance_matrix < radius) * 1
     if pae_matrix is None:
+        logger.warning(f"No PAE matrix found for {uniprot_id}, using distance-only adjacency")
         adj_mat = dist_thresh
     else:
         pae_thresh = (pae_matrix < pae_cutoff) * 1
         adj_mat = dist_thresh & pae_thresh
+        logger.debug(f"Adjacency matrix computed: {np.sum(adj_mat)} edges from {adj_mat.shape[0]} positions")
     return adj_mat
     
 def valid_for_fisher(contingency_table):

@@ -4,7 +4,9 @@ import os
 from scan_test import scan_test
 from annotation_test import annotation_test
 from read_data import map_to_protein
-# from annotation_test import annotation_test
+from logger_config import get_logger
+
+logger = get_logger(__name__)
 
 
 if __name__ == '__main__':
@@ -210,6 +212,7 @@ if __name__ == '__main__':
         df_fdr_filter = None
 
     if args.scan_test: 
+        logger.info("Starting scan test analysis")
         scan_test(
             df_rvas,
             args.reference_dir,
@@ -226,7 +229,7 @@ if __name__ == '__main__':
         )
     
     elif args.clinvar_test:
-        print('Performing ClinVar test.')
+        logger.info('Starting ClinVar test analysis')
         annotation_file = f'{args.reference_dir}/ClinVar_PLP_uniprot_canonical.tsv.gz'
         filter_file = f'{args.reference_dir}/AlphaMissense_gt_0.9.tsv.gz'
         annotation_test(
@@ -239,7 +242,7 @@ if __name__ == '__main__':
         )
 
     elif args.annotation_file is not None:
-        print('Performing annotation test')
+        logger.info('Starting annotation test analysis')
         annotation_test(
             df_rvas,
             args.annotation_file,
