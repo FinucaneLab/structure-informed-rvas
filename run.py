@@ -156,6 +156,7 @@ if __name__ == '__main__':
         default='all_proteins.fdr.tsv',
         help='file in the results directory to write the fdrs to'
     )
+    
     args = parser.parse_args()
 
     # Input validation
@@ -257,19 +258,6 @@ if __name__ == '__main__':
             df_fdr_filter,
             args.ignore_ac,
             args.fdr_file,
-        )
-    
-    elif args.clinvar_test:
-        logger.info('Starting ClinVar test analysis')
-        annotation_file = f'{args.reference_dir}/ClinVar_PLP_uniprot_canonical.tsv.gz'
-        filter_file = f'{args.reference_dir}/AlphaMissense_gt_0.9.tsv.gz'
-        annotation_test(
-            df_rvas,
-            annotation_file,
-            args.reference_dir,
-            args.neighborhood_radius,
-            args.pae_cutoff,
-            filter_file,
         )
 
     elif args.annotation_file is not None:

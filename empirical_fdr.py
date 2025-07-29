@@ -119,8 +119,16 @@ def _apply_fdr_correction(df_pvals, false_discoveries):
     
     return df_pvals[['uniprot_id', 'aa_pos', 'p_value', 'fdr', 'nbhd_case', 'nbhd_control', 'ratio']]
 
+def summarize_results(df_results, fdr_cutoff):
 
-def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, annot_file=None, large_p_threshold=0.05):
+    top_hits_all_genes = df_results.loc[df_results.groupby('uniprot_id')['fdr'].idxmin()]
+    top_hits_sig = top_hits_all_genes[top_hits_all_genes.fdr<fdr_cutoff]
+    top_hits_sig = top_hits_sig.sort_values(by='p_value')
+    logger.info('')
+    logger.info(f'{len(top_hits_sig)} out of {len(top_hits_all_genes)} proteins have a neighborhood significant at {fdr_cutoff}.')
+    logger.info(f'Top 20 hits:\n{top_hits_sig[0:20].to_string()}')
+
+def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, large_p_threshold=0.05):
     """
     Compute False Discovery Rate correction for scan test results.
     
@@ -132,7 +140,6 @@ def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, annot_fil
         fdr_cutoff: FDR threshold for significance
         df_fdr_filter: Optional DataFrame to filter proteins and positions
         reference_dir: Directory with reference files for result annotation
-        annot_file: Optional annotation file path
         large_p_threshold: P-value threshold for computational efficiency (default 0.05)
         
     Returns:
@@ -156,8 +163,11 @@ def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, annot_fil
     # Apply FDR correction
     df_results = _apply_fdr_correction(df_pvals, false_discoveries)
     
+    # Add gene name
+    df_gene = pd.read_csv(f'{reference_dir}/gene_to_uniprot_id.tsv', sep='\t')
+    df_results = df_results.merge(df_gene, how='left', on='uniprot_id')
+
     # Summarize and return results
-    from scan_test import summarize_results  # Import here to avoid circular imports
-    summarize_results(df_results, fdr_cutoff, reference_dir, annot_file)
+    summarize_results(df_results, fdr_cutoff)
     
     return df_results

@@ -11,21 +11,6 @@ from logger_config import get_logger
 from empirical_fdr import compute_fdr
 
 logger = get_logger(__name__)
-    
-def get_pval_lookup_case_control_old(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_ctrl):
-    max_n_case_nbhd = np.max(n_case_nbhd_mat)
-    max_n_control_nbhd = np.max(n_control_nbhd_mat)
-    pvals = np.ones((max_n_case_nbhd+1, max_n_control_nbhd+1))
-    for n_case_nbhd in range(max_n_case_nbhd + 1):
-        for n_ctrl_nbhd in range(max_n_control_nbhd + 1):
-            contingency_table = np.array([
-                [n_case_nbhd, n_ctrl_nbhd],
-                [n_case - n_case_nbhd, n_ctrl - n_ctrl_nbhd]
-            ])
-            if valid_for_fisher(contingency_table):
-                _, p = fisher_exact(contingency_table)
-                pvals[n_case_nbhd, n_ctrl_nbhd] = p
-    return pvals
 
 def get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_ctrl):
     # from Claude
@@ -123,7 +108,7 @@ def get_case_control_ac_matrix(df, n_res, n_sim):
     control_ac_matrix = np.hstack([control_ac_per_residue, null_control_ac_per_residue])
     return case_ac_matrix, control_ac_matrix
 
-def get_all_pvals(
+def compute_all_pvals(
         df,
         pdb_file_pos_guide,
         pdb_dir,
@@ -160,7 +145,6 @@ def get_all_pvals(
 
 def write_df_pvals(results_dir, uniprot_id, df_pvals):
     with h5py.File(os.path.join(results_dir, 'p_values.h5'), 'a') as fid:
-        # uniprot_id = f.split('/')[-1].split('.')[0]
         null_pval_cols = [c for c in df_pvals.columns if c.startswith('null_pval')]
         write_dataset(fid, f'{uniprot_id}', df_pvals[['p_value', 'ratio']])
         write_dataset(fid, f'{uniprot_id}_null_pval', df_pvals[null_pval_cols])
@@ -168,7 +152,7 @@ def write_df_pvals(results_dir, uniprot_id, df_pvals):
 
 def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir, uniprot_id, radius, pae_cutoff, n_sims):
     results_prefix = os.path.join(results_dir, uniprot_id)
-    df_pvals, adj_mat = get_all_pvals(
+    df_pvals, adj_mat = compute_all_pvals(
         df,
         pdb_file_pos_guide,
         pdb_dir,
@@ -178,64 +162,7 @@ def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir,
         radius,
         pae_cutoff,
     )
-    # np.save(f'{results_prefix}.adj_mat.npy', adj_mat)
-    df.to_csv(f'{results_prefix}.df_rvas.tsv', sep='\t', index=False)
     write_df_pvals(results_dir, uniprot_id, df_pvals)
-
-def summarize_results(df_results, fdr_cutoff, reference_dir, annot_file):
-
-    if annot_file is not None:
-        logger.info('')
-        logger.info('Merging with annotations')
-        df_ba = pd.read_csv(annot_file, sep='\t')
-        df_ba_extra_cols = list([x for x in df_ba.columns if not x in ['uniprot_id', 'aa_pos']])
-        df_results = pd.merge(df_results, df_ba, how='left', indicator=True)
-        df_results['annotated'] = df_results['_merge'] == 'both'
-
-    df_gene = pd.read_csv(f'{reference_dir}/gene_to_uniprot_id.tsv', sep='\t')
-    df_results = df_results.merge(df_gene, how='left', on='uniprot_id')
-    
-    top_hits_all_genes = df_results.loc[df_results.groupby('uniprot_id')['fdr'].idxmin()]
-    top_hits_sig = top_hits_all_genes[top_hits_all_genes.fdr<fdr_cutoff]
-    top_hits_sig = top_hits_sig.sort_values(by='p_value')
-    logger.info('')
-    logger.info(f'{len(top_hits_sig)} out of {len(top_hits_all_genes)} proteins have a neighborhood significant at {fdr_cutoff}.')
-    logger.info(f'Top 20 hits:\n{top_hits_sig[0:20].to_string()}')
-    
-    if annot_file is not None:
-        overall_num_annot = df_results.annotated.sum()
-        overall_prop_annot = overall_num_annot / len(df_results)
-        df_sig = df_results[df_results.fdr<fdr_cutoff]
-        prop_sig_annot = df_sig.annotated.mean()
-        num_prot_with_sig_annot = df_sig.groupby('uniprot_id')['annotated'].max().sum()
-        num_proteins_sig = len(top_hits_sig)
-        top_hits_sig_annot = top_hits_sig.annotated.sum()
-        
-        c = [
-            [
-                top_hits_sig_annot,
-                num_proteins_sig - top_hits_sig_annot
-            ],[
-                overall_num_annot - top_hits_sig_annot,
-                len(df_results) - overall_num_annot - (num_proteins_sig - top_hits_sig_annot)
-            ]
-        ]
-        _, p = fisher_exact(c)
-
-        logger.info(f'Overall prop annotated: {overall_prop_annot}')
-        logger.info(f'Proportion significant residues annotated: {prop_sig_annot}')
-        logger.info(f'{num_prot_with_sig_annot}/{num_proteins_sig} ({num_prot_with_sig_annot/num_proteins_sig*100}%) have a significant annotated residue.')
-        logger.info(f'{top_hits_sig_annot}/{num_proteins_sig} ({top_hits_sig_annot/num_proteins_sig*100}%) top significant residues annotated.')
-        logger.info(f'P = {p}')
-        logger.info('')
-
-        df_to_print = df_results.loc[
-                df_results.annotated & (df_results.fdr<fdr_cutoff),
-                ['gene_name', 'uniprot_id', 'p_value', 'fdr']+df_ba_extra_cols
-            ].drop_duplicates().copy()
-        df_to_print = df_to_print.loc[df_to_print.groupby('uniprot_id')['fdr'].idxmin()]
-        logger.info(f'Sample results:\n{df_to_print[0:20].to_string()}')
-
 
 def _preprocess_scan_data(df_rvas, ignore_ac):
     """Preprocess scan data based on ignore_ac flag."""
@@ -322,11 +249,10 @@ def scan_test(
     Main orchestration function for the structure-informed rare variant association study.
     Processes variants across proteins and computes statistical associations with 3D neighborhoods.
     """
-    annot_file = f'{reference_dir}/annotations/g2p_binding_site_active_site.tsv'
     
     # Handle FDR-only mode
     if fdr_only:
-        df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, annot_file=annot_file)
+        df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir)
         df_results.to_csv(fdr_file, sep='\t', index=False)
         return
 
@@ -347,6 +273,6 @@ def scan_test(
     
     # Compute FDR if requested
     if not no_fdr:
-        df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, annot_file=annot_file)
+        df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir)
         df_results.to_csv(fdr_file, sep='\t', index=False)
     
