@@ -235,8 +235,8 @@ if __name__ == '__main__':
     else:
         df_rvas = None
     
-    # Only require data input if not doing FDR-only analysis
-    if df_rvas is None and not args.fdr_only:
+    # Only require data input if not doing FDR-only analysis or visualization
+    if df_rvas is None and not args.fdr_only and not args.visualization:
         raise ValueError("Must provide either --rvas-data-to-map or --rvas-data-mapped")
     
     if args.pdb_filename is not None and df_rvas is not None:
