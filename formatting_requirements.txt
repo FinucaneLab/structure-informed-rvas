@@ -1,0 +1,56 @@
+Formatting requirements for input data to the Scan Test
+
+Option 1: DNA coordinates of variant data that has not previously been mapped to UniProt proteins. 
+
+Both compressed and non-compressed file types will work with the code, with '.tsv.bgz' recommended. 
+
+In order to map variants to UniProt canonical proteins, the input data for each variant must contain information on chromosome, locus, reference allele, and alternate allele. The following formats for this data will work when calling run.py without any additional arguments:
+
+Single column named 'Variant ID':
+- chr:pos:ref:alt form (example: 'chr1:925963:G:A')
+- chr-pos-ref-alt form (example: 'chr1-925963-G-A')
+
+Double columns named 'locus' and 'alleles':
+- 'locus' is an integer (example: 925963)
+- 'alleles' is a string
+- - ["ref", "alt"] form using single-capitalized-letter amino acid codes (example: '["G","A"]')
+- - [ref, alt] form using single-capitalized-letter amino acid codes (example: '[G,A]' or '[G, A]')
+
+Four columns named 'chr', 'pos', 'ref', and 'alt':
+- 'chr' is a string beginning with 'chr' (example: 'chr1')
+- 'pos' is an integer (example: 925963)
+- 'ref' is a single-capitalized-letter string of an amino acid code (example: 'G')
+- 'alt' is a single-capitalized-letter string of an amino acid code (example: 'A')
+
+The single column formatting may be used with a column name other than 'Variant ID' if the '--variant-id-col' argument is supplied while calling run.py. 
+
+Additionally, allele counts for cases and controls of each variant is required. These must be in integer formats, under columns named 'ac_case' or 'case' and 'ac_control' or 'control'. If alternate column names are used, this can be accounted for through the '--ac-case-col' and '--ac-control-col' arguments used while calling run.py. 
+
+Option 2: Variant data that has been mapped to UniProt proteins. 
+
+Input file must be a non-compressed TSV file with the following columns:
+
+'Variant-ID': string referring to a specific missense variant (example: 'chr1:925963:G:A')
+'uniprot_id': string of the UniProt canonical protein ID that corresponds to a given variant (example: 'Q96NU1')
+'aa_pos': integer of residue position in UniProt protein for the given variant (example: 2)
+'aa_ref': string of a single-capitalized-letter amino acid code that corresponds to the wild-type amino acid at the given aa_pos (example: 'G')
+'aa_alt': string of a single-capitalized-letter amino acid code that corresponds to the mutated-type amino acid at the given aa_pos (example: 'A')
+'pdb_filename' ***
+'aa_pos_file' ***
+'ac_case': integer of allele counts of cases for a given variant
+'ac_control': integer of allele counts of controls for a given variant
+
+'Variant-ID', 'ac_case', and 'ac_control' may have different names if run.py is called with the appropriate arguments, as described during Option 1. 
+'uniprot_id' may also be named 'Uniprot_ID'. 
+
+*** technically the only columns used are 'uniprot_id', 'aa_pos', 'ac_case', and 'ac_control'? so how do we want to address requirements? my alt suggestion is below:
+
+Input file must be a non-compressed TSV file with the following columns:
+
+'uniprot_id': string of UniProt canonical protein ID (example: 'Q96NU1')
+'aa_pos': integer of residue position in UniProt protein for the given variant
+'ac_case': integer of allele counts of cases for a given variant
+'ac_control': integer of allele counts of controls for a given variant
+
+'ac_case', and 'ac_control' may have different names if run.py is called with the appropriate arguments, as described during Option 1. 
+'uniprot_id' may also be named 'Uniprot_ID'. 
