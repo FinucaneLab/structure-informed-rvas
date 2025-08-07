@@ -156,7 +156,8 @@ def get_pae_matrix_structure(pae_file_pos_guide, pae_dir, uniprot_id):
 
     # force PAE matrix to be symmetrical
     ## take the minimum where it is not symmetrical
-    pae_matrix = np.minimum(pae_matrix, pae_matrix.T)
+    if pae_matrix is not None:
+        pae_matrix = np.minimum(pae_matrix, pae_matrix.T)
     return pae_matrix
 
 # def get_adjacency_matrix_pdb(pdb_file, radius):
