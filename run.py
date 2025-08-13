@@ -7,6 +7,7 @@ from read_data import map_to_protein
 from pymol_code import run_all
 from pymol_code import make_movie_from_pse
 from logger_config import get_logger
+from utils import get_nbhd_residues
 
 logger = get_logger(__name__)
 
@@ -162,7 +163,7 @@ if __name__ == '__main__':
         '--uniprot-id',
         type=str,
         default=None,
-        help='UniProt ID for visualization'
+        help='UniProt ID for visualization or neighborhood residue list'
     )
     parser.add_argument(
         '--make_movie',
@@ -176,12 +177,23 @@ if __name__ == '__main__':
         default=None,
         help='Pymol session to make a movie from'
     )
-
     parser.add_argument(
         '--fdr-file',
         type=str,
         default='all_proteins.fdr.tsv',
         help='file in the results directory to write the fdrs to'
+    )
+    parser.add_argument(
+        '--aa-pos',
+        type=str,
+        default=None,
+        help='Amino acid residue position in --uniprot-id for center of desired neighborhood'
+    )
+    parser.add_argument(
+        '--get-nbhd',
+        action='store_true',
+        default=False,
+        help='Get list of residues in neighborhood centered at --aa-pos in protein --uniprot-id'
     )
     
     args = parser.parse_args()
@@ -309,5 +321,10 @@ if __name__ == '__main__':
             raise ValueError("For making a movie, you must provide --pse and --results_dir")
         make_movie_from_pse(args.results_dir, args.pse)
 
+    elif args.get_nbhd:
+        if not (args.uniprot_id and args.reference_dir and args.aa_pos):
+            raise ValueError("For neighborhood residue lists, you must provide --uniprot_id, --reference_dir and --aa_pos")
+        nbhd = get_nbhd_residues(args.uniprot_id, args.aa_pos, args.reference_dir, args.neighborhood_radius, args.pae_cutoff)
+        print(nbhd)
     else:
         raise Exception('no analysis specified')
