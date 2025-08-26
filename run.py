@@ -282,7 +282,6 @@ if __name__ == '__main__':
     else:
         df_fdr_filter = None
 
-    df_rvas.to_csv('df_rvas_test.tsv', sep='\t', index=False)
     if args.scan_test: 
         logger.info("Starting scan test analysis")
         scan_test(

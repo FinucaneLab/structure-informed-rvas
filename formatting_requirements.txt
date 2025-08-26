@@ -2,7 +2,7 @@ Formatting requirements for input data to the Scan Test
 
 Option 1: DNA coordinates of variant data that has not previously been mapped to UniProt proteins. 
 
-Both compressed and non-compressed file types will work with the code, with '.tsv.bgz' recommended. 
+Both compressed and non-compressed file types and most standard delimiters will work with the code, with '.tsv.bgz' recommended. 
 
 In order to map variants to UniProt canonical proteins, the input data for each variant must contain information on chromosome, locus, reference allele, and alternate allele. The following formats for this data will work when calling run.py without any additional arguments:
 
@@ -11,7 +11,7 @@ Single column named 'Variant ID':
 - chr-pos-ref-alt form (example: 'chr1-925963-G-A')
 
 Double columns named 'locus' and 'alleles':
-- 'locus' is an integer (example: 925963)
+- 'locus' is a string (example: 'chr1:925963')
 - 'alleles' is a string
 - - ["ref", "alt"] form using single-capitalized-letter amino acid codes (example: '["G","A"]')
 - - [ref, alt] form using single-capitalized-letter amino acid codes (example: '[G,A]' or '[G, A]')
