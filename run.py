@@ -39,11 +39,6 @@ if __name__ == '__main__':
         help='column with allele count in controls',
     )
     parser.add_argument(
-        '--pdb-filename',
-        type=str,
-        help='if the analysis only uses one pdb file, you can put it here instead of having a column in the input'
-    )
-    parser.add_argument(
         '--scan-test',
         action='store_true',
         default=False,
@@ -232,9 +227,6 @@ if __name__ == '__main__':
     # Only require data input if not doing FDR-only analysis or visualization
     if df_rvas is None and not args.fdr_only and not args.visualization:
         raise ValueError("Must provide --rvas-data-to-map")
-    
-    if args.pdb_filename is not None and df_rvas is not None:
-        df_rvas['pdb_filename'] = args.pdb_filename
 
     if not args.which_proteins=='all':
         if os.path.exists(args.which_proteins):
