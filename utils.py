@@ -259,8 +259,10 @@ def get_nbhd_info(df_rvas, uniprot_id, aa_pos, reference_dir, radius, pae_cutoff
     """
     For a given UniProt ID (str) and neighborhood center (int), returns the following: 
     1. a list of residue positions in the neighborhood (list of integers)
-    2. a list of case variant residue positions in the neighborhood (list of integers)
-    3. a list of control variant residue positions in the neighborhood (list of integers)
+    2. a dataframe case variant residue positions in the neighborhood
+        - variant genetic coordinates; amino acid position, reference, and alternate; and allele count
+    3. a dataframe control variant residue positions in the neighborhood
+        - variant genetic coordinates; amino acid position, reference, and alternate; and allele count
     """
     pdb_pae_file_pos_guide = f'{reference_dir}/pdb_pae_file_pos_guide.tsv'
     pdb_dir = f'{reference_dir}/pdb_files/'
@@ -279,8 +281,8 @@ def get_nbhd_info(df_rvas, uniprot_id, aa_pos, reference_dir, radius, pae_cutoff
     # all control variants on neighborhood residues
     df_rvas_cntrl = df_rvas_nbhd[df_rvas_nbhd.ac_control>0]
 
-    cases = df_rvas_case[['Variant ID', 'aa_pos','ac_case']].reset_index(drop=True)
-    cntrls = df_rvas_cntrl[['Variant ID', 'aa_pos', 'ac_control']].reset_index(drop=True)
+    cases = df_rvas_case[['Variant ID', 'aa_pos','ac_case', 'aa_ref', 'aa_alt']].reset_index(drop=True)
+    cntrls = df_rvas_cntrl[['Variant ID', 'aa_pos', 'ac_control', 'aa_ref', 'aa_alt']].reset_index(drop=True)
 
     # alternative option - function takes in list of aa_pos (aa_list) and calcs nbhd for each of them
     # could also take in no list of pos and just return neighborhoods of whole protein
