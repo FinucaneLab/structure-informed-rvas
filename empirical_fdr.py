@@ -9,7 +9,7 @@ import os
 import numpy as np
 import pandas as pd
 import h5py
-from utils import read_p_values
+from utils import read_p_values, read_p_values_quantitative
 from logger_config import get_logger
 
 logger = get_logger(__name__)
@@ -33,7 +33,7 @@ def _prepare_fdr_filters(df_fdr_filter):
     return uniprot_filter_list, aa_pos_filters
 
 
-def _load_all_pvalues(results_dir, uniprot_filter_list, aa_pos_filters, pval_file='p_values.h5'):
+def _load_all_pvalues(results_dir, uniprot_filter_list, aa_pos_filters, pval_file='p_values.h5', quantitative=False):
     """Load both observed and null p-values from HDF5 file with consistent filtering."""
     to_concat = []
     null_pvals_dict = {}
@@ -47,7 +47,10 @@ def _load_all_pvalues(results_dir, uniprot_filter_list, aa_pos_filters, pval_fil
         logger.info('Reading observed and null p-values')
         for uniprot_id in uniprot_ids:
             # Load observed p-values
-            df = read_p_values(fid, uniprot_id)
+            if quantitative:
+                df = read_p_values_quantitative(fid, uniprot_id)
+            else:
+                df = read_p_values(fid, uniprot_id)
             
             # Load null p-values
             null_pvals_one_uniprot = fid[f'{uniprot_id}_null_pval'][:]
@@ -128,7 +131,7 @@ def summarize_results(df_results, fdr_cutoff):
     logger.info(f'{len(top_hits_sig)} out of {len(top_hits_all_genes)} proteins have a neighborhood significant at {fdr_cutoff}.')
     logger.info(f'Top 20 hits:\n{top_hits_sig[0:20].to_string()}')
 
-def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, large_p_threshold=0.05, pval_file='p_values.h5'):
+def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, large_p_threshold=0.05, pval_file='p_values.h5', quantitative=False):
     """
     Compute False Discovery Rate correction for scan test results.
     
@@ -152,7 +155,7 @@ def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, large_p_t
     
     # Load both observed and null p-values
     df_pvals, null_pvals_dict, uniprot_ids, n_sims = _load_all_pvalues(
-        results_dir, uniprot_filter_list, aa_pos_filters, pval_file
+        results_dir, uniprot_filter_list, aa_pos_filters, pval_file, quantitative
     )
     
     # Compute false discoveries from null distributions

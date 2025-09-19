@@ -232,6 +232,24 @@ def read_p_values(fid, uniprot_id):
                        'nbhd_control': nbhd_control})
     return df
 
+def read_p_values_quantitative(fid, uniprot_id):
+    """
+    Reads the p values for one uniprot_id from an HDF5 results file for quantitative traits,
+    with the exception of the null values.
+    """
+    pvalue_data = fid[uniprot_id][:]
+    stats_data = fid[f'{uniprot_id}_stats'][:]
+
+    df = pd.DataFrame({'uniprot_id': uniprot_id,
+                       'aa_pos': np.arange(1, pvalue_data.shape[0]+1),
+                       'p_value': pvalue_data[:, 0],
+                       't_stat': stats_data[:, 0],
+                       'mean_beta_in': stats_data[:, 1],
+                       'mean_beta_out': stats_data[:, 2],
+                       'n_variants_in': stats_data[:, 3],
+                       'n_variants_out': stats_data[:, 4]})
+    return df
+
 def read_original_mutation_data(fid, uniprot_id):
     """
     Reads the original per-residue mutation counts for one uniprot_id from an HDF5 results file.

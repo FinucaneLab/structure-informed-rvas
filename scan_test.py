@@ -259,7 +259,7 @@ def scan_test_quantitative(df_rvas, reference_dir, radius, pae_cutoff, results_d
     pval_filename = 'p_values_quantitative.h5'
     
     if fdr_only:
-        df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file=pval_filename)
+        df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file=pval_filename, quantitative=True)
         df_results.to_csv(fdr_file, sep='\t', index=False)
         return
         
@@ -269,5 +269,5 @@ def scan_test_quantitative(df_rvas, reference_dir, radius, pae_cutoff, results_d
     _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, scan_test_one_protein_quantitative)
     
     if not no_fdr:
-        df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file=pval_filename)
+        df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file=pval_filename, quantitative=True)
         df_results.to_csv(fdr_file, sep='\t', index=False)
