@@ -246,8 +246,10 @@ def read_p_values_quantitative(fid, uniprot_id):
                        't_stat': stats_data[:, 0],
                        'mean_beta_in': stats_data[:, 1],
                        'mean_beta_out': stats_data[:, 2],
-                       'n_variants_in': stats_data[:, 3],
-                       'n_variants_out': stats_data[:, 4]})
+                       'std_beta_in': stats_data[:, 3],
+                       'std_beta_out': stats_data[:, 4],
+                       'n_variants_in': stats_data[:, 5],
+                       'n_variants_out': stats_data[:, 6]})
     return df
 
 def read_original_mutation_data(fid, uniprot_id):

@@ -157,11 +157,21 @@ def compute_all_pvals_quantitative(df, pdb_file_pos_guide, pdb_dir, pae_dir, uni
             mean2=mean_out, std2=np.sqrt(var_out), nobs2=n_out,
             equal_var=False
         )
-    p_vals[np.isnan(p_vals)] = 1.0
+
+    # Filter out neighborhoods with fewer than 5 variants
+    insufficient_variants = n_in.flatten() < 5
+    p_vals[insufficient_variants] = np.nan
+    t_stat[insufficient_variants] = np.nan
+
+    # Set invalid p-values to 1.0 and corresponding t-stats to 0
+    invalid_mask = np.isnan(p_vals)
+    p_vals[invalid_mask] = 1.0
+    t_stat[invalid_mask] = 0.0
 
     df_pvals = pd.DataFrame({
         'p_value': p_vals[:, 0], 't_stat': t_stat[:, 0],
         'mean_beta_in': mean_in[:, 0], 'mean_beta_out': mean_out[:, 0],
+        'std_beta_in': np.sqrt(var_in[:, 0]), 'std_beta_out': np.sqrt(var_out[:, 0]),
         'n_variants_in': n_in.flatten(), 'n_variants_out': n_out.flatten()
     })
     
@@ -174,7 +184,7 @@ def compute_all_pvals_quantitative(df, pdb_file_pos_guide, pdb_dir, pae_dir, uni
 def write_df_pvals_quantitative(results_dir, uniprot_id, df_pvals):
     with h5py.File(os.path.join(results_dir, 'p_values_quantitative.h5'), 'a') as fid:
         null_pval_cols = [c for c in df_pvals.columns if c.startswith('null_pval')]
-        stat_cols = ['t_stat', 'mean_beta_in', 'mean_beta_out', 'n_variants_in', 'n_variants_out']
+        stat_cols = ['t_stat', 'mean_beta_in', 'mean_beta_out', 'std_beta_in', 'std_beta_out', 'n_variants_in', 'n_variants_out']
         
         write_dataset(fid, f'{uniprot_id}', df_pvals[['p_value']])
         write_dataset(fid, f'{uniprot_id}_null_pval', df_pvals[null_pval_cols])

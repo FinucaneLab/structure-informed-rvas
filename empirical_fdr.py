@@ -121,7 +121,7 @@ def _apply_fdr_correction(df_pvals, false_discoveries, quantitative=False):
     df_pvals['fdr'] = df_pvals['fdr'][::-1].cummin()[::-1]
     
     if quantitative:
-        return df_pvals[['uniprot_id', 'aa_pos', 'p_value', 'fdr', 't_stat', 'mean_beta_in', 'mean_beta_out', 'n_variants_in', 'n_variants_out']]
+        return df_pvals[['uniprot_id', 'aa_pos', 'p_value', 'fdr', 't_stat', 'mean_beta_in', 'mean_beta_out', 'std_beta_in', 'std_beta_out', 'n_variants_in', 'n_variants_out']]
     else:
         return df_pvals[['uniprot_id', 'aa_pos', 'p_value', 'fdr', 'nbhd_case', 'nbhd_control', 'ratio']]
 
