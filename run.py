@@ -180,6 +180,18 @@ if __name__ == '__main__':
         default=False,
         help='Get list of residues and variants in neighborhood centered at --aa-pos in protein --uniprot-id'
     )
+    parser.add_argument(
+        '--quantitative-trait',
+        action='store_true',
+        default=False,
+        help='Perform a scan test for a quantitative trait using a t-test on a beta column.'
+    )
+    parser.add_argument(
+        '--beta-col',
+        type=str,
+        default='BETA',
+        help='Name of the column with quantitative trait effect sizes (betas).'
+    )
     
     args = parser.parse_args()
 
@@ -215,11 +227,12 @@ if __name__ == '__main__':
         df_rvas = map_to_protein(
             args.rvas_data_to_map,
             args.variant_id_col,
-            args.ac_case_col,
-            args.ac_control_col,
+            args.ac_case_col if not args.quantitative_trait else None,
+            args.ac_control_col if not args.quantitative_trait else None,
             args.reference_dir,
             args.which_proteins,
-            args.genome_build
+            args.genome_build,
+            beta_col=args.beta_col if args.quantitative_trait else None
         )
     else:
         df_rvas = None
@@ -256,22 +269,41 @@ if __name__ == '__main__':
     else:
         df_fdr_filter = None
 
-    if args.scan_test: 
+    if args.scan_test:
         logger.info("Starting scan test analysis")
-        scan_test(
-            df_rvas,
-            args.reference_dir,
-            args.neighborhood_radius,
-            args.pae_cutoff,
-            args.results_dir,
-            args.n_sims,
-            args.no_fdr,
-            args.fdr_only,
-            args.fdr_cutoff,
-            df_fdr_filter,
-            args.ignore_ac,
-            args.fdr_file,
-        )
+        if args.quantitative_trait:
+            # We will create this function in the next steps
+            from scan_test import scan_test_quantitative 
+            scan_test_quantitative(
+                df_rvas,
+                args.beta_col,
+                args.reference_dir,
+                args.neighborhood_radius,
+                args.pae_cutoff,
+                args.results_dir,
+                args.n_sims,
+                args.no_fdr,
+                args.fdr_only,
+                args.fdr_cutoff,
+                df_fdr_filter,
+                args.ignore_ac,
+                args.fdr_file,
+            )
+        else:
+            scan_test(
+                df_rvas,
+                args.reference_dir,
+                args.neighborhood_radius,
+                args.pae_cutoff,
+                args.results_dir,
+                args.n_sims,
+                args.no_fdr,
+                args.fdr_only,
+                args.fdr_cutoff,
+                df_fdr_filter,
+                args.ignore_ac,
+                args.fdr_file,
+            )
 
     elif args.annotation_file is not None:
         logger.info('Starting annotation test analysis')

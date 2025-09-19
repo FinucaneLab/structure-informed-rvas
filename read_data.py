@@ -51,6 +51,7 @@ def map_to_protein(
     reference_directory,
     which_proteins = 'all',
     genome_build = None,
+    beta_col = None,
     delimiter=None
 ):
     '''
@@ -76,6 +77,19 @@ def map_to_protein(
         ac_control_col: 'ac_control',
     })
 
+    if beta_col:
+        rvas_data = rvas_data.rename(columns = {
+            variant_id_col: 'Variant ID',
+            beta_col: 'beta',
+        })
+        required_cols = ['Variant ID', 'beta']
+    else:
+        rvas_data = rvas_data.rename(columns = {
+            variant_id_col: 'Variant ID',
+            ac_case_col: 'ac_case',
+            ac_control_col: 'ac_control',
+        })
+        required_cols = ['Variant ID', 'ac_case', 'ac_control']
     if 'Variant ID' in rvas_data:
         rvas_data['Variant ID'] = [x.replace(':', '-') for x in rvas_data['Variant ID']]
         if not all(rvas_data['Variant ID'].str.split('-').str.len() == 4):
@@ -118,7 +132,11 @@ def map_to_protein(
         if ref is None:
             continue
         joined = rvas_data_by_chr.join(ref, on='Variant ID', how='inner', rsuffix='_ref')
-        joined = joined[['Variant ID', 'uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt', 'pdb_filename', 'aa_pos_file', 'ac_case', 'ac_control']]
+        if beta_col:
+            joined = joined[['Variant ID', 'uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt', 'pdb_filename', 'aa_pos_file', 'beta']]
+        else:
+            joined = joined[['Variant ID', 'uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt', 'pdb_filename', 'aa_pos_file', 'ac_case', 'ac_control']]
+
         result.append(joined)
 
     if len(result) > 0 and result[0].shape[0] == 0:
