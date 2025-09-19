@@ -248,7 +248,7 @@ if __name__ == '__main__':
             which_proteins = args.which_proteins.split(',')
         df_rvas = df_rvas[df_rvas.uniprot_id.isin(which_proteins)]
 
-    if df_rvas is not None:
+    if df_rvas is not None and not args.quantitative_trait:
         df_rvas = df_rvas[df_rvas.ac_case + df_rvas.ac_control < args.ac_filter]
 
     if args.df_fdr_filter is not None:
