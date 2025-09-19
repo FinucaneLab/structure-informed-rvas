@@ -113,14 +113,17 @@ def _compute_false_discoveries(df_pvals, null_pvals_dict, uniprot_ids, n_sims, l
     return false_discoveries
 
 
-def _apply_fdr_correction(df_pvals, false_discoveries):
+def _apply_fdr_correction(df_pvals, false_discoveries, quantitative=False):
     """Apply FDR correction and format results."""
     logger.info('Computing FDR')
     df_pvals['false_discoveries_avg'] = false_discoveries
     df_pvals['fdr'] = [x / (i+1) for i, x in enumerate(false_discoveries)]
     df_pvals['fdr'] = df_pvals['fdr'][::-1].cummin()[::-1]
     
-    return df_pvals[['uniprot_id', 'aa_pos', 'p_value', 'fdr', 'nbhd_case', 'nbhd_control', 'ratio']]
+    if quantitative:
+        return df_pvals[['uniprot_id', 'aa_pos', 'p_value', 'fdr', 't_stat', 'mean_beta_in', 'mean_beta_out', 'n_variants_in', 'n_variants_out']]
+    else:
+        return df_pvals[['uniprot_id', 'aa_pos', 'p_value', 'fdr', 'nbhd_case', 'nbhd_control', 'ratio']]
 
 def summarize_results(df_results, fdr_cutoff):
 
@@ -164,7 +167,7 @@ def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, large_p_t
     )
     
     # Apply FDR correction
-    df_results = _apply_fdr_correction(df_pvals, false_discoveries)
+    df_results = _apply_fdr_correction(df_pvals, false_discoveries, quantitative)
     
     # Add gene name
     df_gene = pd.read_csv(f'{reference_dir}/gene_to_uniprot_id.tsv', sep='\t')
