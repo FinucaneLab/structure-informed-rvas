@@ -111,19 +111,20 @@ def map_to_protein(
     else:
         rvas_data['Variant ID'] = rvas_data['chr'] + '-' + rvas_data['pos'].astype(str) + '-' + rvas_data['ref'] + '-' + rvas_data['alt']
 
-    # detect case/control columns
-    def identify_column(name):
-        possible_cols = [col for col in rvas_data if 'ac' in col.lower() and name in col.lower() and rvas_data[col].dtype == int]
-        if len(possible_cols) == 0:
-            possible_cols = [col for col in rvas_data if name in col.lower() and rvas_data[col].dtype == int]
-        if len(possible_cols) != 1:
-            raise Exception(f'Could not uniquely identify {name} column. Please include a column named ac_{name} in RVAS data.')
-        return possible_cols[0]
+    # detect case/control columns (only needed for case-control analysis, not quantitative traits)
+    if not beta_col:
+        def identify_column(name):
+            possible_cols = [col for col in rvas_data if 'ac' in col.lower() and name in col.lower() and rvas_data[col].dtype == int]
+            if len(possible_cols) == 0:
+                possible_cols = [col for col in rvas_data if name in col.lower() and rvas_data[col].dtype == int]
+            if len(possible_cols) != 1:
+                raise Exception(f'Could not uniquely identify {name} column. Please include a column named ac_{name} in RVAS data.')
+            return possible_cols[0]
 
-    if 'ac_case' not in rvas_data:
-        rvas_data.rename( {identify_column('case'): 'ac_case'}, axis=1, inplace=True)
-    if 'ac_control' not in rvas_data:
-        rvas_data.rename( {identify_column('control'): 'ac_control'}, axis=1, inplace=True)
+        if 'ac_case' not in rvas_data:
+            rvas_data.rename( {identify_column('case'): 'ac_case'}, axis=1, inplace=True)
+        if 'ac_control' not in rvas_data:
+            rvas_data.rename( {identify_column('control'): 'ac_control'}, axis=1, inplace=True)
     # join to reference variants and identify relevant proteins
     result = []
     ref_path = f'{reference_directory}/all_missense_variants_gr38.h5'
