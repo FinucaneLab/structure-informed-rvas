@@ -276,7 +276,6 @@ if __name__ == '__main__':
             from scan_test import scan_test_quantitative 
             scan_test_quantitative(
                 df_rvas,
-                args.beta_col,
                 args.reference_dir,
                 args.neighborhood_radius,
                 args.pae_cutoff,
@@ -286,7 +285,6 @@ if __name__ == '__main__':
                 args.fdr_only,
                 args.fdr_cutoff,
                 df_fdr_filter,
-                args.ignore_ac,
                 args.fdr_file,
             )
         else:
