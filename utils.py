@@ -235,21 +235,37 @@ def read_p_values(fid, uniprot_id):
 def read_p_values_quantitative(fid, uniprot_id):
     """
     Reads the p values for one uniprot_id from an HDF5 results file for quantitative traits,
-    with the exception of the null values.
+    with the exception of the null values. Handles both old format (5 columns) and new format (7 columns).
     """
     pvalue_data = fid[uniprot_id][:]
     stats_data = fid[f'{uniprot_id}_stats'][:]
+    n_cols = stats_data.shape[1]
 
-    df = pd.DataFrame({'uniprot_id': uniprot_id,
-                       'aa_pos': np.arange(1, pvalue_data.shape[0]+1),
-                       'p_value': pvalue_data[:, 0],
-                       't_stat': stats_data[:, 0],
-                       'mean_beta_in': stats_data[:, 1],
-                       'mean_beta_out': stats_data[:, 2],
-                       'std_beta_in': stats_data[:, 3],
-                       'std_beta_out': stats_data[:, 4],
-                       'n_variants_in': stats_data[:, 5],
-                       'n_variants_out': stats_data[:, 6]})
+    if n_cols == 5:  # Old format: ['t_stat', 'mean_beta_in', 'mean_beta_out', 'n_variants_in', 'n_variants_out']
+        df = pd.DataFrame({'uniprot_id': uniprot_id,
+                           'aa_pos': np.arange(1, pvalue_data.shape[0]+1),
+                           'p_value': pvalue_data[:, 0],
+                           't_stat': stats_data[:, 0],
+                           'mean_beta_in': stats_data[:, 1],
+                           'mean_beta_out': stats_data[:, 2],
+                           'std_beta_in': np.nan,  # Not available in old format
+                           'std_beta_out': np.nan,  # Not available in old format
+                           'n_variants_in': stats_data[:, 3],
+                           'n_variants_out': stats_data[:, 4]})
+    elif n_cols == 7:  # New format: ['t_stat', 'mean_beta_in', 'mean_beta_out', 'std_beta_in', 'std_beta_out', 'n_variants_in', 'n_variants_out']
+        df = pd.DataFrame({'uniprot_id': uniprot_id,
+                           'aa_pos': np.arange(1, pvalue_data.shape[0]+1),
+                           'p_value': pvalue_data[:, 0],
+                           't_stat': stats_data[:, 0],
+                           'mean_beta_in': stats_data[:, 1],
+                           'mean_beta_out': stats_data[:, 2],
+                           'std_beta_in': stats_data[:, 3],
+                           'std_beta_out': stats_data[:, 4],
+                           'n_variants_in': stats_data[:, 5],
+                           'n_variants_out': stats_data[:, 6]})
+    else:
+        raise ValueError(f"Unexpected stats data format for {uniprot_id}: {n_cols} columns. Expected 5 (old format) or 7 (new format).")
+
     return df
 
 def read_original_mutation_data(fid, uniprot_id):

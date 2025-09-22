@@ -128,14 +128,50 @@ def compute_all_pvals_quantitative(df, pdb_file_pos_guide, pdb_dir, pae_dir, uni
     )
     n_residues = adjacency_matrix.shape[0]
 
+    # Debug logging to trace data sources
+    logger.debug(f"{uniprot_id}: Starting quantitative analysis")
+    logger.debug(f"{uniprot_id}: Structure has {n_residues} residues")
+    logger.debug(f"{uniprot_id}: Input dataframe has {len(df)} total variants")
+
     variants_df = df.drop_duplicates(subset=['Variant ID']).reset_index(drop=True)
+    logger.debug(f"{uniprot_id}: After deduplication: {len(variants_df)} unique variants")
+
+    if len(variants_df) > 0:
+        max_pos_in_data = variants_df['aa_pos'].max()
+        min_pos_in_data = variants_df['aa_pos'].min()
+        logger.debug(f"{uniprot_id}: Variant positions range from {min_pos_in_data} to {max_pos_in_data}")
+        if max_pos_in_data > n_residues:
+            logger.warning(f"{uniprot_id}: WARNING - Max variant position ({max_pos_in_data}) exceeds structure length ({n_residues})")
     n_variants = len(variants_df)
     if n_variants < 5: # Not enough variants for a meaningful test
         logger.warning(f"{uniprot_id}: Not enough unique variants ({n_variants}) for quantitative test. Skipping.")
         return None, None
 
     variant_to_residue_map = np.zeros((n_residues, n_variants))
-    variant_to_residue_map[variants_df['aa_pos'] - 1, np.arange(n_variants)] = 1
+    try:
+        variant_to_residue_map[variants_df['aa_pos'] - 1, np.arange(n_variants)] = 1
+    except IndexError as e:
+        max_pos = variants_df['aa_pos'].max()
+        min_pos = variants_df['aa_pos'].min()
+        out_of_bounds = variants_df[variants_df['aa_pos'] > n_residues]['aa_pos'].tolist()
+        logger.error(f"{uniprot_id}: IndexError creating variant_to_residue_map.")
+        logger.error(f"{uniprot_id}: Structure has {n_residues} residues, but variants have positions {min_pos}-{max_pos}")
+        logger.error(f"{uniprot_id}: Out-of-bounds positions: {out_of_bounds}")
+        logger.error(f"{uniprot_id}: All variants with out-of-bounds positions:")
+        problematic_variants = variants_df[variants_df['aa_pos'] > n_residues][['Variant ID', 'aa_pos', 'aa_ref', 'aa_alt']]
+        for i, row in problematic_variants.iterrows():
+            logger.error(f"  {row['Variant ID']}: pos={row['aa_pos']}, {row['aa_ref']}->{row['aa_alt']}")
+
+        # Also show some valid variants for comparison
+        logger.error(f"{uniprot_id}: For comparison, some valid variants:")
+        valid_variants = variants_df[variants_df['aa_pos'] <= n_residues][['Variant ID', 'aa_pos', 'aa_ref', 'aa_alt']].head(5)
+        for i, row in valid_variants.iterrows():
+            logger.error(f"  {row['Variant ID']}: pos={row['aa_pos']}, {row['aa_ref']}->{row['aa_alt']}")
+
+        # Show data source info
+        logger.error(f"{uniprot_id}: Total variants in dataset: {len(variants_df)}")
+        logger.error(f"{uniprot_id}: Out-of-bounds variants: {len(problematic_variants)}")
+        raise
 
     beta_obs = variants_df['beta'].values
     is_variant_in_nbhd = (adjacency_matrix @ variant_to_residue_map) > 0
