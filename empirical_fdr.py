@@ -6,6 +6,7 @@ specifically designed for structure-informed rare variant association studies.
 """
 
 import os
+import gc
 import numpy as np
 import pandas as pd
 import h5py
@@ -34,72 +35,111 @@ def _prepare_fdr_filters(df_fdr_filter):
 
 
 def _load_all_pvalues(results_dir, uniprot_filter_list, aa_pos_filters, pval_file='p_values.h5', quantitative=False):
-    """Load both observed and null p-values from HDF5 file with consistent filtering."""
-    to_concat = []
+    """Load both observed and null p-values from HDF5 file with consistent filtering using batch processing."""
+    batch_size = 500  # Process proteins in batches to manage memory
     null_pvals_dict = {}
     n_sims = None
-    
+
     with h5py.File(os.path.join(results_dir, pval_file), 'a') as fid:
         uniprot_ids = [k for k in fid.keys() if '_' not in k]
         if uniprot_filter_list is not None:
             uniprot_ids = list(set(uniprot_ids) & set(uniprot_filter_list))
 
-        logger.info('Reading observed and null p-values')
-        for uniprot_id in uniprot_ids:
-            # Load observed p-values
-            if quantitative:
-                df = read_p_values_quantitative(fid, uniprot_id)
-            else:
-                df = read_p_values(fid, uniprot_id)
-            
-            # Load null p-values
-            null_pvals_one_uniprot = fid[f'{uniprot_id}_null_pval'][:]
-            
-            # Apply same amino acid position filter to both datasets
-            if aa_pos_filters is not None and uniprot_id in aa_pos_filters:
-                aa_pos_keep = aa_pos_filters[uniprot_id]
-                # Create boolean mask: positions are 1-indexed, dataframe indices are 0-indexed
-                mask = np.array([x+1 in aa_pos_keep for x in range(len(df))])
-                df = df[mask]
-                null_pvals_one_uniprot = null_pvals_one_uniprot[mask, :]
-            
-            to_concat.append(df)
-            null_pvals_dict[uniprot_id] = null_pvals_one_uniprot
-            
-            # Get n_sims from first protein (all should have same value)
-            if n_sims is None:
-                n_sims = null_pvals_one_uniprot.shape[1]
-        
+        logger.info(f'Reading observed and null p-values for {len(uniprot_ids)} proteins in batches of {batch_size}')
+
+        # First pass: collect all observed p-values in batches
+        all_dfs = []
+        for i in range(0, len(uniprot_ids), batch_size):
+            batch_ids = uniprot_ids[i:i + batch_size]
+            logger.info(f'Processing batch {i//batch_size + 1}/{(len(uniprot_ids) + batch_size - 1)//batch_size}: proteins {i+1}-{min(i+batch_size, len(uniprot_ids))}')
+
+            batch_dfs = []
+            for uniprot_id in batch_ids:
+                # Load observed p-values
+                if quantitative:
+                    df = read_p_values_quantitative(fid, uniprot_id)
+                else:
+                    df = read_p_values(fid, uniprot_id)
+
+                # Load null p-values
+                null_pvals_one_uniprot = fid[f'{uniprot_id}_null_pval'][:]
+
+                # Apply same amino acid position filter to both datasets
+                if aa_pos_filters is not None and uniprot_id in aa_pos_filters:
+                    aa_pos_keep = aa_pos_filters[uniprot_id]
+                    # Create boolean mask: positions are 1-indexed, dataframe indices are 0-indexed
+                    mask = np.array([x+1 in aa_pos_keep for x in range(len(df))])
+                    df = df[mask]
+                    null_pvals_one_uniprot = null_pvals_one_uniprot[mask, :]
+
+                batch_dfs.append(df)
+                null_pvals_dict[uniprot_id] = null_pvals_one_uniprot
+
+                # Get n_sims from first protein (all should have same value)
+                if n_sims is None:
+                    n_sims = null_pvals_one_uniprot.shape[1]
+
+            # Concatenate this batch and add to list
+            if batch_dfs:
+                batch_concat = pd.concat(batch_dfs, ignore_index=True)
+                all_dfs.append(batch_concat)
+
+                # Clean up batch data
+                del batch_dfs
+                gc.collect()
+
     # Ensure we have data to process
-    if not to_concat:
+    if not all_dfs:
         raise ValueError("No proteins found for FDR computation. Check filters and input data.")
-    
-    logger.info('Concatenating and sorting observed p-values')
-    df_pvals = pd.concat(to_concat)
+
+    logger.info('Concatenating and sorting all observed p-values')
+    df_pvals = pd.concat(all_dfs, ignore_index=True)
+    del all_dfs
+    gc.collect()
+
     df_pvals = df_pvals.sort_values(by='p_value').reset_index(drop=True)
-    
+
     return df_pvals, null_pvals_dict, uniprot_ids, n_sims
 
 
 def _compute_false_discoveries(df_pvals, null_pvals_dict, uniprot_ids, n_sims, large_p_threshold=0.05):
-    """Compute false discovery statistics from null distributions."""
+    """Compute false discovery statistics from null distributions with memory optimization."""
     logger.info('Computing false discoveries')
     mask = df_pvals.p_value <= large_p_threshold
-    
-    # First loop: Aggregate ALL null p-values across all proteins
-    logger.debug('Aggregating null p-values from all proteins')
-    null_pvals = []
-    for i, uniprot_id in enumerate(uniprot_ids):
-        if len(uniprot_ids) > 100 and i % 100 == 0:
-            logger.debug(f'Processing null p-values from protein {i} out of {len(uniprot_ids)}')
-        
-        null_pvals_one_uniprot = null_pvals_dict[uniprot_id]
-        null_pvals_one_uniprot = null_pvals_one_uniprot.flatten()
-        null_pvals.extend(null_pvals_one_uniprot[null_pvals_one_uniprot < large_p_threshold])
-    
-    # Sort the complete null distribution once
-    logger.debug(f'Sorting {len(null_pvals)} null p-values')
-    null_pvals = np.sort(np.array(null_pvals))
+
+    # Process null p-values in batches to avoid memory overflow
+    logger.info('Aggregating null p-values from all proteins in memory-efficient batches')
+    batch_size = 500
+    all_null_pvals = []
+
+    for i in range(0, len(uniprot_ids), batch_size):
+        batch_ids = uniprot_ids[i:i + batch_size]
+        logger.info(f'Processing null p-values batch {i//batch_size + 1}/{(len(uniprot_ids) + batch_size - 1)//batch_size}')
+
+        batch_null_pvals = []
+        for uniprot_id in batch_ids:
+            null_pvals_one_uniprot = null_pvals_dict[uniprot_id]
+            null_pvals_one_uniprot = null_pvals_one_uniprot.flatten()
+            significant_nulls = null_pvals_one_uniprot[null_pvals_one_uniprot < large_p_threshold]
+            batch_null_pvals.append(significant_nulls)
+
+        # Concatenate batch and add to list
+        if batch_null_pvals:
+            batch_concat = np.concatenate(batch_null_pvals)
+            all_null_pvals.append(batch_concat)
+
+            # Clean up batch data
+            del batch_null_pvals
+            gc.collect()
+
+    # Concatenate all batches and sort once
+    logger.info('Concatenating and sorting all null p-values')
+    null_pvals = np.concatenate(all_null_pvals)
+    del all_null_pvals
+    gc.collect()
+
+    logger.info(f'Sorting {len(null_pvals)} null p-values')
+    null_pvals = np.sort(null_pvals)
     
     # Second loop: Compute FDRs using the complete null distribution
     logger.debug('Computing false discovery rates')
@@ -109,7 +149,11 @@ def _compute_false_discoveries(df_pvals, null_pvals_dict, uniprot_ids, n_sims, l
         false_discoveries[mask] = np.searchsorted(null_pvals, df_pvals.p_value[mask], side='right') / n_sims
     if np.any(~mask):
         false_discoveries[~mask] = df_pvals.shape[0]
-    
+
+    # Clean up large null_pvals array
+    del null_pvals
+    gc.collect()
+
     return false_discoveries
 
 
@@ -165,7 +209,11 @@ def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, large_p_t
     false_discoveries = _compute_false_discoveries(
         df_pvals, null_pvals_dict, uniprot_ids, n_sims, large_p_threshold
     )
-    
+
+    # Clean up large null_pvals_dict to free memory
+    del null_pvals_dict
+    gc.collect()
+
     # Apply FDR correction
     df_results = _apply_fdr_correction(df_pvals, false_discoveries, quantitative)
     
