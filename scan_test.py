@@ -1,4 +1,5 @@
 import os
+import gc
 import pandas as pd
 import numpy as np
 import h5py
@@ -8,6 +9,22 @@ from logger_config import get_logger
 from empirical_fdr import compute_fdr
 
 logger = get_logger(__name__)
+
+def _protein_results_exist(results_dir, uniprot_id, quantitative=False):
+    """Check if results already exist for a protein in the HDF5 file."""
+    pval_file = 'p_values_quantitative.h5' if quantitative else 'p_values.h5'
+    hdf5_path = os.path.join(results_dir, pval_file)
+
+    if not os.path.exists(hdf5_path):
+        return False
+
+    try:
+        with h5py.File(hdf5_path, 'r') as fid:
+            # Check if the main p-values dataset exists for this protein
+            return uniprot_id in fid
+    except Exception as e:
+        logger.warning(f"Error checking existing results for {uniprot_id}: {e}")
+        return False
 
 # --- Case-Control Analysis Functions (Original) ---
 
@@ -121,23 +138,56 @@ def compute_all_pvals_quantitative(df, pdb_file_pos_guide, pdb_dir, pae_dir, uni
     variant_to_residue_map[variants_df['aa_pos'] - 1, np.arange(n_variants)] = 1
 
     beta_obs = variants_df['beta'].values
-    beta_matrix = np.zeros((n_variants, 1 + n_sims))
-    beta_matrix[:, 0] = beta_obs
-    rng = np.random.default_rng()
-    for i in range(n_sims):
-        beta_matrix[:, i + 1] = rng.permutation(beta_obs)
-    
     is_variant_in_nbhd = (adjacency_matrix @ variant_to_residue_map) > 0
 
     n_in = is_variant_in_nbhd.sum(axis=1, keepdims=True).astype(float)
-    sum_beta_in = is_variant_in_nbhd @ beta_matrix
-    sum_sq_beta_in = is_variant_in_nbhd @ (beta_matrix**2)
-
     total_n = float(n_variants)
-    total_sum_beta = beta_matrix.sum(axis=0)
-    total_sum_sq_beta = (beta_matrix**2).sum(axis=0)
-
     n_out = total_n - n_in
+
+    # Process observed data first
+    sum_beta_in_obs = is_variant_in_nbhd @ beta_obs.reshape(-1, 1)
+    sum_sq_beta_in_obs = is_variant_in_nbhd @ (beta_obs**2).reshape(-1, 1)
+    total_sum_beta_obs = beta_obs.sum()
+    total_sum_sq_beta_obs = (beta_obs**2).sum()
+
+    sum_beta_out_obs = total_sum_beta_obs - sum_beta_in_obs
+    sum_sq_beta_out_obs = total_sum_sq_beta_obs - sum_sq_beta_in_obs
+
+    # Process simulations in batches to reduce memory usage
+    batch_size = min(100, n_sims)  # Process 100 simulations at a time
+    sum_beta_in = np.zeros((n_residues, 1 + n_sims))
+    sum_sq_beta_in = np.zeros((n_residues, 1 + n_sims))
+    total_sum_beta = np.zeros(1 + n_sims)
+    total_sum_sq_beta = np.zeros(1 + n_sims)
+
+    # Set observed data (column 0)
+    sum_beta_in[:, 0] = sum_beta_in_obs.flatten()
+    sum_sq_beta_in[:, 0] = sum_sq_beta_in_obs.flatten()
+    total_sum_beta[0] = total_sum_beta_obs
+    total_sum_sq_beta[0] = total_sum_sq_beta_obs
+
+    rng = np.random.default_rng()
+    for batch_start in range(0, n_sims, batch_size):
+        batch_end = min(batch_start + batch_size, n_sims)
+        batch_n_sims = batch_end - batch_start
+
+        # Create smaller batch matrix
+        beta_batch = np.zeros((n_variants, batch_n_sims))
+        for i in range(batch_n_sims):
+            beta_batch[:, i] = rng.permutation(beta_obs)
+
+        # Calculate neighborhood statistics for this batch
+        sum_beta_in[:, batch_start + 1:batch_end + 1] = is_variant_in_nbhd @ beta_batch
+        sum_sq_beta_in[:, batch_start + 1:batch_end + 1] = is_variant_in_nbhd @ (beta_batch**2)
+
+        # Calculate total statistics for this batch
+        total_sum_beta[batch_start + 1:batch_end + 1] = beta_batch.sum(axis=0)
+        total_sum_sq_beta[batch_start + 1:batch_end + 1] = (beta_batch**2).sum(axis=0)
+
+        # Clean up batch matrix to free memory
+        del beta_batch
+        gc.collect()  # Force garbage collection after each batch
+
     sum_beta_out = total_sum_beta - sum_beta_in
     sum_sq_beta_out = total_sum_sq_beta - sum_sq_beta_in
 
@@ -178,7 +228,13 @@ def compute_all_pvals_quantitative(df, pdb_file_pos_guide, pdb_dir, pae_dir, uni
     null_pval_cols = [f'null_pval_{i}' for i in range(n_sims)]
     df_null_pvals = pd.DataFrame(p_vals[:, 1:], columns=null_pval_cols)
     df_pvals = pd.concat([df_pvals, df_null_pvals], axis=1)
-    
+
+    # Clean up large arrays to free memory
+    del sum_beta_in, sum_sq_beta_in, sum_beta_out, sum_sq_beta_out
+    del mean_in, mean_out, var_in, var_out, t_stat, p_vals
+    del variant_to_residue_map, is_variant_in_nbhd
+    gc.collect()
+
     return df_pvals, adjacency_matrix
 
 def write_df_pvals_quantitative(results_dir, uniprot_id, df_pvals):
@@ -234,20 +290,39 @@ def _filter_proteins_by_variant_count(df_rvas, df_fdr_filter, min_variants=10):
     logger.info(f"Selected {len(uniprot_id_list)} proteins for quantitative analysis (min {min_variants} variants each)")
     return uniprot_id_list
 
-def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, test_function):
+def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, test_function, quantitative=False):
     pdb_file_pos_guide = f'{reference_dir}/pdb_pae_file_pos_guide.tsv'
     pdb_dir = f'{reference_dir}/pdb_files/'
     pae_dir = f'{reference_dir}/pae_files/'
-    
+
     n_proteins = len(uniprot_id_list)
+    n_processed = 0
+    n_skipped = 0
+
     for i, uniprot_id in enumerate(uniprot_id_list):
         logger.info(f'Processing {uniprot_id} (protein {i+1} out of {n_proteins})')
+
+        # Check if results already exist for this protein
+        if _protein_results_exist(results_dir, uniprot_id, quantitative):
+            logger.info(f'{uniprot_id}: Results already exist, skipping computation')
+            n_skipped += 1
+            continue
+
         try:
             df = df_rvas[df_rvas.uniprot_id == uniprot_id]
             test_function(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir, uniprot_id, radius, pae_cutoff, n_sims)
+            n_processed += 1
+
+            # Force garbage collection every 50 proteins to prevent memory accumulation
+            if (i + 1) % 50 == 0:
+                gc.collect()
+                logger.info(f'Garbage collection performed after processing {i+1} proteins')
+
         except Exception as e:
             logger.error(f'{uniprot_id}: Unexpected error - {e}', exc_info=True)
             continue
+
+    logger.info(f'Batch processing complete: {n_processed} proteins processed, {n_skipped} proteins skipped (already computed)')
 
 def scan_test(df_rvas, reference_dir, radius, pae_cutoff, results_dir, n_sims, no_fdr, fdr_only, fdr_cutoff, df_fdr_filter, ignore_ac, fdr_file):
     if fdr_only:
@@ -259,7 +334,7 @@ def scan_test(df_rvas, reference_dir, radius, pae_cutoff, results_dir, n_sims, n
     df_processed = _preprocess_scan_data(df_rvas, ignore_ac)
     uniprot_id_list = _filter_proteins_by_allele_count(df_processed, df_fdr_filter)
     
-    _process_proteins_batch(df_processed, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, scan_test_one_protein)
+    _process_proteins_batch(df_processed, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, scan_test_one_protein, quantitative=False)
     
     if not no_fdr:
         df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file='p_values.h5')
@@ -276,7 +351,7 @@ def scan_test_quantitative(df_rvas, reference_dir, radius, pae_cutoff, results_d
     logger.info("Starting quantitative trait scan test analysis")
     uniprot_id_list = _filter_proteins_by_variant_count(df_rvas, df_fdr_filter)
     
-    _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, scan_test_one_protein_quantitative)
+    _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, scan_test_one_protein_quantitative, quantitative=True)
     
     if not no_fdr:
         df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file=pval_filename, quantitative=True)
