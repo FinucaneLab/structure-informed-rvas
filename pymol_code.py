@@ -517,7 +517,11 @@ def pymol_scan_test_quantitative(info_tsv, uniprot_id, reference_directory, resu
         tmp_visuals = set(tmp_df['visual_filename'].tolist())
 
         for v in tmp_visuals:
-            cmd.load(f"{v.split('.')[0]}_gray.pse")
+            gray_pse_path = f"{v.split('.')[0]}_gray.pse"
+            if not os.path.exists(gray_pse_path):
+                print(f"[WARNING] Gray PSE file not found: {gray_pse_path}")
+                continue
+            cmd.load(gray_pse_path)
             objects = cmd.get_names('objects')[-1]
 
             tmp_df_visuals = tmp_df[tmp_df['visual_filename'] == v]
@@ -664,11 +668,17 @@ def pymol_neighborhood_quantitative(uniprot_id, results_directory, info_tsv, ref
             if pd.notna(pae_file):
                 pae_path = os.path.join(reference_directory, pae_file)
                 try:
-                    with open(pae_path, 'r') as f:
-                        pae_data = json.load(f)
+                    # Handle both compressed and uncompressed PAE files
+                    if pae_path.endswith('.gz'):
+                        import gzip
+                        with gzip.open(pae_path, 'rt') as f:
+                            pae_data = json.load(f)
+                    else:
+                        with open(pae_path, 'r') as f:
+                            pae_data = json.load(f)
                     pae_matrix = np.array(pae_data[0]['predicted_aligned_error'])
-                except:
-                    print(f"[WARNING] Could not load PAE data from {pae_path}")
+                except Exception as e:
+                    print(f"[WARNING] Could not load PAE data from {pae_path}: {e}")
                     pae_matrix = None
             else:
                 pae_matrix = None
