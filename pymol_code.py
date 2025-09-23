@@ -646,8 +646,18 @@ def pymol_neighborhood_quantitative(uniprot_id, results_directory, info_tsv, ref
 
             # Get PDB mapping info for this structure
             pdb_info = tmp_info[tmp_info['pdb_filename'] == v].iloc[0]
-            pdb_id = pdb_info['pdb_id']
-            chain_id = pdb_info['chain_id']
+
+            # For AlphaFold structures, typically use chain A
+            # Extract PDB ID from filename if available
+            pdb_filename = pdb_info['pdb_filename']
+            if 'AF-' in pdb_filename:
+                # AlphaFold structure - use chain A
+                chain_id = 'A'
+                pdb_id = pdb_filename.split('.')[0]  # Use filename as PDB ID
+            else:
+                # Try to get from columns if they exist, otherwise default to chain A
+                chain_id = pdb_info.get('chain_id', 'A')
+                pdb_id = pdb_info.get('pdb_id', pdb_filename.split('.')[0])
 
             # Read PAE data if available
             pae_file = pdb_info['pae_filename']
