@@ -365,6 +365,74 @@ def pymol_scan_test(info_tsv, uniprot_id, reference_directory, results_directory
     except Exception as e:
         print(f"[ERROR] in pymol_scan_test(): {e}")
 
+def pymol_rvas_quantitative(uniprot_id, reference_directory, results_directory):
+    """
+    Create PyMOL visualizations for quantitative trait RVAS results. For each PDB file:
+    - Produces a basic gray structure PSE file for subsequent coloring.
+    - This replaces pymol_rvas() for quantitative traits where we don't have case/control data.
+    """
+    try:
+        print(f"Creating PyMOL RVAS visualizations for quantitative traits: {uniprot_id}")
+
+        # Create pymol_visualizations subdirectory
+        pymol_dir = os.path.join(results_directory, 'pymol_visualizations')
+        os.makedirs(pymol_dir, exist_ok=True)
+
+        # For quantitative traits, we don't have case/control variant data in the h5 file
+        # We'll just create the basic gray structure files that other functions expect
+
+        # Load reference info to find PDB files for this protein
+        reference_dir = os.path.join(reference_directory, 'pdb_pae_file_pos_guide.tsv')
+        if not os.path.exists(reference_dir):
+            print(f"[WARNING] Reference file not found: {reference_dir}")
+            return
+
+        info_df = pd.read_csv(reference_dir, sep='\t')
+        tmp_info = info_df[info_df['uniprot_id'] == uniprot_id]
+
+        if tmp_info.empty:
+            print(f"[WARNING] No PDB info found for UniProt ID: {uniprot_id}")
+            return
+
+        tmp_pdbs = set(tmp_info['pdb_filename'].tolist())
+        print(f"  Found {len(tmp_pdbs)} PDB files for {uniprot_id}")
+
+        for pdb_file in tmp_pdbs:
+            try:
+                cmd.reinitialize()
+
+                # Load PDB structure - handle both .pdb and .pdb.gz files
+                pdb_path = os.path.join(reference_directory, pdb_file)
+
+                # Check if file exists as is, or with .gz extension
+                if os.path.exists(pdb_path):
+                    full_path = pdb_path
+                elif os.path.exists(pdb_path + '.gz'):
+                    full_path = pdb_path + '.gz'
+                elif pdb_file.endswith('.pdb') and os.path.exists(pdb_path + '.gz'):
+                    full_path = pdb_path + '.gz'
+                else:
+                    print(f"[WARNING] PDB file not found: {pdb_path} or {pdb_path}.gz")
+                    continue
+
+                cmd.load(full_path)
+                cmd.show("cartoon")
+                cmd.color("gray")
+                cmd.hide("lines")
+
+                # Save basic gray structure
+                base_name = pdb_file.split('.')[0]  # Remove file extension
+                gray_pse = os.path.join(pymol_dir, f"{base_name}_gray.pse")
+                cmd.save(gray_pse)
+                print(f"    Saved gray PSE file: {base_name}_gray.pse")
+
+            except Exception as e:
+                print(f"[ERROR] Processing PDB file {pdb_file}: {e}")
+
+    except Exception as e:
+        print(f"[ERROR] in pymol_rvas_quantitative(): {e}")
+
+
 def pymol_scan_test_quantitative(info_tsv, uniprot_id, reference_directory, results_directory):
     # Color by regularized mean beta in the neighborhood
 
@@ -557,9 +625,21 @@ def pymol_neighborhood_quantitative(uniprot_id, results_directory, info_tsv, ref
 
             print(f"[INFO] Using center position {center_pos} for neighborhood visualization")
 
-            # Load PDB structure
+            # Load PDB structure - handle both .pdb and .pdb.gz files
             pdb_path = os.path.join(reference_directory, v)
-            cmd.load(pdb_path)
+
+            # Check if file exists as is, or with .gz extension
+            if os.path.exists(pdb_path):
+                full_path = pdb_path
+            elif os.path.exists(pdb_path + '.gz'):
+                full_path = pdb_path + '.gz'
+            elif v.endswith('.pdb') and os.path.exists(pdb_path + '.gz'):
+                full_path = pdb_path + '.gz'
+            else:
+                print(f"[WARNING] PDB file not found: {pdb_path} or {pdb_path}.gz")
+                continue
+
+            cmd.load(full_path)
             cmd.show("cartoon")
             cmd.set("cartoon_transparency", 0.7)
             cmd.color("gray")
@@ -751,7 +831,7 @@ def run_all_quantitative(uniprot_id, results_directory, reference_directory):
     '''
     Run all PyMOL visualizations for quantitative traits for a given UniProt ID.
     '''
-    pymol_rvas(uniprot_id, reference_directory, results_directory)  # Still uses original variant visualization
+    pymol_rvas_quantitative(uniprot_id, reference_directory, results_directory)  # Creates gray structure files
     pymol_scan_test_quantitative('pdb_pae_file_pos_guide.tsv', uniprot_id, reference_directory, results_directory)
     pymol_neighborhood_quantitative(uniprot_id, results_directory, 'pdb_pae_file_pos_guide.tsv', reference_directory)
 
