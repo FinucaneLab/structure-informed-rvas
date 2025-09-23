@@ -517,7 +517,11 @@ def pymol_scan_test_quantitative(info_tsv, uniprot_id, reference_directory, resu
         tmp_visuals = set(tmp_df['visual_filename'].tolist())
 
         for v in tmp_visuals:
-            gray_pse_path = f"{v.split('.')[0]}_gray.pse"
+            # The v contains the path like: /path/to/pymol_visualizations/AF-Q9C0A6-F1-model_v4.pse
+            # We need: /path/to/pymol_visualizations/AF-Q9C0A6-F1-model_v4_gray.pse
+            gray_pse_path = v.replace('.pse', '_gray.pse')
+
+            print(f"[DEBUG] Looking for gray PSE file: {gray_pse_path}")
             if not os.path.exists(gray_pse_path):
                 print(f"[WARNING] Gray PSE file not found: {gray_pse_path}")
                 continue
@@ -666,7 +670,7 @@ def pymol_neighborhood_quantitative(uniprot_id, results_directory, info_tsv, ref
             # Read PAE data if available
             pae_file = pdb_info['pae_filename']
             if pd.notna(pae_file):
-                pae_path = os.path.join(reference_directory, pae_file)
+                pae_path = os.path.join(reference_directory, 'pae_files', pae_file)
                 try:
                     # Handle both compressed and uncompressed PAE files
                     if pae_path.endswith('.gz'):
