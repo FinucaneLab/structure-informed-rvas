@@ -8,6 +8,7 @@ from Bio.PDB import PDBParser
 from Bio.PDB import StructureBuilder, PDBIO, Model, Chain
 
 import re
+import json
 from utils import read_p_values, read_original_mutation_data, read_p_values_quantitative
 import h5py
 
@@ -542,8 +543,9 @@ def pymol_scan_test_quantitative(info_tsv, uniprot_id, reference_directory, resu
             cmd.show("cartoon", objects)
             cmd.hide("lines", objects)
 
-            cmd.save(f"{v.split('.')[0]}_beta.pse")
-            print(f"  Saved quantitative beta PSE file: {v.split('.')[0]}_beta.pse")
+            beta_pse_path = v.replace('.pse', '_beta.pse')
+            cmd.save(beta_pse_path)
+            print(f"  Saved quantitative beta PSE file: {beta_pse_path}")
 
     except Exception as e:
         print(f"[ERROR] in pymol_scan_test_quantitative(): {e}")
