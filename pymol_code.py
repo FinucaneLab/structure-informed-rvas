@@ -535,8 +535,10 @@ def pymol_scan_test_quantitative(info_tsv, uniprot_id, reference_directory, resu
             for _, row in tmp_df_visuals.iterrows():
                 resi = int(row['aa_pos'])
                 beta_color = float(row['beta_color'])
+                # Invert the color so negative beta values (negative effects) appear red
+                inverted_beta_color = 1.0 - beta_color
                 selection = f"{objects} and resi {resi}"
-                cmd.alter(selection, f"b={beta_color}")
+                cmd.alter(selection, f"b={inverted_beta_color}")
                 cmd.rebuild()
 
             # Use yellow-orange-red spectrum to match case/control version
