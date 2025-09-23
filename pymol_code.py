@@ -9,6 +9,7 @@ from Bio.PDB import StructureBuilder, PDBIO, Model, Chain
 
 import re
 import json
+import numpy as np
 from utils import read_p_values, read_original_mutation_data, read_p_values_quantitative
 import h5py
 
@@ -538,8 +539,8 @@ def pymol_scan_test_quantitative(info_tsv, uniprot_id, reference_directory, resu
                 cmd.alter(selection, f"b={beta_color}")
                 cmd.rebuild()
 
-            # Use blue-white-red spectrum for beta values (negative to positive effect sizes)
-            cmd.spectrum("b", "blue_white_red", objects, byres=1)
+            # Use yellow-orange-red spectrum to match case/control version
+            cmd.spectrum("b", "yellow_orange_red", objects, byres=1)
             cmd.show("cartoon", objects)
             cmd.hide("lines", objects)
 
