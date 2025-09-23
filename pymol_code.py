@@ -8,7 +8,7 @@ from Bio.PDB import PDBParser
 from Bio.PDB import StructureBuilder, PDBIO, Model, Chain
 
 import re
-from utils import read_p_values, read_original_mutation_data
+from utils import read_p_values, read_original_mutation_data, read_p_values_quantitative
 import h5py
 
 
@@ -365,6 +365,113 @@ def pymol_scan_test(info_tsv, uniprot_id, reference_directory, results_directory
     except Exception as e:
         print(f"[ERROR] in pymol_scan_test(): {e}")
 
+def pymol_scan_test_quantitative(info_tsv, uniprot_id, reference_directory, results_directory):
+    # Color by regularized mean beta in the neighborhood
+
+    '''
+    Create PyMOL visualizations for quantitative trait scan test results. For each PDB file:
+    - Color residues based on their regularized mean beta (blue to red gradient).
+    - Outputs a PSE file with beta-based coloring.
+    '''
+    try:
+        # Create pymol_visualizations subdirectory
+        pymol_dir = os.path.join(results_directory, 'pymol_visualizations')
+        os.makedirs(pymol_dir, exist_ok=True)
+
+        df_results_p = os.path.join(results_directory, 'p_values_quantitative.h5')
+
+        if not os.path.exists(df_results_p):
+            print(f"[WARNING] Quantitative results file not found: {df_results_p}")
+            return
+
+        with h5py.File(df_results_p, 'r') as fid:
+            # Check if the UniProt ID exists in the file
+            if uniprot_id not in fid:
+                available_proteins = [k for k in fid.keys() if '_' not in k]
+                print(f"[WARNING] UniProt ID {uniprot_id} not found in quantitative results file")
+                print(f"[INFO] Available proteins: {', '.join(available_proteins[:10])}{'...' if len(available_proteins) > 10 else ''}")
+                return
+
+            df_results = read_p_values_quantitative(fid, uniprot_id)
+
+        if info_tsv is not None:
+            info = os.path.join(reference_directory, info_tsv)
+            info_df = pd.read_csv(info, sep='\t')
+        else:
+            print(f"[WARNING] Info TSV not found: {info_tsv}")
+            return
+
+        tmp_info = info_df[info_df['uniprot_id'] == uniprot_id]
+        tmp_df = df_results[df_results['uniprot_id'] == uniprot_id]
+        tmp_df = get_pdb_filename(tmp_df, tmp_info)
+        print(f"Processing quantitative scan test results for {uniprot_id}: {len(tmp_df)} amino acid positions")
+
+        # Calculate regularized mean beta for coloring
+        # Regularization: add 2 synthetic variants with protein-wide mean beta to each neighborhood
+        protein_wide_mean_beta = tmp_df['mean_beta_in'].mean()  # Use mean of neighborhood means as proxy
+
+        # For each position, calculate regularized mean beta
+        regularized_betas = []
+        for _, row in tmp_df.iterrows():
+            mean_beta_in = row['mean_beta_in']
+            n_variants_in = row['n_variants_in']
+
+            # Regularized mean = (sum of actual betas + 2 * protein_wide_mean) / (n_actual + 2)
+            # Since we have mean_beta_in, we can recover the sum: sum = mean_beta_in * n_variants_in
+            if n_variants_in > 0:
+                actual_sum = mean_beta_in * n_variants_in
+                regularized_mean = (actual_sum + 2 * protein_wide_mean_beta) / (n_variants_in + 2)
+            else:
+                # If no variants in neighborhood, use protein-wide mean
+                regularized_mean = protein_wide_mean_beta
+
+            regularized_betas.append(regularized_mean)
+
+        tmp_df['regularized_mean_beta'] = regularized_betas
+
+        # Normalize for coloring - center around 0 and scale
+        beta_mean = tmp_df['regularized_mean_beta'].mean()
+        beta_std = tmp_df['regularized_mean_beta'].std()
+        if beta_std > 0:
+            tmp_df['beta_normalized'] = (tmp_df['regularized_mean_beta'] - beta_mean) / beta_std
+            # Clip extreme values and scale to 0-1 for PyMOL coloring
+            beta_min = tmp_df['beta_normalized'].quantile(0.05)
+            beta_max = tmp_df['beta_normalized'].quantile(0.95)
+            tmp_df['beta_normalized'] = tmp_df['beta_normalized'].clip(beta_min, beta_max)
+            tmp_df['beta_color'] = (tmp_df['beta_normalized'] - beta_min) / (beta_max - beta_min)
+        else:
+            tmp_df['beta_color'] = 0.5  # Neutral color if no variation
+
+        print(f"  Regularized mean beta range: {tmp_df['regularized_mean_beta'].min():.3f} to {tmp_df['regularized_mean_beta'].max():.3f}")
+        print(f"  Using protein-wide mean beta for regularization: {protein_wide_mean_beta:.3f}")
+
+        tmp_df['visual_filename'] = tmp_df['pdb_filename'].apply(lambda x: os.path.join(pymol_dir, x.split('.')[0] + '.pse'))
+        tmp_visuals = set(tmp_df['visual_filename'].tolist())
+
+        for v in tmp_visuals:
+            cmd.load(f"{v.split('.')[0]}_gray.pse")
+            objects = cmd.get_names('objects')[-1]
+
+            tmp_df_visuals = tmp_df[tmp_df['visual_filename'] == v]
+
+            for _, row in tmp_df_visuals.iterrows():
+                resi = int(row['aa_pos'])
+                beta_color = float(row['beta_color'])
+                selection = f"{objects} and resi {resi}"
+                cmd.alter(selection, f"b={beta_color}")
+                cmd.rebuild()
+
+            # Use blue-white-red spectrum for beta values (negative to positive effect sizes)
+            cmd.spectrum("b", "blue_white_red", objects, byres=1)
+            cmd.show("cartoon", objects)
+            cmd.hide("lines", objects)
+
+            cmd.save(f"{v.split('.')[0]}_beta.pse")
+            print(f"  Saved quantitative beta PSE file: {v.split('.')[0]}_beta.pse")
+
+    except Exception as e:
+        print(f"[ERROR] in pymol_scan_test_quantitative(): {e}")
+
 def pymol_neighborhood(uniprot_id, results_directory, info_tsv, reference_directory):
     # for each significant neighborhood, zoom in and show the case and control mutations
     # just in that neighborhood.
@@ -408,6 +515,157 @@ def pymol_neighborhood(uniprot_id, results_directory, info_tsv, reference_direct
 
     except Exception as e:  
         print(f"[ERROR] in pymol_neighborhood(): {e}")
+
+def pymol_neighborhood_quantitative(uniprot_id, results_directory, info_tsv, reference_directory):
+    '''
+    Create neighborhood visualization for quantitative traits colored by regularized mean beta.
+    '''
+    info = os.path.join(reference_directory, info_tsv)
+    info_df = pd.read_csv(info, sep='\t')
+
+    # Filter for the specified UniProt ID
+    tmp_info = info_df[info_df['uniprot_id'] == uniprot_id]
+    if tmp_info.empty:
+        print(f"[WARNING] No PDB info found for UniProt ID: {uniprot_id}")
+        return
+
+    tmp_pdbs = set(tmp_info['pdb_filename'].tolist())
+
+    # Create pymol_visualizations subdirectory
+    pymol_dir = os.path.join(results_directory, 'pymol_visualizations')
+    os.makedirs(pymol_dir, exist_ok=True)
+
+    for v in tmp_pdbs:
+        try:
+            cmd.reinitialize()
+
+            # Load the FDR results to get the most significant position
+            fdr_file = os.path.join(results_directory, 'all_proteins.fdr.tsv')
+            if not os.path.exists(fdr_file):
+                print(f"[WARNING] FDR results file not found: {fdr_file}")
+                continue
+
+            df_fdr = pd.read_csv(fdr_file, sep='\t')
+            df_protein = df_fdr[df_fdr.uniprot_id == uniprot_id]
+            if df_protein.empty:
+                print(f"[WARNING] No FDR results found for UniProt ID: {uniprot_id}")
+                continue
+
+            # Find the most significant position (lowest p-value)
+            min_p_idx = df_protein['p_value'].idxmin()
+            center_pos = df_protein.loc[min_p_idx, 'aa_pos']
+
+            print(f"[INFO] Using center position {center_pos} for neighborhood visualization")
+
+            # Load PDB structure
+            pdb_path = os.path.join(reference_directory, v)
+            cmd.load(pdb_path)
+            cmd.show("cartoon")
+            cmd.set("cartoon_transparency", 0.7)
+            cmd.color("gray")
+
+            # Get PDB mapping info for this structure
+            pdb_info = tmp_info[tmp_info['pdb_filename'] == v].iloc[0]
+            pdb_id = pdb_info['pdb_id']
+            chain_id = pdb_info['chain_id']
+
+            # Read PAE data if available
+            pae_file = pdb_info['pae_filename']
+            if pd.notna(pae_file):
+                pae_path = os.path.join(reference_directory, pae_file)
+                try:
+                    with open(pae_path, 'r') as f:
+                        pae_data = json.load(f)
+                    pae_matrix = np.array(pae_data[0]['predicted_aligned_error'])
+                except:
+                    print(f"[WARNING] Could not load PAE data from {pae_path}")
+                    pae_matrix = None
+            else:
+                pae_matrix = None
+
+            # Define neighborhood around center position (15A radius)
+            neighborhood_radius = 15.0
+            pae_cutoff = 15.0
+
+            # Get residues in neighborhood
+            neighborhood_residues = []
+
+            # If we have PAE data, use it for filtering
+            if pae_matrix is not None and center_pos <= len(pae_matrix):
+                for i in range(len(pae_matrix)):
+                    pae_val = pae_matrix[center_pos-1, i]  # Convert to 0-based indexing
+                    if pae_val <= pae_cutoff:
+                        # Check distance
+                        try:
+                            distance = cmd.get_distance(f"chain {chain_id} and resi {center_pos} and name CA",
+                                                      f"chain {chain_id} and resi {i+1} and name CA")
+                            if distance <= neighborhood_radius:
+                                neighborhood_residues.append(i+1)
+                        except:
+                            pass  # Skip if distance calculation fails
+            else:
+                # Fall back to distance-only filtering
+                try:
+                    cmd.select("center_residue", f"chain {chain_id} and resi {center_pos}")
+                    cmd.select("neighborhood", f"chain {chain_id} and name CA within {neighborhood_radius} of center_residue")
+                    neighborhood_residues = cmd.get_model("neighborhood").get_residues()
+                    neighborhood_residues = [int(r.resi) for r in neighborhood_residues]
+                except:
+                    print(f"[WARNING] Could not determine neighborhood for position {center_pos}")
+                    continue
+
+            # Color neighborhood residues by their regularized mean beta values
+            protein_data = df_protein.copy()
+
+            # Calculate protein-wide mean beta for regularization
+            protein_wide_mean_beta = protein_data['mean_beta_in'].mean()
+
+            for pos in neighborhood_residues:
+                pos_data = protein_data[protein_data.aa_pos == pos]
+                if not pos_data.empty:
+                    mean_beta_in = pos_data.iloc[0]['mean_beta_in']
+                    n_variants_in = pos_data.iloc[0]['n_variants_in']
+
+                    # Calculate regularized mean beta
+                    if n_variants_in > 0:
+                        actual_sum = mean_beta_in * n_variants_in
+                        regularized_mean = (actual_sum + 2 * protein_wide_mean_beta) / (n_variants_in + 2)
+                    else:
+                        regularized_mean = protein_wide_mean_beta
+
+                    # Determine color based on regularized mean beta
+                    if regularized_mean > 0.1:  # Positive effect
+                        color = "red"
+                    elif regularized_mean < -0.1:  # Negative effect
+                        color = "blue"
+                    else:  # Near zero effect
+                        color = "white"
+
+                    cmd.color(color, f"chain {chain_id} and resi {pos}")
+                else:
+                    # No data for this position, color gray
+                    cmd.color("gray", f"chain {chain_id} and resi {pos}")
+
+            # Highlight the center residue
+            cmd.color("yellow", f"chain {chain_id} and resi {center_pos}")
+            cmd.show("spheres", f"chain {chain_id} and resi {center_pos}")
+
+            # Set view and save
+            cmd.orient()
+            cmd.zoom("all", 5)  # Zoom out a bit
+
+            # Save PyMOL session
+            pse_path = os.path.join(pymol_dir, f"{v.split('.')[0]}_beta_neighborhood.pse")
+            cmd.save(pse_path)
+
+            # Render and save image
+            cmd.ray(2400, 1800)
+            cmd.set("ray_opaque_background", 1)
+            cmd.png(f"{v.split('.')[0]}_beta_neighborhood.png")
+
+        except Exception as e:
+            print(f"[ERROR] in pymol_neighborhood_quantitative(): {e}")
+
 
 def make_movie_from_pse(result_directory, pse_name):
     '''
@@ -487,5 +745,14 @@ def run_all(uniprot_id, results_directory, reference_directory):
     # pymol_annotation('ClinVar_PLP_uniprot_canonical.tsv', reference_directory , results_directory, 'pdb_pae_file_pos_guide.tsv', uniprot_id)
     pymol_scan_test('pdb_pae_file_pos_guide.tsv', uniprot_id, reference_directory, results_directory)
     pymol_neighborhood(uniprot_id, results_directory, 'pdb_pae_file_pos_guide.tsv', reference_directory)
+
+
+def run_all_quantitative(uniprot_id, results_directory, reference_directory):
+    '''
+    Run all PyMOL visualizations for quantitative traits for a given UniProt ID.
+    '''
+    pymol_rvas(uniprot_id, reference_directory, results_directory)  # Still uses original variant visualization
+    pymol_scan_test_quantitative('pdb_pae_file_pos_guide.tsv', uniprot_id, reference_directory, results_directory)
+    pymol_neighborhood_quantitative(uniprot_id, results_directory, 'pdb_pae_file_pos_guide.tsv', reference_directory)
 
 

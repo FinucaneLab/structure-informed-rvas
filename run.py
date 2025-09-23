@@ -4,7 +4,7 @@ import os
 from scan_test import scan_test
 from annotation_test import annotation_test
 from read_data import map_to_protein
-from pymol_code import run_all
+from pymol_code import run_all, run_all_quantitative
 from pymol_code import make_movie_from_pse
 from logger_config import get_logger
 from utils import get_nbhd_info
@@ -181,6 +181,12 @@ if __name__ == '__main__':
         help='Get list of residues and variants in neighborhood centered at --aa-pos in protein --uniprot-id'
     )
     parser.add_argument(
+        '--get-protein-variants',
+        action='store_true',
+        default=False,
+        help='Map variants to a specific protein and save the result to results-dir'
+    )
+    parser.add_argument(
         '--quantitative-trait',
         action='store_true',
         default=False,
@@ -318,7 +324,11 @@ if __name__ == '__main__':
     elif args.visualization:
         if not (args.uniprot_id and args.reference_dir and args.results_dir):
             raise ValueError("For visualization, you must provide --uniprot_id, --reference_dir and --results_dir")
-        run_all(args.uniprot_id, args.results_dir, args.reference_dir)
+
+        if args.quantitative_trait:
+            run_all_quantitative(args.uniprot_id, args.results_dir, args.reference_dir)
+        else:
+            run_all(args.uniprot_id, args.results_dir, args.reference_dir)
     
     elif args.make_movie:
         if not (args.pse and args.results_dir):
@@ -335,5 +345,65 @@ if __name__ == '__main__':
         print(cases)
         print('Control Variants in neighborhood:')
         print(cntrls)
+
+    elif args.get_protein_variants:
+        if not (args.rvas_data_to_map and args.uniprot_id and args.reference_dir and args.results_dir):
+            raise ValueError("For getting protein variants, you must provide --rvas-data-to-map, --uniprot-id, --reference-dir and --results-dir")
+
+        logger.info(f"Mapping variants for protein {args.uniprot_id}")
+
+        # Map variants to protein coordinates
+        df_protein_variants = map_to_protein(
+            args.rvas_data_to_map,
+            args.variant_id_col,
+            args.ac_case_col if not args.quantitative_trait else None,
+            args.ac_control_col if not args.quantitative_trait else None,
+            args.reference_dir,
+            args.uniprot_id,  # Filter to specific protein
+            args.genome_build,
+            beta_col=args.beta_col if args.quantitative_trait else None
+        )
+
+        # Filter to the specific UniProt ID (in case map_to_protein returns multiple proteins)
+        if df_protein_variants is not None:
+            df_protein_variants = df_protein_variants[df_protein_variants.uniprot_id == args.uniprot_id]
+
+            if not df_protein_variants.empty:
+                # Apply AC filter if specified and not quantitative trait
+                if not args.quantitative_trait and args.ac_filter:
+                    original_count = len(df_protein_variants)
+                    df_protein_variants = df_protein_variants[df_protein_variants.ac_case + df_protein_variants.ac_control < args.ac_filter]
+                    logger.info(f"Filtered {original_count - len(df_protein_variants)} variants with AC >= {args.ac_filter}")
+
+                # Save to results directory
+                output_file = os.path.join(args.results_dir, f"{args.uniprot_id}_variants.tsv")
+                df_protein_variants.to_csv(output_file, sep='\t', index=False)
+                logger.info(f"Saved {len(df_protein_variants)} variants for protein {args.uniprot_id} to {output_file}")
+
+                # Print summary
+                logger.info(f"Summary for protein {args.uniprot_id}:")
+                logger.info(f"  Total variants: {len(df_protein_variants)}")
+                logger.info(f"  Amino acid positions: {df_protein_variants.aa_pos.nunique()}")
+                logger.info(f"  Position range: {df_protein_variants.aa_pos.min()}-{df_protein_variants.aa_pos.max()}")
+
+                if not args.quantitative_trait:
+                    logger.info(f"  Total case alleles: {df_protein_variants.ac_case.sum()}")
+                    logger.info(f"  Total control alleles: {df_protein_variants.ac_control.sum()}")
+                else:
+                    # Find the beta column - it might be named differently after mapping
+                    beta_columns = [col for col in df_protein_variants.columns if 'beta' in col.lower()]
+                    if beta_columns:
+                        beta_col = beta_columns[0]
+                        logger.info(f"  Beta column: {beta_col}")
+                        logger.info(f"  Beta range: {df_protein_variants[beta_col].min():.4f} to {df_protein_variants[beta_col].max():.4f}")
+                        logger.info(f"  Mean beta: {df_protein_variants[beta_col].mean():.4f}")
+                    else:
+                        logger.info(f"  Available columns: {', '.join(df_protein_variants.columns)}")
+                        logger.warning("No beta column found in mapped data")
+            else:
+                logger.warning(f"No variants found for protein {args.uniprot_id}")
+        else:
+            logger.warning(f"Failed to map variants for protein {args.uniprot_id}")
+
     else:
         raise Exception('no analysis specified')
