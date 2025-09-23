@@ -402,7 +402,7 @@ def pymol_rvas_quantitative(uniprot_id, reference_directory, results_directory):
                 cmd.reinitialize()
 
                 # Load PDB structure - handle both .pdb and .pdb.gz files
-                pdb_path = os.path.join(reference_directory, pdb_file)
+                pdb_path = os.path.join(reference_directory, 'pdb_files', pdb_file)
 
                 # Check if file exists as is, or with .gz extension
                 if os.path.exists(pdb_path):
@@ -626,7 +626,7 @@ def pymol_neighborhood_quantitative(uniprot_id, results_directory, info_tsv, ref
             print(f"[INFO] Using center position {center_pos} for neighborhood visualization")
 
             # Load PDB structure - handle both .pdb and .pdb.gz files
-            pdb_path = os.path.join(reference_directory, v)
+            pdb_path = os.path.join(reference_directory, 'pdb_files', v)
 
             # Check if file exists as is, or with .gz extension
             if os.path.exists(pdb_path):
