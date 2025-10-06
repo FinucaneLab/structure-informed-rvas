@@ -207,6 +207,7 @@ if __name__ == '__main__':
     if args.results_dir and not os.path.exists(args.results_dir):
         logger.info(f"Creating results directory: {args.results_dir}")
         os.makedirs(args.results_dir, exist_ok=True)
+    
     if args.rvas_data_to_map is not None:
         # map rvas results onto protein coordinates, linked to pdb files
         df_rvas = map_to_protein(
@@ -220,6 +221,7 @@ if __name__ == '__main__':
         )
     else:
         df_rvas = None
+
     # Only require data input if not doing FDR-only analysis or visualization
     if df_rvas is None and not args.fdr_only and not args.visualization:
         raise ValueError("Must provide --rvas-data-to-map")

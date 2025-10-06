@@ -154,8 +154,8 @@ def annotation_test(
     pae_dir = f'{reference_dir}/pae_files/'
 
     # print('pae dir exists:', os.path.exists(pae_dir))
-    if not os.path.exists(pae_dir):
-        pae_dir = None
+    if pae_cutoff != 0 and not os.path.exists(pae_dir):
+        raise Exception('Error: pae_dir does not exist, but pae_cutoff is not 0.')
 
     try:
         logger.debug(df_rvas)
