@@ -17,7 +17,6 @@ def get_pairwise_distances(pdb_file, *args):
     # i: start from aminoacid i (inclusive)
     # j: end with aminoacid j (inclusive)
     # if only one argument i is provided, it computes starting from i till the end of the chain
-    
     parser = PDBParser(QUIET=True)
     if pdb_file.endswith('.gz'):
         with gzip.open(pdb_file, 'rt') as handle:
@@ -47,14 +46,19 @@ def get_pairwise_distances(pdb_file, *args):
 
 
 def get_distance_matrix_structure(pdb_file_pos_guide, pdb_dir, uniprot_id):
+    logger.debug(f"Computing distance matrix for {uniprot_id}")
     info = pd.read_csv(pdb_file_pos_guide, sep="\t")
     pdb_files = info.loc[info.pdb_filename.str.contains(uniprot_id),'pdb_filename']
     ## Version 2: central on top of all
     if len(pdb_files)==0:
-        raise Exception(f"Protein {uniprot_id} not found.")
+        logger.warning(f"Protein {uniprot_id} not found.")
+        return None
     elif len(pdb_files)==1:
         # One pdb file in structure
         pathfile = os.path.join(pdb_dir, pdb_files.iloc[0])
+        # if not os.path.exists(pathfile):
+        #     print(f"File {pathfile} does not exist.")
+        #     return None
         distance_matrix = get_pairwise_distances(pathfile)
     else:
         # Multiple pdb files in structure
@@ -92,14 +96,12 @@ def get_paes(pae_file, *args):
     # i: start from aminoacid i (inclusive)
     # j: end with aminoacid j (inclusive)
     # if only one argument i is provided, it computes starting from i till the end of the chain
-
     if pae_file.endswith('.gz'):
         with gzip.open(pae_file, 'rt') as f: 
             data = json.load(f)
     else:
         with open(pae_file, 'r') as f:
             data = json.load(f)
-            
     pae_matrix = np.array(data[0]['predicted_aligned_error'])
     #(pae_matrix < 15) * 1
    
@@ -114,6 +116,7 @@ def get_paes(pae_file, *args):
     return pae_matrix
     
 def get_pae_matrix_structure(pae_file_pos_guide, pae_dir, uniprot_id):
+    logger.debug(f"Computing pae matrix for {uniprot_id}")
     info = pd.read_csv(pae_file_pos_guide, sep="\t")
     #pae_files = info.loc[info.pae_filename.str.contains(uniprot_id),'pae_filename']
     # need to deal with null entries 
@@ -122,13 +125,17 @@ def get_pae_matrix_structure(pae_file_pos_guide, pae_dir, uniprot_id):
     if len(pae_files)==0:
         pdb_files = info.loc[info.pdb_filename.str.contains(uniprot_id), 'pdb_filename']
         if len(pdb_files)==0:
-            raise Exception(f"Protein {uniprot_id} not found.")
+            logger.warning(f"Protein {uniprot_id} not found.")
+            return None
         else:
-            warnings.warn(f"PAE file not found for Protein {uniprot_id}. No PAE filtering will be used.")
-            pae_matrix = None
+            logger.warning(f"PAE file not found for Protein {uniprot_id}. No PAE filtering will be used.")
+            return None
     elif len(pae_files)==1:
         # One pae file for structure
         pathfile = os.path.join(pae_dir, pae_files.iloc[0])
+        if not os.path.exists(pathfile):
+            logger.warning(f"File {pathfile} does not exist. No PAE filtering will be used.")
+            return None
         pae_matrix = get_paes(pathfile)
     else:
         # Multiple pae files for structure
@@ -176,6 +183,9 @@ def get_pae_matrix_structure(pae_file_pos_guide, pae_dir, uniprot_id):
 def get_adjacency_matrix(pdb_pae_file_pos_guide, pdb_dir, pae_dir, uniprot_id, radius, pae_cutoff):
     logger.debug(f"Computing adjacency matrix for {uniprot_id} with radius={radius}, pae_cutoff={pae_cutoff}")
     distance_matrix = get_distance_matrix_structure(pdb_pae_file_pos_guide, pdb_dir, uniprot_id)
+    if distance_matrix is None:
+        logger.warning(f"No distance matrix found for {uniprot_id}, returning None")
+        return None
     dist_thresh = (distance_matrix < radius) * 1
     if pae_cutoff == 0:
         pae_thresh = np.ones_like(dist_thresh)
@@ -189,7 +199,6 @@ def get_adjacency_matrix(pdb_pae_file_pos_guide, pdb_dir, pae_dir, uniprot_id, r
     adj_mat = dist_thresh & pae_thresh
     logger.debug(f"Adjacency matrix computed: {np.sum(adj_mat)} edges from {adj_mat.shape[0]} positions")
     return adj_mat
-    
 def valid_for_fisher(contingency_table):
     valid_columns = np.all(np.sum(contingency_table, axis=0) > 0)
     valid_rows = np.all(np.sum(contingency_table, axis=1) > 0)

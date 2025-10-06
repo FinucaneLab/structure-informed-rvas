@@ -1,0 +1,46 @@
+2025-09-19 15:15:39,295 - empirical_fdr - INFO - compute_fdr:148 - Computing FDR
+2025-09-19 15:15:39,301 - empirical_fdr - INFO - _load_all_pvalues:47 - Reading observed and null p-values
+2025-09-19 15:23:50,065 - empirical_fdr - INFO - compute_fdr:148 - Computing FDR
+2025-09-19 15:23:50,103 - empirical_fdr - INFO - _load_all_pvalues:47 - Reading observed and null p-values
+2025-09-19 15:26:02,362 - empirical_fdr - INFO - compute_fdr:148 - Computing FDR
+2025-09-19 15:26:02,373 - empirical_fdr - INFO - _load_all_pvalues:47 - Reading observed and null p-values
+2025-09-19 15:30:30,127 - empirical_fdr - INFO - compute_fdr:151 - Computing FDR
+2025-09-19 15:30:30,135 - empirical_fdr - INFO - _load_all_pvalues:47 - Reading observed and null p-values
+2025-09-19 15:30:30,422 - empirical_fdr - INFO - _load_all_pvalues:77 - Concatenating and sorting observed p-values
+2025-09-19 15:30:30,427 - empirical_fdr - INFO - _compute_false_discoveries:86 - Computing false discoveries
+2025-09-19 15:30:30,480 - empirical_fdr - INFO - _apply_fdr_correction:118 - Computing FDR
+2025-09-19 15:37:59,471 - empirical_fdr - INFO - compute_fdr:154 - Computing FDR
+2025-09-19 15:37:59,483 - empirical_fdr - INFO - _load_all_pvalues:47 - Reading observed and null p-values
+2025-09-19 15:37:59,812 - empirical_fdr - INFO - _load_all_pvalues:77 - Concatenating and sorting observed p-values
+2025-09-19 15:37:59,817 - empirical_fdr - INFO - _compute_false_discoveries:86 - Computing false discoveries
+2025-09-19 15:37:59,865 - empirical_fdr - INFO - _apply_fdr_correction:118 - Computing FDR
+2025-09-19 15:37:59,888 - empirical_fdr - INFO - summarize_results:133 - 
+2025-09-19 15:37:59,890 - empirical_fdr - INFO - summarize_results:134 - 0 out of 9 proteins have a neighborhood significant at 0.05.
+2025-09-19 15:37:59,896 - empirical_fdr - INFO - summarize_results:135 - Top 20 hits:
+Empty DataFrame
+Columns: [uniprot_id, aa_pos, p_value, fdr, t_stat, mean_beta_in, mean_beta_out, n_variants_in, n_variants_out, gene_name]
+Index: []
+2025-09-19 15:40:17,349 - empirical_fdr - INFO - compute_fdr:154 - Computing FDR
+2025-09-19 15:40:17,366 - empirical_fdr - INFO - _load_all_pvalues:47 - Reading observed and null p-values
+2025-09-19 15:40:17,641 - empirical_fdr - INFO - _load_all_pvalues:77 - Concatenating and sorting observed p-values
+2025-09-19 15:40:17,646 - empirical_fdr - INFO - _compute_false_discoveries:86 - Computing false discoveries
+2025-09-19 15:40:17,697 - empirical_fdr - INFO - _apply_fdr_correction:118 - Computing FDR
+2025-09-19 15:40:17,717 - empirical_fdr - INFO - summarize_results:133 - 
+2025-09-19 15:40:17,720 - empirical_fdr - INFO - summarize_results:134 - 0 out of 9 proteins have a neighborhood significant at 0.05.
+2025-09-19 15:40:17,723 - empirical_fdr - INFO - summarize_results:135 - Top 20 hits:
+Empty DataFrame
+Columns: [uniprot_id, aa_pos, p_value, fdr, t_stat, mean_beta_in, mean_beta_out, n_variants_in, n_variants_out, gene_name]
+Index: []
+2025-09-19 15:47:47,430 - empirical_fdr - INFO - compute_fdr:154 - Computing FDR
+2025-09-19 15:47:47,437 - empirical_fdr - INFO - _load_all_pvalues:47 - Reading observed and null p-values
+2025-09-19 15:47:47,741 - empirical_fdr - INFO - _load_all_pvalues:77 - Concatenating and sorting observed p-values
+2025-09-19 15:47:47,746 - empirical_fdr - INFO - _compute_false_discoveries:86 - Computing false discoveries
+2025-09-19 15:47:47,794 - empirical_fdr - INFO - _apply_fdr_correction:118 - Computing FDR
+2025-09-19 15:47:47,814 - empirical_fdr - INFO - summarize_results:133 - 
+2025-09-19 15:47:47,816 - empirical_fdr - INFO - summarize_results:134 - 0 out of 9 proteins have a neighborhood significant at 0.05.
+2025-09-19 15:47:47,819 - empirical_fdr - INFO - summarize_results:135 - Top 20 hits:
+Empty DataFrame
+Columns: [uniprot_id, aa_pos, p_value, fdr, t_stat, mean_beta_in, mean_beta_out, n_variants_in, n_variants_out, gene_name]
+Index: []
+2025-09-19 16:17:47,120 - empirical_fdr - INFO - compute_fdr:154 - Computing FDR
+2025-09-19 16:17:47,851 - empirical_fdr - INFO - _load_all_pvalues:47 - Reading observed and null p-values

@@ -180,9 +180,7 @@ if __name__ == '__main__':
         default=False,
         help='Get list of residues and variants in neighborhood centered at --aa-pos in protein --uniprot-id'
     )
-    
     args = parser.parse_args()
-
     # Input validation
     if args.genome_build not in ['hg37', 'hg38']:
         raise ValueError(f"Invalid genome build: {args.genome_build}. Must be 'hg37' or 'hg38'")
@@ -209,7 +207,7 @@ if __name__ == '__main__':
     if args.results_dir and not os.path.exists(args.results_dir):
         logger.info(f"Creating results directory: {args.results_dir}")
         os.makedirs(args.results_dir, exist_ok=True)
-
+    
     if args.rvas_data_to_map is not None:
         # map rvas results onto protein coordinates, linked to pdb files
         df_rvas = map_to_protein(
@@ -223,7 +221,7 @@ if __name__ == '__main__':
         )
     else:
         df_rvas = None
-    
+
     # Only require data input if not doing FDR-only analysis or visualization
     if df_rvas is None and not args.fdr_only and not args.visualization:
         raise ValueError("Must provide --rvas-data-to-map")
@@ -284,7 +282,6 @@ if __name__ == '__main__':
             args.results_dir,
             args.filter_file,
         )
-    
     elif args.visualization:
         if not (args.uniprot_id and args.reference_dir and args.results_dir):
             raise ValueError("For visualization, you must provide --uniprot_id, --reference_dir and --results_dir")
