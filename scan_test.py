@@ -154,7 +154,6 @@ def write_df_pvals(results_dir, uniprot_id, df_pvals):
         write_dataset(fid, f'{uniprot_id}_original', df_pvals[['original_case', 'original_control']])
 
 def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir, uniprot_id, radius, pae_cutoff, n_sims):
-    results_prefix = os.path.join(results_dir, uniprot_id)
     df_pvals, adj_mat = compute_all_pvals(
         df,
         pdb_file_pos_guide,
@@ -196,7 +195,7 @@ def _filter_proteins_by_allele_count(df_rvas, df_fdr_filter, min_alleles=5):
     return uniprot_id_list
 
 
-def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims):
+def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, remove_nbhd):
     """Process each protein individually with scan test."""
     pdb_file_pos_guide = f'{reference_dir}/pdb_pae_file_pos_guide.tsv'
     pdb_dir = f'{reference_dir}/pdb_files/'
@@ -207,6 +206,21 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
         logger.info(f'Processing {uniprot_id} (protein {i+1} out of {n_proteins})')
         try:
             df = df_rvas[df_rvas.uniprot_id == uniprot_id]
+            if remove_nbhd is not None:
+                    adjacency_matrix = get_adjacency_matrix(
+                        pdb_file_pos_guide,
+                        pdb_dir,
+                        pae_dir,
+                        uniprot_id,
+                        radius,
+                        pae_cutoff,
+                    )
+                    for to_remove in map(int, remove_nbhd.split(',')):
+                        print(f'Removing neighborhood of position {to_remove} for {uniprot_id}')
+                        nbhd = set(np.where(adjacency_matrix[to_remove-1] == 1)[0] + 1)
+                        df.drop(df[df['aa_pos'].isin(nbhd)].index, inplace=True)
+                    df.reset_index(drop=True, inplace=True)
+
             if (sum(df.ac_case) < 5) or (sum(df.ac_control) < 5):
                 logger.warning(f'{uniprot_id}: There must be at least 5 case and 5 control alleles. Skipping.')
                 continue
@@ -245,6 +259,7 @@ def scan_test(
     df_fdr_filter,
     ignore_ac,
     fdr_file,
+    remove_nbhd,
 ):
     """
     Perform scan test analysis on protein structure data.
@@ -271,7 +286,7 @@ def scan_test(
     # Process each protein
     _process_proteins_batch(
         df_processed, uniprot_id_list, reference_dir, 
-        radius, pae_cutoff, results_dir, n_sims
+        radius, pae_cutoff, results_dir, n_sims, remove_nbhd
     )
     
     # Compute FDR if requested

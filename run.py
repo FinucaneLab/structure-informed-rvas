@@ -175,6 +175,12 @@ if __name__ == '__main__':
         help='Amino acid residue position in --uniprot-id for center of desired neighborhood'
     )
     parser.add_argument(
+        '--remove-nbhd',
+        type=str,
+        default=None,
+        help='Remove all case and control mutations in neighborhood of this amino acid position in --uniprot-id'
+    )
+    parser.add_argument(
         '--get-nbhd',
         action='store_true',
         default=False,
@@ -271,6 +277,7 @@ if __name__ == '__main__':
             df_fdr_filter,
             args.ignore_ac,
             args.fdr_file,
+            args.remove_nbhd,
         )
 
     elif args.annotation_file is not None:
