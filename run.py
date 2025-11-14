@@ -20,6 +20,11 @@ if __name__ == '__main__':
         default=None,
         help='''
             .tsv.gz file with columns chr, pos, ref, alt, ac_case, ac_control.
+            If chr/pos/ref/alt are not available, can also provide a column with 
+            variant ID in chr:pos:ref:alt or chr-pos-ref-alt format with the 
+            --variant-id-col flag. Can also use --ac-case-col and --ac-control-col
+            flags to specify different column names for allele counts in cases
+            and controls.
         ''',
     )
     parser.add_argument(
@@ -31,54 +36,39 @@ if __name__ == '__main__':
     parser.add_argument(
         '--ac-case-col',
         type=str,
-        help='column with allele count in cases',
+        help='name of the column that has allele count in cases',
     )
     parser.add_argument(
         '--ac-control-col',
         type=str,
-        help='column with allele count in controls',
+        help='name of the column that has allele count in controls',
     )
     parser.add_argument(
-        '--scan-test',
+        '--3dnt',
         action='store_true',
         default=False,
-        help = 'perform scan test',
-    )
-    parser.add_argument(
-        '--clinvar-test',
-        action='store_true',
-        default=False,
-        help='perform clinvar test',
-    )
-    parser.add_argument(
-        '--annotation_file',
-        type=str,
-        default=None,
-        help='perform a burden test using this annotation',
+        help = 'perform the 3D neighborhood test',
     )
     parser.add_argument(
         '--neighborhood-radius',
         type=float,
         default=15.0,
-        help='neighborhood radius for clinvar or annotation tests',
+        help='neighborhood radius (in Angstroms)',
     )
     parser.add_argument(
         '--pae-cutoff',
         type=float,
         default=15.0,
-        help='maximum PAE value for clinvar or annotation tests; argument of 0 will result in no PAE filtering used',
+        help='''
+        maximum PAE value for clinvar or annotation tests; argument of 0 will
+        result in no PAE filtering used
+        '''
     )
     parser.add_argument(
         '--n-sims',
         type=int,
         default=1000,
         help='how many null simulations to do',
-    )
-    parser.add_argument(
-        '--filter-file',
-        type=str,
-        default=None,
-        help='file to filter variants after expanding neighborhood'
     )
     parser.add_argument(
         '--genome-build',
@@ -100,31 +90,74 @@ if __name__ == '__main__':
         '--ac-filter',
         type=int,
         default=5,
-        help='filter out AC greater than this.'
+        help='filter out variants with AC greater than this.'
     )
     parser.add_argument(
         '--df-fdr-filter',
         type=str,
         default=None,
-        help='tsv to filter to during fdr computation. must have uniprot_id and can also have aa_pos column.'
+        help='''
+        To consider only a subset of results and compute FDR for this subset, 
+        use this flag to specify the path to a tsv with the proteins or specific
+        amino acids to filter to during fdr computation. The tsv must have a 
+        column called uniprot_id and can also have an aa_pos column.
+        '''
     )
     parser.add_argument(
         '--no-fdr',
         action='store_true',
         default=False,
-        help='skip fdr computation for scan test.'
+        help='skip fdr computation.'
     )
     parser.add_argument(
         '--fdr-only',
         action='store_true',
         default=False,
-        help='only compute the scan test fdr from a directory of results'
+        help='''
+        Skip everything except fdr computation. Requires that results
+        directory already exists and has scan test results.
+        '''
+    )
+    parser.add_argument(
+        '--fdr-file',
+        type=str,
+        default='all_proteins.fdr.tsv',
+        help='file in the results directory to write the fdrs to'
     )
     parser.add_argument(
         '--fdr-cutoff',
         type=float,
         default=0.05,
         help='fdr cutoff for summarizing results'
+    )
+    parser.add_argument(
+        '--remove-nbhd',
+        type=str,
+        default=None,
+        help='''
+        Analogous to a conditional analysis: remove all case and control mutations in 
+        these neighborhood(s) in --uniprot-id. Can be a comma-separated list of positions
+        or a single position. This flag will automatically analyze only the protein 
+        in --uniprot-id.
+        '''
+    )
+    parser.add_argument(
+        '--get-nbhd',
+        action='store_true',
+        default=False,
+        help=
+        '''Get list of residues and variants in neighborhood centered at --aa-pos in 
+        protein --uniprot-id. Also requires --rvas-data-to-map and --reference-dir.
+        '''
+    )
+    parser.add_argument(
+        '--save-df-rvas',
+        type=str,
+        default=None,
+        help='''
+        Save the mapped RVAS dataframe. This can be run with only --rvas-data-to-map and
+        --reference-dir and will perform the mapping with no additional analysis.
+        '''
     )
     parser.add_argument(
         '--ignore-ac',
@@ -142,7 +175,13 @@ if __name__ == '__main__':
         '--uniprot-id',
         type=str,
         default=None,
-        help='UniProt ID for visualization or neighborhood residue list'
+        help='''
+        Can be a uniprot ID, a comma-separated list of uniprot IDs,
+        or a file with a list of uniprot IDs (one per line). When used with
+        --3dnt, only these proteins will be analyzed. Also used with
+        --visualization, --get-nbhd, --remove-nbhd, and optionall
+        --save-df-rvas.
+        '''
     )
     parser.add_argument(
         '--make_movie',
@@ -157,45 +196,23 @@ if __name__ == '__main__':
         help='Pymol session to make a movie from'
     )
     parser.add_argument(
-        '--fdr-file',
-        type=str,
-        default='all_proteins.fdr.tsv',
-        help='file in the results directory to write the fdrs to'
-    )
-    parser.add_argument(
         '--aa-pos',
         type=str,
         default=None,
         help='Amino acid residue position in --uniprot-id for center of desired neighborhood'
     )
-    parser.add_argument(
-        '--remove-nbhd',
-        type=str,
-        default=None,
-        help='Remove all case and control mutations in neighborhood of this amino acid position in --uniprot-id'
-    )
-    parser.add_argument(
-        '--get-nbhd',
-        action='store_true',
-        default=False,
-        help='Get list of residues and variants in neighborhood centered at --aa-pos in protein --uniprot-id'
-    )
-    parser.add_argument(
-        '--save-df-rvas',
-        type=str,
-        default=None,
-        help='Save the mapped RVAS dataframe.'
-    )
     args = parser.parse_args()
+
     # Input validation
+    
     if args.genome_build not in ['hg37', 'hg38']:
         raise ValueError(f"Invalid genome build: {args.genome_build}. Must be 'hg37' or 'hg38'")
     
-    if args.neighborhood_radius <= 0:
-        raise ValueError(f"Neighborhood radius must be positive, got {args.neighborhood_radius}")
+    if args.neighborhood_radius < 0:
+        raise ValueError(f"Neighborhood radius must be non-negative, got {args.neighborhood_radius}")
     
     if args.pae_cutoff < 0:
-        raise ValueError(f"PAE cutoff must be positive, got {args.pae_cutoff}")
+        raise ValueError(f"PAE cutoff must be non-negative, got {args.pae_cutoff}")
     
     if args.n_sims <= 0:
         raise ValueError(f"Number of simulations must be positive, got {args.n_sims}")
@@ -207,15 +224,17 @@ if __name__ == '__main__':
         raise ValueError(f"FDR cutoff must be between 0 and 1, got {args.fdr_cutoff}")
     
     # Check required directories exist
+
     if args.reference_dir and not os.path.exists(args.reference_dir):
         raise FileNotFoundError(f"Reference directory not found: {args.reference_dir}")
     
     if args.results_dir and not os.path.exists(args.results_dir):
         logger.info(f"Creating results directory: {args.results_dir}")
         os.makedirs(args.results_dir, exist_ok=True)
+
+    # Map and filter RVAS data
     
     if args.rvas_data_to_map is not None:
-        # map rvas results onto protein coordinates, linked to pdb files
         df_rvas = map_to_protein(
             args.rvas_data_to_map,
             args.variant_id_col,
@@ -228,7 +247,6 @@ if __name__ == '__main__':
     else:
         df_rvas = None
 
-    # Only require data input if not doing FDR-only analysis or visualization
     if df_rvas is None and not args.fdr_only and not args.visualization:
         raise ValueError("Must provide --rvas-data-to-map")
 
@@ -237,16 +255,12 @@ if __name__ == '__main__':
             uniprot_id = [x.rstrip() for x in open(args.uniprot_id).readlines()]
         else:
             uniprot_id = args.uniprot_id.split(',')
-        df_rvas = df_rvas[df_rvas.uniprot_id.isin(uniprot_id)]
 
     if df_rvas is not None:
         df_rvas = df_rvas[df_rvas.ac_case + df_rvas.ac_control < args.ac_filter]
+        df_rvas = df_rvas[df_rvas.uniprot_id.isin(uniprot_id)]
 
-    did_nothing = True
-    if args.save_df_rvas is not None:
-        logger.info(f"Saving mapped RVAS dataframe to {args.save_df_rvas}")
-        df_rvas.to_csv(args.save_df_rvas, sep='\t', index=False)
-        did_nothing = False
+    # Load FDR filter if provided
 
     if args.df_fdr_filter is not None:
         filter_files = args.df_fdr_filter.split(',')
@@ -266,6 +280,15 @@ if __name__ == '__main__':
     else:
         df_fdr_filter = None
 
+    # Run analysis
+
+    did_nothing = True
+
+    if args.save_df_rvas is not None:
+        logger.info(f"Saving mapped RVAS dataframe to {args.save_df_rvas}")
+        df_rvas.to_csv(args.save_df_rvas, sep='\t', index=False)
+        did_nothing = False
+
     if args.scan_test: 
         logger.info("Starting scan test analysis")
         scan_test(
@@ -282,19 +305,6 @@ if __name__ == '__main__':
             args.ignore_ac,
             args.fdr_file,
             args.remove_nbhd,
-        )
-        did_nothing = False
-
-    elif args.annotation_file is not None:
-        logger.info('Starting annotation test analysis')
-        annotation_test(
-            df_rvas,
-            args.annotation_file,
-            args.reference_dir,
-            args.neighborhood_radius,
-            args.pae_cutoff,
-            args.results_dir,
-            args.filter_file,
         )
         did_nothing = False
 
