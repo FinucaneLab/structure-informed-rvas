@@ -2,11 +2,15 @@
 The 3D neighborhood test systematically identifies neighborhoods within a protein that have significant enrichments of case missense variants over control missense variants.
 
 ## Installation & Setup
-Coming soon: pip installation
 
-The reference data required to run the 3DNT can be downloaded [here](https://www.dropbox.com/scl/fi/iczfletneh6ev6r2jhsng/reference.tar.gz?rlkey=8dptjly3d3w6i1jl0r85lqrjs&st=68nrl442&dl=0). This data should be saved to a `sir-reference-data` directory that will be used as an argument when running the 3DNT. Included in this download are PAE and PDB files for all human proteins, in subdirectories `pae_files` and `pdb_files`, respectively. Additionally, there is a mapping file `all_missense_variants_gr38.h5` that is used to map DNA coordinates of variants in gr38 to UniProt canonical proteins. Lastly, `gene_to_uniprot.tsv` can be used to map gene names to UniProt proteins, and `pdb_pae_file_pos_guide.tsv` describes all PAE and PDB files, along with the protein and amino acid residues covered by each file. 
+### Prerequisites
+Python 3.7 or higher is required. Install the package dependencies:
+```bash
+pip install -r requirements.txt
+```
 
-The variant level data required to run the example in this tutorial can be found [here](https://www.dropbox.com/scl/fi/7onm5wfosd0g5z4k319n8/input.tar.gz?rlkey=rhbsoybl8y6r5uu37stcudat7&st=tom7nt38&dl=0). The final path for this data will be used as an argument when running the 3DNT tutorial commands. 
+### Reference Data Setup
+The reference data required to run the scan test can be downloaded [here](https://www.dropbox.com/scl/fi/iczfletneh6ev6r2jhsng/reference.tar.gz?rlkey=8dptjly3d3w6i1jl0r85lqrjs&st=68nrl442&dl=0). This data should be saved to a `sir-reference-data` directory.
 
 ## General Usage 
 
@@ -28,7 +32,7 @@ For information additional options -- e.g., change the default radius of the nei
 
 ## Example
 
-For the tutorial, we will use the following data: `input/Epi25_tutorial.tsv.bgz`. 
+For the tutorial, we will use the following data: `input/Epi25_tutorial.tsv.bgz`. This file can be downloaded [here](https://www.dropbox.com/scl/fi/7onm5wfosd0g5z4k319n8/input.tar.gz?rlkey=rhbsoybl8y6r5uu37stcudat7&st=tom7nt38&dl=0)
 This data originates from https://epi25.broadinstitute.org/ and is publicly available. After downloading, data cleaning steps were applied, including filtering on allele number, restricting allele count, restricting to certain chromosomes and proteins, and manipulating the formatting to match the 3DNT desired input format. 
 
 Ensure all of these exist prior to running the tutorial:
