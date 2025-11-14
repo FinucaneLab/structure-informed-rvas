@@ -87,12 +87,6 @@ if __name__ == '__main__':
         help='genome build. must be hg38 or hg37',
     )
     parser.add_argument(
-        '--which-proteins',
-        type=str,
-        default='all',
-        help='name of a protein or file with list of proteins'
-    )
-    parser.add_argument(
         '--reference-dir',
         type=str,
         help='directory with reference files'
@@ -186,6 +180,12 @@ if __name__ == '__main__':
         default=False,
         help='Get list of residues and variants in neighborhood centered at --aa-pos in protein --uniprot-id'
     )
+    parser.add_argument(
+        '--save-df-rvas',
+        type=str,
+        default=None,
+        help='Save the mapped RVAS dataframe.'
+    )
     args = parser.parse_args()
     # Input validation
     if args.genome_build not in ['hg37', 'hg38']:
@@ -222,7 +222,7 @@ if __name__ == '__main__':
             args.ac_case_col,
             args.ac_control_col,
             args.reference_dir,
-            args.which_proteins,
+            args.uniprot_id,
             args.genome_build
         )
     else:
@@ -232,15 +232,21 @@ if __name__ == '__main__':
     if df_rvas is None and not args.fdr_only and not args.visualization:
         raise ValueError("Must provide --rvas-data-to-map")
 
-    if not args.which_proteins=='all':
-        if os.path.exists(args.which_proteins):
-            which_proteins = [x.rstrip() for x in open(args.which_proteins).readlines()]
+    if args.uniprot_id is not None:
+        if os.path.exists(args.uniprot_id):
+            uniprot_id = [x.rstrip() for x in open(args.uniprot_id).readlines()]
         else:
-            which_proteins = args.which_proteins.split(',')
-        df_rvas = df_rvas[df_rvas.uniprot_id.isin(which_proteins)]
+            uniprot_id = args.uniprot_id.split(',')
+        df_rvas = df_rvas[df_rvas.uniprot_id.isin(uniprot_id)]
 
     if df_rvas is not None:
         df_rvas = df_rvas[df_rvas.ac_case + df_rvas.ac_control < args.ac_filter]
+
+    did_nothing = True
+    if args.save_df_rvas is not None:
+        logger.info(f"Saving mapped RVAS dataframe to {args.save_df_rvas}")
+        df_rvas.to_csv(args.save_df_rvas, sep='\t', index=False)
+        did_nothing = False
 
     if args.df_fdr_filter is not None:
         filter_files = args.df_fdr_filter.split(',')
@@ -277,6 +283,7 @@ if __name__ == '__main__':
             args.fdr_file,
             args.remove_nbhd,
         )
+        did_nothing = False
 
     elif args.annotation_file is not None:
         logger.info('Starting annotation test analysis')
@@ -289,15 +296,19 @@ if __name__ == '__main__':
             args.results_dir,
             args.filter_file,
         )
+        did_nothing = False
+
     elif args.visualization:
         if not (args.uniprot_id and args.reference_dir and args.results_dir):
             raise ValueError("For visualization, you must provide --uniprot_id, --reference_dir and --results_dir")
         run_all(args.uniprot_id, args.results_dir, args.reference_dir)
+        did_nothing = False
     
     elif args.make_movie:
         if not (args.pse and args.results_dir):
             raise ValueError("For making a movie, you must provide --pse and --results_dir")
         make_movie_from_pse(args.results_dir, args.pse)
+        did_nothing = False
 
     elif args.get_nbhd:
         if not (args.uniprot_id and args.reference_dir and args.aa_pos):
@@ -309,5 +320,7 @@ if __name__ == '__main__':
         print(cases)
         print('Control Variants in neighborhood:')
         print(cntrls)
-    else:
+        did_nothing = False
+    
+    if did_nothing:
         raise Exception('no analysis specified')
