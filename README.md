@@ -4,22 +4,44 @@ The 3D neighborhood test systematically identifies neighborhoods within a protei
 ## Installation & Setup
 
 ### Prerequisites
-Python 3.7 or higher is required. Install the package dependencies:
-```bash
-pip install -r requirements.txt
+After cloning this repo, we recommend the following set of commands: 
+```
+conda create -n sir-env python=3.8
+conda activate sir-env
+conda install -c conda-forge pymol-open-source
+pip install -r requirements_no_pymol.txt
 ```
 
 ### Reference Data Setup
-The reference data required to run the scan test can be downloaded [here](https://www.dropbox.com/scl/fi/iczfletneh6ev6r2jhsng/reference.tar.gz?rlkey=8dptjly3d3w6i1jl0r85lqrjs&st=68nrl442&dl=0). This data should be saved to a `sir-reference-data` directory.
+We recommend the following directory structure: 
+```
+working-directory/
+├── structure-informed-rvas/          # this repo
+├── sir-reference-data/
+    ├── all_missense_variants_gr38.h5
+    ├── common_variants.tsv
+    ├── gene_to_uniprot_id.tsv
+    ├── pae_files/
+    ├── pdb_files/
+    └── pdb_pae_file_pos_guide.tsv
+```
+To set this up:
 
-## General Usage 
+1. Download reference.tar.gz [here](https://www.dropbox.com/scl/fi/iczfletneh6ev6r2jhsng/reference.tar.gz?rlkey=8dptjly3d3w6i1jl0r85lqrjs&st=68nrl442&dl=0)
+2. Move reference.tar.gz to your working directory
+3. Extract it: `tar -xzf reference.tar.gz`
+4. (Optional) Remove the archive: `rm reference.tar.gz`
+
+All commands in this tutorial should be run from the working directory.
+
+## Basic 3DNT 
 
 ```
-python run.py \
+python structure-informed-rvas/run.py \
   --rvas-data-to-map [FOLDER/PATH/TO/DATA] \
-  --reference-dir [FOLDER/PATH/TO/SIR-REFERENCE-DIR] \
+  --reference-dir sir-reference-data/ \
   --results-dir [EXAMPLE/RESULTS/FOLDER] \
-  --3dnt
+  --run-3dnt
 ```
 
 For variant data formatting, see the section below, **Formatting requirements for --rvas-data-to-map**.
@@ -28,27 +50,28 @@ The above commands will result in the creation of two files:
 `p_values.h5`: all information relative to neighborhoods that will be required to run the FDR computation
 `all_proteins.fdr.tsv`: all neighborhood results, including the UniProt ID, central amino acid residue position, associated p-value and FDR score, number of case and control variants within the neighborhood, and the case/control ratio within the neighborhood.
 
-For information additional options -- e.g., change the default radius of the neighborhood, the maximum allowable allele count, etc. -- run `python run.py -h`
+Additional flags allow for several kinds of customization: e.g., to change the default radius of the neighborhood, the maximum allowable allele count, etc. To see these, run `python structure-informed-rvas/run.py -h`.
 
 ## Example
 
-For the tutorial, we will use the following data: `input/Epi25_tutorial.tsv.bgz`. This file can be downloaded [here](https://www.dropbox.com/scl/fi/7onm5wfosd0g5z4k319n8/input.tar.gz?rlkey=rhbsoybl8y6r5uu37stcudat7&st=tom7nt38&dl=0)
+For the tutorial, we will use the following data: `input/Epi25_tutorial.tsv.bgz`. This file can be downloaded [here](https://www.dropbox.com/scl/fi/7onm5wfosd0g5z4k319n8/input.tar.gz?dl=0&e=1&file_subpath=%2Finput%2FEpi25_tutorial.tsv.bgz&rlkey=rhbsoybl8y6r5uu37stcudat7&st=tom7nt38).
 This data originates from https://epi25.broadinstitute.org/ and is publicly available. After downloading, data cleaning steps were applied, including filtering on allele number, restricting allele count, restricting to certain chromosomes and proteins, and manipulating the formatting to match the 3DNT desired input format. 
 
-Ensure all of these exist prior to running the tutorial:
-Folder path to EPI25: `input/Epi25_tutorial.tsv.bgz`
-Folder path to PDB Files: `sir-reference-data/pdb_files`
-Folder path to PAE Files: `sir-reference-data/pae_files`
-Folder path to variant mapping file: `sir-reference-data/all_missense_variants_gr38.h5`
-Folder path to File Guide: `sir-reference-data/pdb_pae_file_pos_guide.tsv`
-Folder path to Gene/Protein Guide: `sir-reference-data/gene_to_uniprot_id.tsv`
+Your working directory should now have three sub-directories:
+```
+working-directory/
+├── structure-informed-rvas/
+├── sir-reference-data/
+├── input/
+  └── Epi25_tutorial.tsv.bgz
+```
 
-The results directory will be created during the process if it does not already exist. 
+A `results` directory will also be created when the 3DNT is run.
 
 ### Running the 3DNT - Basic Version
 We will use the `--rvas-data-to-map` flag with the path to the EPI25 data. 
 `variant-id-col`, `ac-control-col`, and `ac-case-col` all already match the assumed formatting (list formatting here) so we can leave out these flags.
-We would like to run the 3D neighborhood test, so we will include the --3dnt flag.
+We would like to run the 3D neighborhood test, so we will include the --run-3dnt flag.
 
 Let us focus this 3DNT to only the top 8 EPI25 genes; which correspond to the following UniProt canonical IDs: 
 GABRB3: P28472
@@ -63,22 +86,22 @@ CAPZB: P47756
 The data included in this tutorial is already filtered to only variants on the above proteins, so we can run the following command to map our variant data to proteins, and run the 3DNT and FDR calculation.
 
 ```
-python run.py \
+python structure-informed-rvas/run.py \
   --rvas-data-to-map input/Epi25_tutorial.tsv.bgz \
   --reference-dir sir-reference-data/ \
   --results-dir results_epi25 \
-  --3dnt \
+  --run-3dnt \
   --fdr-file epi25_eight_proteins.fdr.tsv
 ```
 
 If the original data included variants on proteins that we are not interested in, the following command would use only the subset of proteins that we are interested in. 
 
 ```
-python run.py \
+python structure-informed-rvas/run.py \
   --rvas-data-to-map input/Epi25_tutorial.tsv.bgz \
   --reference-dir sir-reference-data/ \
   --results-dir results_epi25 \
-  --3dnt \
+  --run-3dnt \
   --uniprot-id P28472,P18507,P30531,P35498,P11166,P08476,Q09470,P47756 \
   --fdr-file epi25_eight_proteins.fdr.tsv
 ```
@@ -86,20 +109,20 @@ python run.py \
 A file named `epi25_eight_proteins.fdr.tsv` will be created and saved to the main directory, which contains all neighborhoods computed and their corresponding FDR score. Additionally, the `p_values.h5` file will be saved to the `results_epi25` directory, which contains all information from the 3DNT that is required to create the `all_proteins.fdr.tsv`. This is done so to enable the 3DNT and FDR steps to have the option to be done separately, for example to perform the 3DNT on input files split by chromosome and then perform FDR correction across all chromosomes simultaneously. Example commands for how to do this can be found here:
 
 ```
-python run.py \
+python structure-informed-rvas/run.py \
   --rvas-data-to-map input/Epi25_tutorial.tsv.bgz \
   --reference-dir sir-reference-data/ \
   --results-dir results_epi25 \
-  --3dnt \
+  --run-3dnt \
   --no-fdr
 ```
 
 ```
-python run.py \
+python structure-informed-rvas/run.py \
   --rvas-data-to-map input/Epi25_tutorial.tsv.bgz \
   --reference-dir sir-reference-data/ \
   --results-dir results_epi25 \
-  --3dnt \
+  --run-3dnt \
   --fdr-only \
   --fdr-file epi25_eight_proteins.fdr.tsv
 ```
@@ -136,7 +159,7 @@ Additionally, allele counts for cases and controls of each variant is required. 
 The residues and variants in a given neighborhood centered at a specific amino acid of a protein can be found using the `--get-nbhd` flag. The example below can be used to find information on the neighborhood centered at amino acid 378 in Q09470:
 
 ```
-python run.py \
+python structure-informed-rvas/run.py \
   --rvas-data-to-map input/Epi25_tutorial.tsv.bgz \
   --reference-dir sir-reference-data/ \
   --get-nbhd \
@@ -147,7 +170,7 @@ python run.py \
 You can also just map the data from --rvas-data-to-map to the uniprot ID and amino acid positions and save the result, with or without performing the 3DNT, with or without filtering with --uniprot-id:
 
 ```
-python run.py \
+python structure-informed-rvas/run.py \
   --rvas-data-to-map input/Epi25_tutorial.tsv.bgz \
   --reference-dir sir-reference-data/ \
   --save-df-rvas
@@ -158,7 +181,7 @@ python run.py \
 In the resulting `all_proteins_epi25_no_pae.fdr.tsv` file, we can see that the most significant neighborhoods are found in protein Q09470. Tools for visualizing these results are available, and can be accessed through the following command:
 
 ```
-python run.py \
+python structure-informed-rvas/run.py \
   --rvas-data-to-map input/Epi25_tutorial.tsv.bgz \
   --reference-dir sir-reference-data/ \
   --results-dir results_epi25/ \
