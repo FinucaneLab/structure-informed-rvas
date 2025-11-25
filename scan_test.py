@@ -145,15 +145,15 @@ def compute_all_pvals(
     df_pvals = df_pvals[['nbhd_case', 'nbhd_control', 'original_case', 'original_control'] + pval_columns]
     return df_pvals, adjacency_matrix
 
-def write_df_pvals(results_dir, uniprot_id, df_pvals):
-    with h5py.File(os.path.join(results_dir, 'p_values.h5'), 'a') as fid:
+def write_df_pvals(results_dir, uniprot_id, df_pvals, pval_file):
+    with h5py.File(os.path.join(results_dir, pval_file), 'a') as fid:
         null_pval_cols = [c for c in df_pvals.columns if c.startswith('null_pval')]
         write_dataset(fid, f'{uniprot_id}', df_pvals[['p_value']])
         write_dataset(fid, f'{uniprot_id}_null_pval', df_pvals[null_pval_cols])
         write_dataset(fid, f'{uniprot_id}_nbhd', df_pvals[['nbhd_case', 'nbhd_control']])
         write_dataset(fid, f'{uniprot_id}_original', df_pvals[['original_case', 'original_control']])
 
-def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir, uniprot_id, radius, pae_cutoff, n_sims):
+def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir, uniprot_id, radius, pae_cutoff, n_sims, pval_file):
     df_pvals, adj_mat = compute_all_pvals(
         df,
         pdb_file_pos_guide,
@@ -164,7 +164,7 @@ def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir,
         radius,
         pae_cutoff,
     )
-    write_df_pvals(results_dir, uniprot_id, df_pvals)
+    write_df_pvals(results_dir, uniprot_id, df_pvals, pval_file)
 
 def _preprocess_scan_data(df_rvas, ignore_ac):
     """Preprocess scan data based on ignore_ac flag."""
@@ -195,7 +195,7 @@ def _filter_proteins_by_allele_count(df_rvas, df_fdr_filter, min_alleles=5):
     return uniprot_id_list
 
 
-def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, remove_nbhd):
+def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, remove_nbhd, pval_file):
     """Process each protein individually with scan test."""
     pdb_file_pos_guide = f'{reference_dir}/pdb_pae_file_pos_guide.tsv'
     pdb_dir = f'{reference_dir}/pdb_files/'
@@ -227,7 +227,8 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
             
             scan_test_one_protein(
                 df, pdb_file_pos_guide, pdb_dir, pae_dir, 
-                results_dir, uniprot_id, radius, pae_cutoff, n_sims
+                results_dir, uniprot_id, radius, pae_cutoff, n_sims,
+                pval_file
             )
         except FileNotFoundError as e:
             logger.error(f'{uniprot_id}: Required file not found - {e}')
@@ -259,6 +260,7 @@ def scan_test(
     df_fdr_filter,
     ignore_ac,
     fdr_file,
+    pval_file,
     remove_nbhd,
 ):
     """
@@ -270,7 +272,7 @@ def scan_test(
     
     # Handle FDR-only mode
     if fdr_only:
-        df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir)
+        df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file)
         df_results.to_csv(f'{results_dir}/{fdr_file}', sep='\t', index=False)
         return
 
@@ -286,11 +288,12 @@ def scan_test(
     # Process each protein
     _process_proteins_batch(
         df_processed, uniprot_id_list, reference_dir, 
-        radius, pae_cutoff, results_dir, n_sims, remove_nbhd
+        radius, pae_cutoff, results_dir, n_sims, remove_nbhd,
+        pval_file
     )
     
     # Compute FDR if requested
     if not no_fdr:
-        df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir)
+        df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file)
         df_results.to_csv(f'{results_dir}/{fdr_file}', sep='\t', index=False)
     

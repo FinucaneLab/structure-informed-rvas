@@ -1,7 +1,9 @@
 import argparse
 import pandas as pd
+import numpy as np
 import os
 import h5py
+import glob
 from scan_test import scan_test
 from read_data import map_to_protein
 from pymol_code import run_all
@@ -292,8 +294,16 @@ if __name__ == '__main__':
             for f in filter_files[1:]:
                 next_fdr_filter = read_filter_file(f)
                 df_fdr_filter = pd.merge(df_fdr_filter, next_fdr_filter)
+    if uniprot_id is not None:
+        df_fdr_filter_uniprot = pd.DataFrame({'uniprot_id': uniprot_id})
+        if args.df_fdr_filter is not None:
+            df_fdr_filter = pd.merge(df_fdr_filter, df_fdr_filter_uniprot)
+        else:
+            df_fdr_filter = df_fdr_filter_uniprot
     else:
         df_fdr_filter = None
+
+    print('df_fdr_filter', df_fdr_filter)
 
     # Run analysis
 
@@ -349,11 +359,15 @@ if __name__ == '__main__':
         did_nothing = False
     
     elif args.combine_pval_files is not None:
-        pval_files_to_combine = [f.strip() for f in args.combine_pval_files.split(',')]
+        if ',' in args.combine_pval_files:
+            pval_files_to_combine = [os.path.join(args.results_dir,f.strip()) for f in args.combine_pval_files.split(',')]
+        else:
+            pattern = os.path.join(args.results_dir, args.combine_pval_files)
+            pval_files_to_combine = glob.glob(pattern)
 
         with h5py.File(os.path.join(args.results_dir, args.pval_file), 'w') as fid_out:
             for file in pval_files_to_combine:
-                with h5py.File(os.path.join(args.results_dir, file), 'r') as fid_in:
+                with h5py.File(file, 'r') as fid_in:
                     for key in fid_in.keys():
                         if key not in fid_out:
                             fid_in.copy(key, fid_out)
@@ -363,6 +377,7 @@ if __name__ == '__main__':
                             combined = np.concatenate([existing, new_data], axis=0)
                             del fid_out[key]
                             fid_out.create_dataset(key, data=combined)
+        did_nothing=False
 
     if did_nothing:
         raise Exception('no analysis specified')

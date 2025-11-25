@@ -33,13 +33,13 @@ def _prepare_fdr_filters(df_fdr_filter):
     return uniprot_filter_list, aa_pos_filters
 
 
-def _load_all_pvalues(results_dir, uniprot_filter_list, aa_pos_filters):
+def _load_all_pvalues(results_dir, uniprot_filter_list, aa_pos_filters, pval_file):
     """Load both observed and null p-values from HDF5 file with consistent filtering."""
     to_concat = []
     null_pvals_dict = {}
     n_sims = None
     
-    with h5py.File(os.path.join(results_dir, 'p_values.h5'), 'a') as fid:
+    with h5py.File(os.path.join(results_dir, pval_file), 'a') as fid:
         uniprot_ids = [k for k in fid.keys() if '_' not in k]
         if uniprot_filter_list is not None:
             uniprot_ids = list(set(uniprot_ids) & set(uniprot_filter_list))
@@ -128,7 +128,7 @@ def summarize_results(df_results, fdr_cutoff):
     logger.info(f'{len(top_hits_sig)} out of {len(top_hits_all_genes)} proteins have a neighborhood significant at {fdr_cutoff}.')
     logger.info(f'Top 20 hits:\n{top_hits_sig[0:20].to_string()}')
 
-def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, large_p_threshold=0.05):
+def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file, large_p_threshold=0.05):
     """
     Compute False Discovery Rate correction for scan test results.
     
@@ -152,7 +152,7 @@ def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, large_p_t
     
     # Load both observed and null p-values
     df_pvals, null_pvals_dict, uniprot_ids, n_sims = _load_all_pvalues(
-        results_dir, uniprot_filter_list, aa_pos_filters
+        results_dir, uniprot_filter_list, aa_pos_filters, pval_file
     )
     
     # Compute false discoveries from null distributions
