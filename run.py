@@ -42,8 +42,6 @@ def map_and_filter_rvas(
 
     if df_rvas is not None:
         df_rvas = df_rvas[df_rvas.ac_case + df_rvas.ac_control < ac_filter]
-        if uniprot_id is not None:
-            df_rvas = df_rvas[df_rvas.uniprot_id.isin(uniprot_id)]
         if not dont_remove_common:
             print("Removing common variants from RVAS data")
             keys = ['uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt']
@@ -90,7 +88,7 @@ def map_and_filter_rvas(
     else:
         uniprot_list = None
     
-    if uniprot_list is not None:
+    if uniprot_list is not None and df_rvas is not None:
         df_filter_uniprot = pd.DataFrame({'uniprot_id': uniprot_list})
         df_rvas = pd.merge(df_rvas, df_filter_uniprot, on='uniprot_id', how='inner')
     
@@ -337,7 +335,6 @@ if __name__ == '__main__':
     if args.results_dir and not os.path.exists(args.results_dir):
         logger.info(f"Creating results directory: {args.results_dir}")
         os.makedirs(args.results_dir, exist_ok=True)
-
 
 
     df_rvas, df_filter = map_and_filter_rvas(
