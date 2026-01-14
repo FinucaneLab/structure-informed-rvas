@@ -241,6 +241,26 @@ def read_p_values(fid, uniprot_id):
                        'nbhd_control': nbhd_control})
     return df
 
+def read_stats(fid, uniprot_id):
+    """
+    Reads the p values for one uniprot_id from an HDF5 results file,
+    with the exception of the null values.
+    """
+    stat_data = fid[uniprot_id][:]
+    beta_info = fid[f'{uniprot_id}_mean_beta'][:]
+    
+    # Calculate ratio on-the-fly
+    mean_beta = beta_info[:, 0]
+    n_betahat = beta_info[:, 1]
+    #ratio = (nbhd_case + 2) / (nbhd_control + 2 * n_control_total / n_case_total)
+    
+    df = pd.DataFrame({'uniprot_id': uniprot_id,
+                       'aa_pos': np.arange(1, stat_data.shape[0]+1),
+                       'n_a_tstat': stat_data[:, 0],
+                       'mean_betahat': mean_beta,
+                       'n_betahat': n_betahat})
+    return df
+
 def read_original_mutation_data(fid, uniprot_id):
     """
     Reads the original per-residue mutation counts for one uniprot_id from an HDF5 results file.

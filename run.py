@@ -5,9 +5,10 @@ import os
 import h5py
 import glob
 from scan_test import scan_test
+from q_scan_test import q_scan_test
 from read_data import map_to_protein
-from pymol_code import run_all
-from pymol_code import make_movie_from_pse
+#from pymol_code import run_all
+#from pymol_code import make_movie_from_pse
 from logger_config import get_logger
 from utils import get_nbhd_info
 
@@ -343,7 +344,7 @@ if __name__ == '__main__':
 
     if args.run_3dnt: 
         logger.info("Starting scan test analysis")
-        scan_test(
+        q_scan_test(
             df_rvas,
             args.reference_dir,
             args.neighborhood_radius,
