@@ -158,7 +158,6 @@ def compute_all_n_a_tstats(
     )
     n_res = adjacency_matrix.shape[0]
 
-    df = df.rename(columns={"ac_case": "betahat"})
     
     # nbhd_size: L x 1
     # sum_beta: L x (n_sims+1)
@@ -221,6 +220,18 @@ def _filter_proteins_by_allele_count(df_rvas, df_fdr_filter, min_alleles=5):
         uniprot_id_list = np.intersect1d(uniprot_id_list, np.unique(df_fdr_filter.uniprot_id))
     
     logger.info(f"Selected {len(uniprot_id_list)} proteins for analysis (min {min_alleles} alleles each)")
+    return uniprot_id_list
+
+def _filter_proteins_for_valid_tests(df_rvas, df_fdr_filter, threshold=10):
+    """Filter proteins to include only those with sufficient number of variants."""
+    grouped = df_rvas.groupby('uniprot_id')['betahat'].count()
+    filtered = grouped[(grouped >= threshold)]
+    uniprot_id_list = filtered.index.tolist()
+    
+    if df_fdr_filter is not None:
+        uniprot_id_list = np.intersect1d(uniprot_id_list, np.unique(df_fdr_filter.uniprot_id))
+
+    logger.info(f"Selected {len(uniprot_id_list)} proteins for analysis (min {threshold} variants each)")
     return uniprot_id_list
 
 
@@ -296,7 +307,11 @@ def q_scan_test(
     Main orchestration function for the structure-informed rare variant association study.
     Processes variants across proteins and computes statistical associations with 3D neighborhoods.
     """
-    
+    df_rvas = df_rvas.rename(columns={"ac_case": "betahat"})
+
+    # logger.info("df_rvas columns: " + ", ".join(df_rvas.columns))
+    # logger.info(f"df_rvas: {df_rvas.head()}")
+
     # Handle FDR-only mode
     if fdr_only:
         df_results = q_compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, n_a_tstat_file, -2.0)
@@ -311,7 +326,7 @@ def q_scan_test(
     df_processed = df_rvas.copy()
     
     # Filter proteins by allele count
-    uniprot_id_list = _filter_proteins_by_allele_count(df_processed, df_fdr_filter)
+    uniprot_id_list = _filter_proteins_for_valid_tests(df_processed, df_fdr_filter)
     
     # Process each protein
     _process_proteins_batch(
