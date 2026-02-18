@@ -34,24 +34,30 @@ def get_tstat_matrix(n_betahat, sum_betahat, sum_betahat_squared, total_n_betaha
     returns:
     neg_abs_tstat_matrix: L x (n_sims + 1)
     '''
-    # mean and variance of betahat in the neighborhood
+    # Force n_in and n_out to be (L, 1) so they broadcast correctly across (L, 1001)
     n_in = np.asarray(n_betahat).reshape(-1, 1) 
-    mean_betahat_nbhd = sum_betahat / n_in # L x (n_sims + 1)
-    var_betahat_nbhd = (sum_betahat_squared - n_in * (mean_betahat_nbhd ** 2)) / (n_in - 1) # L x (n_sims + 1)
-    # mean and variance of betahat outside the neighborhood
-    n_betahat_outside = total_n_betahat - n_betahat
-    n_out = np.asarray(n_betahat_outside).reshape(-1, 1)
-    mean_betahat_outside = (total_sum_betahat - sum_betahat) / n_out  # L x (n_sims + 1)
-    var_betahat_outside = (total_sum_betahat_squared - sum_betahat_squared) - n_out*(mean_betahat_outside**2) / (n_out - 1)  # L x (n_sims + 1)
-
-    # t-statistic calculation
-    with np.errstate(divide='ignore', invalid='ignore'):
-        se_diff = np.sqrt((var_betahat_nbhd / n_in) + (var_betahat_outside / n_out))  # L x (n_sims + 1)
-        t_stat_matrix = (mean_betahat_nbhd - mean_betahat_outside) / se_diff  # L x (n_sims + 1)
+    n_out = (total_n_betahat - n_in).reshape(-1, 1)
     
-    neg_abs_tstat_matrix = -np.abs(t_stat_matrix)
-    neg_abs_tstat_matrix[np.isnan(neg_abs_tstat_matrix)] = 0  # Handle NaNs resulting from division by zero
+    # Error management to handle cases where n_in or n_out are 0 or 1, 
+    # which would lead to division by zero or infinity values in variance calculation
+    with np.errstate(divide='ignore', invalid='ignore'):
+        # Neighborhood stats
+        mean_betahat_nbhd = sum_betahat / n_in
+        # Use np.maximum(..., 1) or check for n < 2 to avoid divide by zero/negatives
+        var_betahat_nbhd = (sum_betahat_squared - n_in * (mean_betahat_nbhd ** 2)) / (n_in - 1)
+        
+        # Outside stats
+        mean_betahat_outside = (total_sum_betahat - sum_betahat) / n_out
+        var_betahat_outside = ((total_sum_betahat_squared - sum_betahat_squared) - n_out*(mean_betahat_outside**2)) / (n_out - 1)
 
+        # Standard Error and T-stat
+        se_diff = np.sqrt((var_betahat_nbhd / n_in) + (var_betahat_outside / n_out))
+        t_stat_matrix = (mean_betahat_nbhd - mean_betahat_outside) / se_diff
+
+    # The mask should now match the shape (L, 1001) perfectly
+    mask = ~np.isfinite(t_stat_matrix)
+    t_stat_matrix[mask] = 0
+    neg_abs_tstat_matrix = -np.abs(t_stat_matrix)
     return neg_abs_tstat_matrix
 
 def get_betahats_per_residue(df, n_res, colname='betahat'):
@@ -165,7 +171,7 @@ def compute_all_n_a_tstats(
     n_betahat, sum_betahat, sum_betahat_squared = get_nbhd_stats(adjacency_matrix, df, n_res, n_sims)
 
     # get the totals for the whole protein
-    total_n_betahat = adjacency_matrix.shape[0]
+    total_n_betahat = df.shape[0]
     total_sum_betahat = df['betahat'].sum()
     total_sum_betahat_squared = (df['betahat'] ** 2).sum()
 
@@ -191,11 +197,14 @@ def compute_all_n_a_tstats(
 def write_df_n_a_tstats(results_dir, uniprot_id, df_n_a_tstats, n_a_tstat_file):
     with h5py.File(os.path.join(results_dir, n_a_tstat_file), 'a') as fid:
         null_n_a_tstat_cols = [c for c in df_n_a_tstats.columns if c.startswith('null_n_a_tstat')]
+        # Save amino acid positions (dataframe index + 1, since index is 0-based)
+        aa_positions = (df_n_a_tstats.index + 1).to_numpy().reshape(-1, 1)
+        write_dataset(fid, f'{uniprot_id}_aa_pos', aa_positions)
         write_dataset(fid, f'{uniprot_id}', df_n_a_tstats[['n_a_tstat']])
         write_dataset(fid, f'{uniprot_id}_null_n_a_tstat', df_n_a_tstats[null_n_a_tstat_cols])
         write_dataset(fid, f'{uniprot_id}_mean_beta', df_n_a_tstats[['mean_betahat', 'n_betahat']])
 
-def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir, uniprot_id, radius, pae_cutoff, n_sims, n_a_tstat_file):
+def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir, uniprot_id, radius, pae_cutoff, n_sims, large_threshold, n_a_tstat_file):
     df_n_a_tstats = compute_all_n_a_tstats(
         df,
         pdb_file_pos_guide,
@@ -206,7 +215,33 @@ def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir,
         radius,
         pae_cutoff,
     )
+
+    # Zero out residues with n_a_tstat above a large_threshold
+    # tmp_stat = df_n_a_tstats.n_a_tstat
+    # tmp_mean = df_n_a_tstats.mean_betahat
+    # tmp_n = df_n_a_tstats.n_betahat
+    null_n_a_tstat_cols = [c for c in df_n_a_tstats.columns if c.startswith('null_n_a_tstat')]
+    cols = null_n_a_tstat_cols #+ ['n_a_tstat']
+    df_n_a_tstats.loc[:, cols] = df_n_a_tstats.loc[:, cols].mask(
+        df_n_a_tstats.loc[:, cols] > large_threshold,
+        0
+    )
+    ## Test:
+    # mask_rows = df_n_a_tstats["n_betahat"] < 30
+    # # Zero out selected columns for those rows
+    # df_n_a_tstats.loc[mask_rows, cols] = 0
+
     write_df_n_a_tstats(results_dir, uniprot_id, df_n_a_tstats, n_a_tstat_file)
+
+    if df_n_a_tstats.n_a_tstat.lt(large_threshold).any():
+        return 1
+    else:
+        return 0
+    # if not df_n_a_tstats.empty:
+    #     write_df_n_a_tstats(results_dir, uniprot_id, df_n_a_tstats, n_a_tstat_file)
+    #     return 1
+    # else:
+    #     return 0
 
 def _filter_proteins_by_allele_count(df_rvas, df_fdr_filter, min_alleles=5):
     # needs to change to filter to enough betahats in the protein. at least 10?
@@ -235,13 +270,14 @@ def _filter_proteins_for_valid_tests(df_rvas, df_fdr_filter, threshold=10):
     return uniprot_id_list
 
 
-def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, remove_nbhd, n_a_tstat_file):
+def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, remove_nbhd, large_threshold, n_a_tstat_file):
     """Process each protein individually with scan test."""
     pdb_file_pos_guide = f'{reference_dir}/pdb_pae_file_pos_guide.tsv'
     pdb_dir = f'{reference_dir}/pdb_files/'
     pae_dir = f'{reference_dir}/pae_files/'
     
     n_proteins = len(uniprot_id_list)
+    count_proteins = 0
     for i, uniprot_id in enumerate(uniprot_id_list):
         logger.info(f'Processing {uniprot_id} (protein {i+1} out of {n_proteins})')
         try:
@@ -263,11 +299,13 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
 
             # add filter to at least 10 betahats
             
-            scan_test_one_protein(
+            valid_protein = scan_test_one_protein(
                 df, pdb_file_pos_guide, pdb_dir, pae_dir, 
-                results_dir, uniprot_id, radius, pae_cutoff, n_sims,
+                results_dir, uniprot_id, radius, pae_cutoff, n_sims, large_threshold,
                 n_a_tstat_file
             )
+            count_proteins = count_proteins + valid_protein
+
         except FileNotFoundError as e:
             logger.error(f'{uniprot_id}: Required file not found - {e}')
             continue
@@ -283,6 +321,8 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
         except Exception as e:
             logger.error(f'{uniprot_id}: Unexpected error - {e}')
             continue
+    
+    return count_proteins
 
 
 def q_scan_test(
@@ -312,9 +352,11 @@ def q_scan_test(
     # logger.info("df_rvas columns: " + ", ".join(df_rvas.columns))
     # logger.info(f"df_rvas: {df_rvas.head()}")
 
+    large_threshold = -2.0  # threshold for filtering residues with no variants
+
     # Handle FDR-only mode
     if fdr_only:
-        df_results = q_compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, n_a_tstat_file, -2.0)
+        df_results = q_compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, n_a_tstat_file, large_threshold)
         df_results.to_csv(f'{results_dir}/{fdr_file}', sep='\t', index=False)
         return
 
@@ -329,14 +371,20 @@ def q_scan_test(
     uniprot_id_list = _filter_proteins_for_valid_tests(df_processed, df_fdr_filter)
     
     # Process each protein
-    _process_proteins_batch(
+    count_proteins = _process_proteins_batch(
         df_processed, uniprot_id_list, reference_dir, 
-        radius, pae_cutoff, results_dir, n_sims, remove_nbhd,
+        radius, pae_cutoff, results_dir, n_sims, remove_nbhd, large_threshold,
         n_a_tstat_file
     )
     
+    if count_proteins == 0:
+        logger.warning("No protein neighborhoods pass the filtering criteria. Exiting scan test.")
+        return
+    else:
+        logger.info(f"Completed scan test for {count_proteins} proteins with valid neighborhoods.")
+    
     # Compute FDR if requested
     if not no_fdr:
-        df_results = q_compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, n_a_tstat_file, -2.0)
+        df_results = q_compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, n_a_tstat_file, large_threshold)
         df_results.to_csv(f'{results_dir}/{fdr_file}', sep='\t', index=False)
     
