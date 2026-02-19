@@ -21,7 +21,7 @@ logger = get_logger(__name__)
 #     null_ac_per_residue = gen.multivariate_hypergeometric(total_ac_per_residue.astype(int), n_alleles, n_sim).T
 #     return null_ac_per_residue
 
-def get_tstat_matrix(n_betahat, sum_betahat, sum_betahat_squared, total_n_betahat, total_sum_betahat, total_sum_betahat_squared):
+def get_tstat_matrix(n_betahat, sum_betahat, sum_betahat_squared, total_n_betahat, total_sum_betahat, total_sum_betahat_squared, min_variants=10):
     '''
     Compute negative absolute value of t-statistic for each residue's neighborhood.
     n_betahat: L x 1
@@ -34,29 +34,30 @@ def get_tstat_matrix(n_betahat, sum_betahat, sum_betahat_squared, total_n_betaha
     returns:
     neg_abs_tstat_matrix: L x (n_sims + 1)
     '''
-    # Force n_in and n_out to be (L, 1) so they broadcast correctly across (L, 1001)
     n_in = np.asarray(n_betahat).reshape(-1, 1) 
     n_out = (total_n_betahat - n_in).reshape(-1, 1)
-    
-    # Error management to handle cases where n_in or n_out are 0 or 1, 
-    # which would lead to division by zero or infinity values in variance calculation
+
+    # Create a mask for valid neighborhoods (must have at least min_variants)
+    # Also ensure there are at least 2 variants outside to calculate outside variance
+    valid_mask = (n_in >= min_variants) & (total_n_betahat - n_in >= 2)
+
     with np.errstate(divide='ignore', invalid='ignore'):
-        # Neighborhood stats
+        # 1. Neighborhood Stats
         mean_betahat_nbhd = sum_betahat / n_in
-        # Use np.maximum(..., 1) or check for n < 2 to avoid divide by zero/negatives
         var_betahat_nbhd = (sum_betahat_squared - n_in * (mean_betahat_nbhd ** 2)) / (n_in - 1)
         
-        # Outside stats
+        # 2. Outside Stats
+        #n_out = total_n_betahat - n_in
         mean_betahat_outside = (total_sum_betahat - sum_betahat) / n_out
         var_betahat_outside = ((total_sum_betahat_squared - sum_betahat_squared) - n_out*(mean_betahat_outside**2)) / (n_out - 1)
 
-        # Standard Error and T-stat
+        # 3. T-statistic
         se_diff = np.sqrt((var_betahat_nbhd / n_in) + (var_betahat_outside / n_out))
         t_stat_matrix = (mean_betahat_nbhd - mean_betahat_outside) / se_diff
 
-    # The mask should now match the shape (L, 1001) perfectly
-    mask = ~np.isfinite(t_stat_matrix)
-    t_stat_matrix[mask] = 0
+    # Apply the mask: only keep values where the threshold was met
+    # Everything else (including NaNs and low-count neighborhoods) becomes 0
+    t_stat_matrix = np.where(valid_mask & np.isfinite(t_stat_matrix), t_stat_matrix, 0)
     neg_abs_tstat_matrix = -np.abs(t_stat_matrix)
     return neg_abs_tstat_matrix
 
@@ -184,6 +185,7 @@ def compute_all_n_a_tstats(
         total_n_betahat,
         total_sum_betahat,
         total_sum_betahat_squared,
+        min_variants=10
     )
     n_a_tstat_columns = ['n_a_tstat'] + [f'null_n_a_tstat_{i}' for i in range(n_sims)]
     df_n_a_tstats = pd.DataFrame(columns = n_a_tstat_columns, data = neg_abs_tstat_matrix)
