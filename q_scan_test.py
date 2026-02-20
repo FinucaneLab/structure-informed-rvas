@@ -6,6 +6,7 @@ import bisect
 import h5py
 from scipy.stats import fisher_exact, binom
 from scipy import special
+from scipy import sparse
 from utils import get_adjacency_matrix, valid_for_fisher, write_dataset, read_p_values
 from logger_config import get_logger
 from q_empirical_fdr import q_compute_fdr
@@ -61,89 +62,83 @@ def get_tstat_matrix(n_betahat, sum_betahat, sum_betahat_squared, total_n_betaha
     neg_abs_tstat_matrix = -np.abs(t_stat_matrix)
     return neg_abs_tstat_matrix
 
-def get_betahats_per_residue(df, n_res, colname='betahat'):
-    betahats_per_residue = np.zeros((n_res, 1))
-    betahats_by_pos = df.groupby('aa_pos')[colname].sum().reset_index()
-    betahats_per_residue[betahats_by_pos.aa_pos - 1, 0] = betahats_by_pos[colname]
-    return betahats_per_residue
-
-def get_nbhd_stats(adjacency_matrix, df, n_res, n_sims):
+def get_betahats_per_residue(df, n_res, n_sims, colname='betahat'):
     '''
-    add n_sims betahat_null_{i} columns to df by permuting betahat column
-    add betahatsq columns
-    then groupby aa_pos to get per-residue stats:
-    1. count from df to get number of betahats per residue: L x 1
-    2. sum from df to get sum_beta_per_residue: L x (n_sims + 1)
-    3. sum from df to get sum_beta_squared_per_residue: L x (n_sims + 1)
-
-    then multiply all three by the adjacency matrix to get outputs, which
-    are per-neighborhood
+    Aggregate statistics on a per-residue basis.
+    Get betahat and null distribution
+    Also betahat squared and null squared
+    Then groupby aa_pos to get per-residue stats:
+    1. count to get number of betahats per residue: L x 1
+    2. sum to get base_per_residue and null_per_residue: L x (n_sims + 1)
+    3. sum to get base_sq_per_residue and null_sq_per_residue: L x (n_sims + 1)
+    In the null ensure that each residue is allocated the same number of betahats as in the original data,
+    but the betahats are shuffled globally across the protein. 
+    This preserves the distribution of betahats per residue while breaking any true association with position.
+    This is done by creating a sparse indicator matrix M of shape (n_res, n_var) where M[i,j] = 1 if variant j maps to residue i, else 0.
     '''
-    # 0. Prepare data
-    base = get_betahats_per_residue(df, n_res).flatten()
-    # base[df['aa_pos'].values - 1, 0] = df['betahat'].values
-    # base = base.flatten()
-    base_sq = base ** 2
 
-    # 1. Obtain n_sims random permutations of betahat 
-    null_values = np.array([np.random.permutation(base) for _ in range(n_sims)]).T
-    #null_values = base[null_indices].T # Shape: (n_var, n_sims)
-    null_sq = null_values ** 2
-
-    # 2. Get the Grouping Key and create "Group IDs"
-    # np.unique with return_inverse turns ['A', 'B', 'A'] into [0, 1, 0]
-    # unique_groups, group_ids = np.unique(df['aa_pos'].values, return_inverse=True)
-    # print(type(group_ids))
-    # print(type(unique_groups))
-    # print(unique_groups.shape)
-    # print(group_ids.shape)
-
-    group_ids = np.array(range(n_res))
-    unique_groups = np.array(range(1, n_res + 1))
-    n_groups = len(unique_groups)
-
-    #aa_pos_arr = df['aa_pos'].values.reshape(-1, 1)
-
-    # 3. Consolidate data into one matrix (Originals + Nulls)
-    # We exclude 'aa_pos' here because we'll use 'group_ids' to index it
-    data_to_sum = np.column_stack([
-        base,                      # Original betahat
-        null_values,               # All null betahats
-        base_sq,                   # Original squared
-        null_sq                    # All null squareds
-    ])
+    # Prepare indices and values
+    pos = df['aa_pos'].to_numpy() - 1  # zero-based
+    betas = df[colname].to_numpy()
+    betas_sq = betas ** 2
     
-    # 4. Perform the "Grouped Sum" using np.bincount
-    # np.bincount(indices, weights=values) is the fastest way to do grouped sums
-    group_sums = np.zeros((n_groups, data_to_sum.shape[1]))
+    n_var = len(pos)
 
-    for i in range(data_to_sum.shape[1]):
-        group_sums[:, i] = np.bincount(group_ids, weights=data_to_sum[:, i])
+    # Create (sparse) matrix to map variants to residues
+    # Shape: (n_res, n_var)
+    # Since M is fixed, n_per_residue stays constant.
+    M = sparse.csr_matrix(
+        (np.ones(n_var), (pos, np.arange(n_var))),
+        shape=(n_res, n_var)
+    )
 
-    # 5. Calculate Group Counts (the 'n_betahat' column)
-    group_counts = np.bincount(group_ids)
+    # Summing betas per residue: result is (n_res, 1)
+    base_per_residue = (M @ betas).reshape(-1, 1)
+    base_sq_per_residue = (M @ betas_sq).reshape(-1, 1)
+
+    # Permutations: (n_sims, n_var)
+    # Apply permuations to the betas globally
+    perm_idx = np.array([np.random.permutation(n_var) for _ in range(n_sims)])
+    # null values: (n_sims, n_var) -> transpose for matrix mult
+    null = betas[perm_idx].T 
+    null_sq = betas_sq[perm_idx].T
+
+    # # If memory becomes an issue, we can compute the nulls in a loop instead of all at once:
+    # for i in range(n_sims):
+    #     # Shuffling the array globally
+    #     permuted_indices = np.random.permutation(n_var)
+    #     null_betas[:, i] = betas[permuted_indices]
+    #     null_betas_sq[:, i] = betas_sq[permuted_indices]
+
+    # Map rermuted ralues to residues (retains the same number of betahats per residue, but breaks any true association with position)
+    # Resulting nulls: (n_res, n_sims)
+    null_per_residue = M @ null
+    null_sq_per_residue = M @ null_sq
     
-    # 6. Wrap results into a single consolidated DataFrame
-    betahat_cols = ['betahat'] + [f"betahat_null_{i}" for i in range(n_sims)]
-    sq_betahat_cols = ['squared_betahat'] + [f"squared_betahat_null_{i}" for i in range(n_sims)]
-    col_names = betahat_cols + sq_betahat_cols
+    # Also calculate number of variants per residue (n_betahat)
+    # Summing the rows of the indicator matrix M
+    n_per_residue = np.array(M.sum(axis=1)).flatten()
 
-    agg_df = pd.DataFrame(group_sums, columns=col_names)
-    agg_df.insert(0, 'aa_pos', unique_groups)
-    agg_df.insert(1, 'n_betahat', group_counts)
+    return base_per_residue, base_sq_per_residue, null_per_residue, null_sq_per_residue, n_per_residue
 
-    # n_betahat = adjacency_matrix * agg_df['n_betahat'].to_numpy().reshape(-1, 1)  # L x 1
-    # sum_betahat = adjacency_matrix @ agg_df[betahat_cols].to_numpy()  # L x (n_sims + 1)
-    # sum_betahat_squared = adjacency_matrix @ agg_df[sq_betahat_cols].to_numpy()  # L x (n_sims + 1)
+def get_nbhd_stats(adjacency_matrix, n_per_residue, sum_betahat_matrix, sum_betahat_sq_matrix):
+    '''
+    Multiply residue-level statistics by the adjacency matrix to get per-neighborhood statistics
+    '''
 
+    # Multiply by Adjacency Matrix
+    # Extract neighborhood-level stats by multiplying the per-residue stats with the adjacency matrix
+    # Adjacency matrix should be (n_res, n_res)
     try:
-        n_betahat = adjacency_matrix @ group_counts  # L x 1
-        sum_betahat = adjacency_matrix @ group_sums[:,:n_sims+1]  # L x (n_sims + 1)
-        sum_betahat_squared = adjacency_matrix @ group_sums[:,n_sims+1:]  # L x (n_sims + 1)
+        n_betahat_nbhd = adjacency_matrix @ n_per_residue
+        sum_betahat_nbhd = adjacency_matrix @ sum_betahat_matrix
+        sum_betahat_sq_nbhd = adjacency_matrix @ sum_betahat_sq_matrix
     except Exception as e:
         print(f"Error occurred: {e}")
+        return None, None, None
         
-    return n_betahat, sum_betahat, sum_betahat_squared
+    return n_betahat_nbhd, sum_betahat_nbhd, sum_betahat_sq_nbhd
+
 
 def compute_all_n_a_tstats(
         df,
@@ -165,11 +160,20 @@ def compute_all_n_a_tstats(
     )
     n_res = adjacency_matrix.shape[0]
 
+    # Compute permutations (null distribution) once for the whole protein, 
+    # then we can reuse for each neighborhood by multiplying with the adjacency matrix
+    base, base_sq, nulls, nulls_sq, n_per_residue = get_betahats_per_residue(df, n_res, n_sims)
+
+    # 2. Consolidate into matrices for neighborhood summation
+    # We stack the 'actual' result with the 'null' results
+    # Shape: (n_res, n_sims + 1)
+    sum_betahat_matrix = np.column_stack([base, nulls])
+    sum_betahat_sq_matrix = np.column_stack([base_sq, nulls_sq])
     
     # nbhd_size: L x 1
     # sum_beta: L x (n_sims+1)
     # sum_beta_squared: L x (n_sims+1)
-    n_betahat, sum_betahat, sum_betahat_squared = get_nbhd_stats(adjacency_matrix, df, n_res, n_sims)
+    n_betahat, sum_betahat, sum_betahat_squared = get_nbhd_stats(adjacency_matrix, n_per_residue, sum_betahat_matrix, sum_betahat_sq_matrix)
 
     # get the totals for the whole protein
     total_n_betahat = df.shape[0]
@@ -187,11 +191,23 @@ def compute_all_n_a_tstats(
         total_sum_betahat_squared,
         min_variants=10
     )
+
+    # Create a mask to avoid division by zero
+    valid_n = n_betahat > 0
+    # Safely calculate mean_betahat
+    # If n_betahat is 0, result will be 0.0
+    mean_betahat = np.divide(
+        sum_betahat[:, 0], 
+        n_betahat, 
+        out=np.zeros_like(n_betahat, dtype=float), 
+        where=valid_n
+    )
+
     n_a_tstat_columns = ['n_a_tstat'] + [f'null_n_a_tstat_{i}' for i in range(n_sims)]
     df_n_a_tstats = pd.DataFrame(columns = n_a_tstat_columns, data = neg_abs_tstat_matrix)
 
     #other stuff it's convenient to see in the output
-    df_n_a_tstats['mean_betahat'] = sum_betahat[:,0] / n_betahat
+    df_n_a_tstats['mean_betahat'] = mean_betahat
     df_n_a_tstats['n_betahat'] = n_betahat
     df_n_a_tstats = df_n_a_tstats[['mean_betahat', 'n_betahat'] + n_a_tstat_columns]
     return df_n_a_tstats
