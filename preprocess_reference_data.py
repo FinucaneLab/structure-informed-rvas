@@ -1,7 +1,13 @@
 """
-This file prepares the HDF5 file for read_data.py:load_ref_for_chrom
+Internal data preparation scripts for generating reference files.
 
-The input of this file is a csv file with genetic variants, their uniprot_id, pdb filename, and position of the variant in the pdb file.
+These scripts were used to create the reference data distributed with this repo
+and are not required for running the 3D neighborhood test. Users should download
+the pre-built reference data as described in the README.
+
+- prepare_hdf5(): converts a TSV of missense variants to the HDF5 reference file
+- make_common_filter(): reads gnomAD v4 allele frequencies from Google Cloud Storage
+  and writes the common_variants_uniprot.tsv filter file
 """
 
 import pandas as pd

@@ -56,9 +56,6 @@ def get_distance_matrix_structure(pdb_file_pos_guide, pdb_dir, uniprot_id):
     elif len(pdb_files)==1:
         # One pdb file in structure
         pathfile = os.path.join(pdb_dir, pdb_files.iloc[0])
-        # if not os.path.exists(pathfile):
-        #     print(f"File {pathfile} does not exist.")
-        #     return None
         distance_matrix = get_pairwise_distances(pathfile)
     else:
         # Multiple pdb files in structure
@@ -179,14 +176,6 @@ def get_pae_matrix_structure(pae_file_pos_guide, pae_dir, uniprot_id):
     if pae_matrix is not None:
         pae_matrix = np.minimum(pae_matrix, pae_matrix.T)
     return pae_matrix
-
-# def get_adjacency_matrix_pdb(pdb_file, radius):
-#     pairwise_distances = get_pairwise_distances(pdb_file)
-#     return (pairwise_distances < radius) * 1
-
-# def get_adjacency_matrix(pdb_file_pos_guide, pdb_dir, uniprot_id, radius):
-#     distance_matrix = get_distance_matrix_structure(pdb_file_pos_guide, pdb_dir, uniprot_id)
-#     return (distance_matrix < radius) * 1
 
 def get_adjacency_matrix(pdb_pae_file_pos_guide, pdb_dir, pae_dir, uniprot_id, radius, pae_cutoff):
     logger.debug(f"Computing adjacency matrix for {uniprot_id} with radius={radius}, pae_cutoff={pae_cutoff}")

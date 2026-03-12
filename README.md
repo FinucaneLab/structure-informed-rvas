@@ -53,8 +53,8 @@ python structure-informed-rvas/run.py \
 For variant data formatting, see the section below, **Formatting requirements for --rvas-data-to-map**.
 
 The above commands will result in the creation of two files: 
-`p_values.h5`: all information relative to neighborhoods that will be required to run the FDR computation
-`all_proteins.fdr.tsv`: all neighborhood results, including the UniProt ID, central amino acid residue position, associated p-value and FDR score, number of case and control variants within the neighborhood, and the case/control ratio within the neighborhood.
+`p_values.h5`: results for real and simulated data that will be required to run the FDR computation
+`all_proteins.fdr.tsv`: all neighborhood results, including the UniProt ID, central amino acid residue position, associated p-value, FDR and FWERs, number of case and control variants within the neighborhood, and the regularized case/control ratio within the neighborhood (for visualization).
 
 Additional flags allow for several kinds of customization: e.g., to change the default radius of the neighborhood, the maximum allowable allele count, etc. To see these, run `python structure-informed-rvas/run.py -h`.
 

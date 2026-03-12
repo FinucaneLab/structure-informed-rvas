@@ -127,7 +127,7 @@ def map_to_protein(
     if len(result) > 0 and result[0].shape[0] == 0:
         logger.warning('Could not identify proteins.')
         if rvas_data.shape[0] > 0 and rvas_data_by_chr.shape[0] > 0:
-            logger.warning('Does variant id have the same format? Rvas_data: {rvas_data["Variant ID"].iloc[0]}, reference data: {rvas_data_by_chr.index[0]}')
+            logger.warning(f'Does variant id have the same format? Rvas_data: {rvas_data["Variant ID"].iloc[0]}, reference data: {rvas_data_by_chr.index[0]}')
 
     result = pd.concat(result)
     return result

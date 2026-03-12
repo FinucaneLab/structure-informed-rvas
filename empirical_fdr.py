@@ -22,13 +22,11 @@ def _prepare_fdr_filters(df_fdr_filter):
     
     uniprot_filter_list = np.unique(df_fdr_filter['uniprot_id'])
     aa_pos_filters = None
-    
+
     # Extract amino acid positions to keep for each protein
     if 'aa_pos' in df_fdr_filter.columns:
-        aa_pos_filters = {}
-        for uniprot_id in uniprot_filter_list:
-            aa_pos_keep = set(df_fdr_filter.loc[df_fdr_filter.uniprot_id == uniprot_id, 'aa_pos'].values)
-            aa_pos_filters[uniprot_id] = aa_pos_keep
+        grouped = df_fdr_filter.groupby('uniprot_id')['aa_pos'].apply(set)
+        aa_pos_filters = grouped.to_dict()
     
     return uniprot_filter_list, aa_pos_filters
 

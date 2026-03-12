@@ -13,7 +13,6 @@ from empirical_fdr import compute_fdr
 logger = get_logger(__name__)
 
 def get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_ctrl):
-    # from Claude
     max_n_case_nbhd = np.max(n_case_nbhd_mat)
     max_n_control_nbhd = np.max(n_control_nbhd_mat)
     
@@ -216,7 +215,7 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
                         pae_cutoff,
                     )
                     for to_remove in map(int, remove_nbhd.split(',')):
-                        print(f'Removing neighborhood of position {to_remove} for {uniprot_id}')
+                        logger.info(f'Removing neighborhood of position {to_remove} for {uniprot_id}')
                         nbhd = set(np.where(adjacency_matrix[to_remove-1] == 1)[0] + 1)
                         df.drop(df[df['aa_pos'].isin(nbhd)].index, inplace=True)
                     df.reset_index(drop=True, inplace=True)

@@ -43,7 +43,7 @@ def map_and_filter_rvas(
     if df_rvas is not None:
         df_rvas = df_rvas[df_rvas.ac_case + df_rvas.ac_control < ac_filter]
         if not dont_remove_common:
-            print("Removing common variants from RVAS data")
+            logger.info("Removing common variants from RVAS data")
             keys = ['uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt']
             df_common_var = pd.read_csv(
                 f'{reference_dir}/common_variants_uniprot.tsv',
