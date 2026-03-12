@@ -294,6 +294,11 @@ def scan_test(
     
     # Compute FDR if requested
     if not no_fdr:
-        df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file)
+        # If no explicit filter was given, restrict FDR to the proteins just processed
+        # so that proteins from previous runs with different n_sims don't cause errors
+        fdr_filter = df_fdr_filter
+        if fdr_filter is None:
+            fdr_filter = pd.DataFrame({'uniprot_id': uniprot_id_list})
+        df_results = compute_fdr(results_dir, fdr_cutoff, fdr_filter, reference_dir, pval_file)
         df_results.to_csv(f'{results_dir}/{fdr_file}', sep='\t', index=False)
     

@@ -1,104 +1,33 @@
-import glob
 from pymol import cmd
 import pandas as pd
 import os
 import ast
-import gzip
-from Bio.PDB import PDBParser
-from Bio.PDB import StructureBuilder, PDBIO, Model, Chain
-
 import re
 from utils import read_p_values, read_original_mutation_data
 import h5py
 
 
-def write_full_pdb(full_pdb, output_path, pdb_overlap = 1200):
-    '''
-    Write a list of Residue objects to a PDB file as a new structure.
-
-    Parameters:
-    - full_pdb (list): a list contains all residue objects from all pdb files of a uniprot id 
-    - output_path (str): Path to save the output PDB file.
-    - pdb_overlap (int): Number of overlapping residues between different pdb files of a uniprot id.
-    '''
-
+def _load_gene_name(uniprot_id, reference_directory):
+    """Look up gene name for a UniProt ID from gene_to_uniprot_id.tsv."""
+    path = os.path.join(reference_directory, 'gene_to_uniprot_id.tsv')
     try:
-        builder = StructureBuilder.StructureBuilder()
-        builder.init_structure("new_structure")
-        builder.init_model(0)
-        builder.init_chain('A')  
-
-        model = builder.get_structure()[0]
-        chain = model['A']
-
-        for residue in full_pdb:
-            if residue.id[1] == pdb_overlap + 1:
-                print(residue)
-            chain.add(residue.copy())  
-
-        io = PDBIO()
-        io.set_structure(builder.get_structure())
-        io.save(output_path)
-    except Exception as e:
-        print(f"[ERROR] Failed to write PDB file: {e}")
+        df = pd.read_csv(path, sep='\t')
+        match = df[df['uniprot_id'] == uniprot_id]
+        if not match.empty:
+            return match.iloc[0]['gene_name']
+    except Exception:
+        pass
+    return uniprot_id  # fall back to UniProt ID if not found
 
 
-def get_one_pdb(info_tsv, uniprot_id, reference_directory, pdb_overlap = 1200):
-    '''
-    Reconstructs a full protein PDB file from multiple PDB files that cover the protein's sequence.
+def _pse_base(pdb_filename, gene_name, uniprot_id):
+    """Return the base name for PSE files: {gene_name}_{uniprot_id}[_FN]."""
+    match = re.search(r'-F(\d+)-', pdb_filename)
+    frag = f'_F{match.group(1)}' if match else ''
+    return f'{gene_name}_{uniprot_id}{frag}'
 
-    Parameters:
-    - info_tsv (str): Name of the annotation file (TSV).
-    - uniprot_id (str): UniProt ID of the protein to reconstruct.
-    - reference_directory (str): Directory containing annotation and PDB files.
-    - pdb_overlap (int): Number of overlapping residues between different pdb files of a uniprot id.
-    '''
 
-    info_tsv_p = os.path.join(reference_directory, info_tsv)
-    try:
-        info_df = pd.read_csv(info_tsv_p, sep='\t')
-        if not os.path.isfile(info_tsv_p):
-            print(f"[WARNING] Info TSV not found: {info_tsv_p}")
-            return
-    
-        info_df['pos_covered'] = info_df['pos_covered'].apply(ast.literal_eval)
-        pdbs = [{'filename': item, 'index': int(re.findall(r'\d+', item.split('-')[2])[0])}
-                     for item in glob.glob(f'{reference_directory}/*{uniprot_id}*.gz')]
-        full_pdb = []
-        pdbs.sort(key=lambda pdb: pdb['index'])
-
-        for pdb in pdbs:
-            path = os.path.join(reference_directory, pdb['filename'])
-            print('Reading pdb:', path)
-
-            try:
-                with gzip.open(path, "rt") as handle:
-                    structure = PDBParser(QUIET=True).get_structure("protein", handle)
-                residues = [res for model in structure for chain in model for res in chain]
-                
-                if pdb['index'] == 1:
-                    full_pdb.extend(residues)
-                    current_res_id = full_pdb[-1].id[1]
-
-                else:
-                    new_residue = residues[pdb_overlap:]
-                    for i, res in enumerate(new_residue):
-                        res_id = list(res.id)
-                        res_id[1] = current_res_id + 1
-                        res.id = tuple(res_id)
-                        current_res_id += 1
-                        full_pdb.append(res)
-
-            except Exception as e:
-                print(f"[ERROR] Failed to parse {p}: {e}")
-
-        output_path = os.path.join(reference_directory, 'pdb_files', uniprot_id + '.pdb')
-        write_full_pdb(full_pdb, output_path, pdb_overlap)
-
-    except Exception as e:
-        print(f"[ERROR] in get_one_pdb(): {e}")
-
-def pymol_rvas(uniprot_id, reference_directory, results_directory):
+def pymol_rvas(uniprot_id, reference_directory, results_directory, gene_name=None):
     # make a pymol session with case and control mutations
     # output a gif and a .pse file
     '''
@@ -109,8 +38,10 @@ def pymol_rvas(uniprot_id, reference_directory, results_directory):
     '''
 
     try:
-        print(f"Creating PyMOL RVAS visualizations for {uniprot_id}")
-        
+        if gene_name is None:
+            gene_name = _load_gene_name(uniprot_id, reference_directory)
+        print(f"Creating PyMOL RVAS visualizations for {gene_name} ({uniprot_id})")
+
         # Create pymol_visualizations subdirectory
         pymol_dir = os.path.join(results_directory, 'pymol_visualizations')
         os.makedirs(pymol_dir, exist_ok=True)
@@ -141,9 +72,12 @@ def pymol_rvas(uniprot_id, reference_directory, results_directory):
         if not 'aa_pos_file' in df_rvas:
             df_rvas['aa_pos_file'] = df_rvas['aa_pos']
         pdbs = set(df_rvas['pdb_filename'].tolist())
-        
+        if len(pdbs) > 1:
+            print(f"  Skipping {gene_name} ({uniprot_id}): protein spans multiple PDB chunks ({len(pdbs)} files)")
+            return
+
         # cmd.set('ribbon_as_cylinders')
-        # cmd.set("ribbon_radius", 0.5) 
+        # cmd.set("ribbon_radius", 0.5)
 
         for item in pdbs:
             p = os.path.join(reference_directory, f'pdb_files/{item}')
@@ -152,22 +86,14 @@ def pymol_rvas(uniprot_id, reference_directory, results_directory):
                 continue
             print(f'Processing PDB file: {p}')
 
+            cmd.reinitialize()
             cmd.load(p, "structure")
-            pdb_filename = item.split('.')[0]
+            pse_base = _pse_base(item, gene_name, uniprot_id)
 
-            # create sherif style image
-            cmd.set('ambient', 0.5)
-            cmd.set('ray_shadows', 0)
-            cmd.set('ray_trace_mode', 1)
-            cmd.set('ray_trace_gain', 0.05)
             cmd.bg_color("white")
-            cmd.ray(2400, 1800)
-            cmd.set("ray_opaque_background", 1)
-            cmd.png(f"{pymol_dir}/{pdb_filename}.png")
-
             cmd.reset()
-            cmd.color("grey")
-            gray_pse = os.path.join(pymol_dir, f"{pdb_filename}_gray.pse")
+            cmd.color("grey70")
+            gray_pse = os.path.join(pymol_dir, f"{pse_base}_gray.pse")
             cmd.save(gray_pse)
             print(f"  Saved gray PSE file: {gray_pse}")
 
@@ -209,32 +135,28 @@ def pymol_rvas(uniprot_id, reference_directory, results_directory):
             tmp_df_case.to_csv(f'{reference_directory}/tmp_df_case.csv', sep='\t', index=False)
             tmp_df_both.to_csv(f'{reference_directory}/tmp_df_both.csv', sep='\t', index=False)    
 
-            for _, row in tmp_df_control.iterrows():
-                aa_pos_file = row['aa_pos_file']
-                cmd.select(f"residue_{aa_pos_file}", f"resi {aa_pos_file} and name CA")
-                cmd.show("spheres", f"residue_{aa_pos_file}")
-                cmd.color("blue", f"residue_{aa_pos_file}")
+            control_pos_strs = [str(row['aa_pos_file']) for _, row in tmp_df_control.iterrows()]
+            case_pos_strs = [str(row['aa_pos_file']) for _, row in tmp_df_case.iterrows()]
+            both_pos_strs = [str(row['aa_pos_file']) for _, row in tmp_df_both.iterrows()]
 
-            for _, row in tmp_df_case.iterrows():
-                aa_pos_file = row['aa_pos_file']
-                cmd.select(f"residue_{aa_pos_file}", f"resi {aa_pos_file} and name CA")
-                cmd.show("spheres", f"residue_{aa_pos_file}")
-                cmd.color("red", f"residue_{aa_pos_file}")
-        
-            for _, row in tmp_df_both.iterrows():
-                aa_pos_file = row['aa_pos_file']
-                cmd.select(f"residue_{aa_pos_file}", f"resi {aa_pos_file} and name CA")
-                cmd.show("spheres", f"residue_{aa_pos_file}")
-                cmd.color("purple", f"residue_{aa_pos_file}")
+            if control_pos_strs:
+                cmd.select("control_only", f"resi {'+'.join(control_pos_strs)} and name CA")
+                cmd.show("spheres", "control_only")
+                cmd.color("blue", "control_only")
+
+            if case_pos_strs:
+                cmd.select("case_only", f"resi {'+'.join(case_pos_strs)} and name CA")
+                cmd.show("spheres", "case_only")
+                cmd.color("red", "case_only")
+
+            if both_pos_strs:
+                cmd.select("case_and_control", f"resi {'+'.join(both_pos_strs)} and name CA")
+                cmd.show("spheres", "case_and_control")
+                cmd.color("purple", "case_and_control")
             
-            cmd.ray(2400, 1800)
-            cmd.set("ray_opaque_background", 1)
-            cmd.png(f"{pymol_dir}/{pdb_filename}_mut.png")
-
-            pse_pdb_p = os.path.join(pymol_dir, f"{pdb_filename}_mut.pse")
+            pse_pdb_p = os.path.join(pymol_dir, f"{pse_base}_mut.pse")
             cmd.save(pse_pdb_p)
             print(f"  Saved mutations PSE file: {pse_pdb_p}")
-            print(f"  Generated mutation visualization PNG: {pymol_dir}/{pdb_filename}_mut.png")
 
     except Exception as e:
         print(f"[ERROR] in pymol_rvas(): {e}")
@@ -257,69 +179,18 @@ def get_pdb_filename(annot_df, info_df):
     annot_df['pdb_filename'] = pdb_filenames
     return annot_df
 
-def pymol_annotation(annot_file, reference_directory, results_directory, info_tsv=None, uniprot_id=None):
-    # visualize the annotation
-    '''
-    Create PyMOL visualizations for annotation file. For each PDB file:
-    - Label the residues that are annotated in the annotation file.
-    '''
-    try:
-        # Create pymol_visualizations subdirectory
-        pymol_dir = os.path.join(results_directory, 'pymol_visualizations')
-        os.makedirs(pymol_dir, exist_ok=True)
-        
-        annot_df_p = os.path.join(reference_directory, annot_file)
-        if not os.path.isfile(annot_df_p):
-            print(f"[WARNING] Annotation file not found: {annot_df_p}")
-            return
-        
-        annot_df = pd.read_csv(annot_df_p, sep='\t')
-        
-        if info_tsv is not None:
-            info = os.path.join(reference_directory, info_tsv)
-            info_df = pd.read_csv(info, sep='\t')
-        else:
-            print(f"[WARNING] Info TSV not found: {info_tsv}")
-            return
-        
-        if uniprot_id is not None:
-            print(uniprot_id)
-            tmp_info = info_df[info_df['uniprot_id'] == uniprot_id]
-            tmp_annot = annot_df[annot_df['uniprot_id'] == uniprot_id]
-            tmp_annot = get_pdb_filename(tmp_annot, tmp_info)
-            print(tmp_annot)
-            tmp_annot['visual_filename'] = tmp_annot['pdb_filename'].apply(lambda x: os.path.join(pymol_dir, x.split('.')[0]+ '.pse'))
-            tmp_visuals = set(tmp_annot['visual_filename'].tolist())
-            for v in tmp_visuals:
-                print(v)
-                tmp_annot_visuals = tmp_annot[tmp_annot['visual_filename'] == v]
-                print(tmp_annot_visuals)
-                tmp_annot_pos = tmp_annot_visuals['aa_pos'].tolist()
-                for item in tmp_annot_pos:
-                    if not os.path.exists(v):
-                        print(f"[WARNING] PSE file from pymol_rvas() not found: {v}")
-                        continue
-                    cmd.load(f"{v.split('.')[0]}_mut.pse")
-                    item = str(item)
-                    cmd.select(f"annotation_residue_{item}", f"resi {item}")
-                    cmd.label(f"annotation_residue_{item} and name CA", f'"annotation"')
-                    cmd.save(f"{v.split('.')[0]}_mut.pse")
-        else:
-            print('No uniprot id provided')
-
-    except Exception as e:
-        print(f"[ERROR] in pymol_annotation(): {e}")
-
-    
-def pymol_scan_test(info_tsv, uniprot_id, reference_directory, results_directory):
+def pymol_scan_test(info_tsv, uniprot_id, reference_directory, results_directory, gene_name=None):
     # color by case/control ratio of the neighborhood
 
     '''
     Create PyMOL visualizations for scan test results. For each PDB file:
-    - Color residues based on their case/control ratio (yellow_orange_red).
+    - Color residues based on their case/control ratio (green_red).
     - Outputs a third PSE file with ratio colored.
     '''
     try:
+        if gene_name is None:
+            gene_name = _load_gene_name(uniprot_id, reference_directory)
+
         # Create pymol_visualizations subdirectory
         pymol_dir = os.path.join(results_directory, 'pymol_visualizations')
         os.makedirs(pymol_dir, exist_ok=True)
@@ -327,7 +198,7 @@ def pymol_scan_test(info_tsv, uniprot_id, reference_directory, results_directory
         df_results_p = os.path.join(results_directory, 'p_values.h5')
         with h5py.File(df_results_p, 'r') as fid:
             df_results = read_p_values(fid, uniprot_id)
-        
+
         if info_tsv is not None:
             info = os.path.join(reference_directory, info_tsv)
             info_df = pd.read_csv(info, sep='\t')
@@ -339,11 +210,12 @@ def pymol_scan_test(info_tsv, uniprot_id, reference_directory, results_directory
         tmp_df = df_results[df_results['uniprot_id'] == uniprot_id]
         tmp_df = get_pdb_filename(tmp_df, tmp_info)
         print(f"Processing scan test results for {uniprot_id}: {len(tmp_df)} amino acid positions")
-        tmp_df['visual_filename'] = tmp_df['pdb_filename'].apply(lambda x: os.path.join(pymol_dir, x.split('.')[0]+ '.pse'))
+        tmp_df['visual_filename'] = tmp_df['pdb_filename'].apply(lambda x: os.path.join(pymol_dir, _pse_base(x, gene_name, uniprot_id) + '.pse'))
         tmp_df['ratio_normalized'] = tmp_df['ratio'] / tmp_df['ratio'].max()
         # tmp_df['ratio_normalized'].to_csv('test.csv', sep='\t', index=False)
         tmp_visuals = set(tmp_df['visual_filename'].tolist())
         for v in tmp_visuals:
+            cmd.reinitialize()
             cmd.load(f"{v.split('.')[0]}_gray.pse")
             objects = cmd.get_names('objects')[-1]
 
@@ -356,7 +228,7 @@ def pymol_scan_test(info_tsv, uniprot_id, reference_directory, results_directory
                 cmd.alter(selection, f"b={ratio}")
                 cmd.rebuild()
             
-            cmd.spectrum("b", "yellow_orange_red", objects, byres=1)
+            cmd.spectrum("b", "green_red", objects, byres=1)
             cmd.show("cartoon", objects)
             cmd.hide("lines", objects)
 
@@ -365,7 +237,7 @@ def pymol_scan_test(info_tsv, uniprot_id, reference_directory, results_directory
     except Exception as e:
         print(f"[ERROR] in pymol_scan_test(): {e}")
 
-def pymol_neighborhood(uniprot_id, results_directory, info_tsv, reference_directory):
+def pymol_neighborhood(uniprot_id, results_directory, info_tsv, reference_directory, gene_name=None):
     # for each significant neighborhood, zoom in and show the case and control mutations
     # just in that neighborhood.
     '''
@@ -375,9 +247,12 @@ def pymol_neighborhood(uniprot_id, results_directory, info_tsv, reference_direct
     '''
     try:
         # Create pymol_visualizations subdirectory
+        if gene_name is None:
+            gene_name = _load_gene_name(uniprot_id, reference_directory)
+
         pymol_dir = os.path.join(results_directory, 'pymol_visualizations')
         os.makedirs(pymol_dir, exist_ok=True)
-        
+
         df_results_p = os.path.join(results_directory, 'p_values.h5')
 
         with h5py.File(df_results_p, 'r') as fid:
@@ -389,22 +264,19 @@ def pymol_neighborhood(uniprot_id, results_directory, info_tsv, reference_direct
         else:
             print(f"[WARNING] Info TSV not found: {info_tsv}")
             return
-        
+
         tmp_info = info_df[info_df['uniprot_id'] == uniprot_id]
         tmp_df = df_results[df_results['uniprot_id'] == uniprot_id]
         tmp_df = get_pdb_filename(tmp_df, tmp_info)
 
-        tmp_df['visual_filename'] = tmp_df['pdb_filename'].apply(lambda x: os.path.join(pymol_dir, x.split('.')[0]+ '.pse'))
+        tmp_df['visual_filename'] = tmp_df['pdb_filename'].apply(lambda x: os.path.join(pymol_dir, _pse_base(x, gene_name, uniprot_id) + '.pse'))
         tmp_visuals = set(tmp_df['visual_filename'].tolist())
         for v in tmp_visuals:
+            cmd.reinitialize()
             cmd.load(v.split('.')[0] + '_ratio.pse')
             # Removed sphere display for significant residues to keep clean cartoon view
             
             cmd.save(v.split('.')[0] + '_ratio.pse')
-
-            cmd.ray(2400, 1800)
-            cmd.set("ray_opaque_background", 1)
-            cmd.png(f"{v.split('.')[0]}_ratio.png")
 
     except Exception as e:  
         print(f"[ERROR] in pymol_neighborhood(): {e}")
@@ -430,62 +302,15 @@ def make_movie_from_pse(result_directory, pse_name):
     except Exception as e:
         print(f"[ERROR] Failed to create movie from PSE: {e}")
 
-# def make_movie(results_directory, uniprot_id, info_tsv=None, reference_directory=None):
-
-#     if info_tsv is not None:
-#         info = os.path.join(reference_directory, info_tsv)
-#         info_df = pd.read_csv(info, sep='\t')
-#     else:
-#         print(f"[WARNING] Info TSV not found: {info_tsv}")
-#         return
-
-#     tmp_info = info_df[info_df['uniprot_id'] == uniprot_id]
-#     tmp_pdbs = set(tmp_info['pdb_filename'].tolist())
-#     tmp_pses = [item.split('.')[0] for item in tmp_pdbs]
-
-#     for item in tmp_pses:
-#         gray_mv_p = os.path.join(results_directory, f'{item}_gray.mov')
-#         rib_mut_mv_p = os.path.join(results_directory, f'{item}_rib_mut.mov')
-#         ratio_mv_p = os.path.join(results_directory, f'{item}_ratio.mov')
-
-#         if not os.path.exists(gray_mv_p):
-#             print(f"[WARNING] pymol_rvas() base movie file not found: {gray_mv_p}")
-#             return
-#         if not os.path.exists(rib_mut_mv_p): 
-#             print(f"[WARNING] pymol_rvas() movie file not found: {rib_mut_mv_p}")
-#             return
-        
-#         if not os.path.exists(ratio_mv_p): 
-#             print(f"[WARNING] pymol_neighborhood() movie file not found: {ratio_mv_p}")
-#             return
-        
-#         clip1 = VideoFileClip(gray_mv_p)
-#         clip2 = VideoFileClip(rib_mut_mv_p)
-#         clip3 = VideoFileClip(ratio_mv_p)
-
-#         min_duration = min(clip1.duration, clip2.duration, clip3.duration)
-#         clip1 = clip1.subclipped(0, min_duration)
-#         clip2 = clip2.subclipped(0, min_duration)
-#         clip3 = clip3.subclipped(0, min_duration)
-
-#         target_height = min(clip1.h, clip2.h, clip3.h)
-#         clip1 = clip1.resized(height=target_height)
-#         clip2 = clip2.resized(height=target_height)
-#         clip3 = clip3.resized(height=target_height)
-
-#         final_clip = clips_array([[clip1, clip2, clip3]])
-
-#         output_file = os.path.join(results_directory, f"{uniprot_id}.mov")
-#         final_clip.write_videofile(output_file, codec="libx264", fps=24)
-
 
 def run_all(uniprot_id, results_directory, reference_directory):
     '''
     Run all PyMOL visualizations for a given UniProt ID.
     '''
-    pymol_rvas(uniprot_id, reference_directory, results_directory)
+    gene_name = _load_gene_name(uniprot_id, reference_directory)
+    pymol_rvas(uniprot_id, reference_directory, results_directory, gene_name=gene_name)
     # pymol_annotation('ClinVar_PLP_uniprot_canonical.tsv', reference_directory , results_directory, 'pdb_pae_file_pos_guide.tsv', uniprot_id)
-    pymol_scan_test('pdb_pae_file_pos_guide.tsv', uniprot_id, reference_directory, results_directory)
-    pymol_neighborhood(uniprot_id, results_directory, 'pdb_pae_file_pos_guide.tsv', reference_directory)
+    pymol_scan_test('pdb_pae_file_pos_guide.tsv', uniprot_id, reference_directory, results_directory, gene_name=gene_name)
+    pymol_neighborhood(uniprot_id, results_directory, 'pdb_pae_file_pos_guide.tsv', reference_directory, gene_name=gene_name)
 
 
