@@ -96,7 +96,7 @@ The top hit is GRIA3 (P42263, neighborhood centered at aa 738) with p=0.000028 a
 
 ### Using a variant-level filter: --df-filter
 
-The sensitivity of the 3DNT can be improved by restricting the FDR computation to positions predicted to be functionally important, for example using AlphaMissense pathogenicity scores. The `--df-filter` flag accepts a TSV with `uniprot_id` and `aa_pos` columns specifying which positions to include in the FDR computation. Positions not in the filter are excluded from the FDR calculation but the scan test still runs on all variants.
+The sensitivity of the 3DNT can be improved by restricting the FDR computation to positions predicted to be functionally important, for example using AlphaMissense pathogenicity scores. The `--df-filter` flag accepts a TSV with `uniprot_id` and `aa_pos` columns specifying which positions to include in the FDR computation. Positions not in the filter are excluded from the FDR calculation and the FDR file.
 
 ```
 python structure-informed-rvas/run.py \
@@ -120,27 +120,41 @@ The `--df-filter` flag can also be used to restrict the analysis to a specific s
 
 ### Separating the scan and FDR steps
 
-The scan and FDR steps can be run separately, which is useful when running the scan on input files split by chromosome and then performing FDR correction across all chromosomes simultaneously:
+For large studies it is common to split the input data by chromosome and run the scan in parallel, then combine the results and compute FDR once across all chromosomes. This requires three steps.
 
-```
-python structure-informed-rvas/run.py \
-  --rvas-data-to-map input/SCHEMA_tutorial.tsv.gz \
-  --reference-dir sir-reference-data/ \
-  --results-dir results_schema \
-  --run-3dnt \
-  --no-fdr
+**Step 1: Run the scan for each chromosome (parallelizable)**
+
+```bash
+for CHROM in {1..22} X; do
+    python structure-informed-rvas/run.py \
+      --rvas-data-to-map input/data_chr${CHROM}.tsv.gz \
+      --reference-dir sir-reference-data/ \
+      --results-dir results/ \
+      --pval-file p_values_chr${CHROM}.h5 \
+      --run-3dnt --no-fdr
+done
 ```
 
-```
+**Step 2: Combine per-chromosome p-value files**
+
+```bash
 python structure-informed-rvas/run.py \
-  --rvas-data-to-map input/SCHEMA_tutorial.tsv.gz \
+  --combine-pval-files "p_values_chr*.h5" \
+  --results-dir results/ \
+  --pval-file p_values.h5
+```
+
+**Step 3: Compute FDR across all chromosomes**
+
+```bash
+python structure-informed-rvas/run.py \
   --reference-dir sir-reference-data/ \
-  --results-dir results_schema \
-  --run-3dnt \
+  --results-dir results/ \
   --fdr-only \
-  --df-filter input/am_scan_99.tsv \
-  --fdr-file schema_tutorial_am.fdr.tsv
+  --fdr-file all_proteins.fdr.tsv
 ```
+
+An optional `--df-filter` can be passed in Step 3 to restrict FDR to a subset of positions (e.g. AlphaMissense-filtered). FDR must be computed on the combined file to ensure the null distribution is pooled across all proteins.
 
 ### Formatting requirements for --rvas-data-to-map
 

@@ -375,7 +375,13 @@ if __name__ == '__main__':
         df_rvas.to_csv(args.save_df_rvas, sep='\t', index=False)
         did_nothing = False
 
-    if args.run_3dnt: 
+    if args.fdr_only and not args.run_3dnt:
+        from empirical_fdr import compute_fdr
+        df_results = compute_fdr(args.results_dir, args.fdr_cutoff, df_filter, args.reference_dir, args.pval_file)
+        df_results.to_csv(f'{args.results_dir}/{args.fdr_file}', sep='\t', index=False)
+        did_nothing = False
+
+    elif args.run_3dnt:
         logger.info("Starting scan test analysis")
         scan_test(
             df_rvas,
