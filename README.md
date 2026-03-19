@@ -32,10 +32,10 @@ working-directory/
 ```
 To set this up:
 
-1. Download reference.tar.gz [here](https://www.dropbox.com/scl/fi/4cfclarvxrujqtfmu3l69/reference.tar.gz?rlkey=indsp0h06yv465b4faxjg95kx&dl=0)
-2. Move reference.tar.gz to your working directory
-3. Extract it: `tar -xzf reference.tar.gz`
-4. (Optional) Remove the archive: `rm reference.tar.gz`
+1. Download sir-data.tar.gz [here](https://www.dropbox.com/scl/fi/t4it7sa9lkdx9maj0vois/sir-data.tar.gz?rlkey=flvsvmzyopj1cbn6gya0c3am0&st=uyk0l7iw&dl=0)
+2. Move sir-data.tar.gz to your working directory
+3. Extract it: `tar -xzf sir-data.tar.gz`
+4. (Optional) Remove the archive: `rm sir-data.tar.gz`
 
 All commands in this tutorial should be run from the working directory.
 
