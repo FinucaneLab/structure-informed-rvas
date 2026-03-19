@@ -21,8 +21,7 @@ working-directory/
 │   ├── all_missense_variants_gr38.h5
 │   ├── common_variants_uniprot.tsv
 │   ├── lcr_positions_uniprot.tsv
-│   ├── no_pae_uniprot.tsv
-│   ├── gene_to_uniprot_id.tsv
+│   ├── protein_sequence_guide.tsv
 │   ├── pae_files/
 │   ├── pdb_files/
 │   └── pdb_pae_file_pos_guide.tsv
