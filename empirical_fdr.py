@@ -221,8 +221,8 @@ def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file
     df_results = _apply_corrections(df_pvals, false_discoveries, fwer)
     
     # Add gene name
-    df_gene = pd.read_csv(f'{reference_dir}/gene_to_uniprot_id.tsv', sep='\t')
-    df_results = df_results.merge(df_gene, how='left', on='uniprot_id')
+    df_gene = pd.read_csv(f'{reference_dir}/protein_sequence_guide.tsv', sep='\t')
+    df_results = df_results.merge(df_gene[['gene_name', 'uniprot_id']], how='left', on='uniprot_id')
     
     # Summarize and return results
     summarize_results(df_results, fdr_cutoff)

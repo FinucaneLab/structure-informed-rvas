@@ -10,8 +10,8 @@ INFO_TSV = 'pdb_pae_file_pos_guide.tsv'
 
 
 def _load_gene_name(uniprot_id, reference_directory):
-    """Look up gene name for a UniProt ID from gene_to_uniprot_id.tsv."""
-    path = os.path.join(reference_directory, 'gene_to_uniprot_id.tsv')
+    """Look up gene name for a UniProt ID from protein_sequence_guide.tsv."""
+    path = os.path.join(reference_directory, 'protein_sequence_guide.tsv')
     try:
         df = pd.read_csv(path, sep='\t')
         match = df[df['uniprot_id'] == uniprot_id]
