@@ -432,8 +432,8 @@ def filter_family_by_annotation_count(family_members, cache_dir, max_members=50)
 
 
 def _load_gene_map(reference_dir):
-    """Return {uniprot_id: gene_name} from gene_to_uniprot_id.tsv."""
-    path = os.path.join(reference_dir, 'gene_to_uniprot_id.tsv')
+    """Return {uniprot_id: gene_name} from protein_sequence_guide.tsv."""
+    path = os.path.join(reference_dir, 'protein_sequence_guide.tsv')
     try:
         df = pd.read_csv(path, sep='\t')
         return dict(zip(df['uniprot_id'], df['gene_name']))
