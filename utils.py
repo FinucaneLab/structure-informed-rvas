@@ -125,12 +125,8 @@ def get_pae_matrix_structure(pae_file_pos_guide, pae_dir, uniprot_id):
             logger.warning(f"Protein {uniprot_id} not found.")
             return None
         else:
-            no_pae_path = os.path.join(os.path.dirname(pae_file_pos_guide), 'no_pae_uniprot.tsv')
-            if os.path.exists(no_pae_path):
-                no_pae_ids = set(pd.read_csv(no_pae_path, sep='\t')['uniprot_id'])
-            else:
-                no_pae_ids = set()
-            if uniprot_id in no_pae_ids:
+            known_no_pae = info.loc[info.uniprot_id == uniprot_id, 'pae_filename'].isna().any()
+            if known_no_pae:
                 logger.debug(f"PAE file not available for {uniprot_id} (known). Using distance-only adjacency.")
             else:
                 logger.warning(f"PAE file not found for Protein {uniprot_id}. No PAE filtering will be used.")

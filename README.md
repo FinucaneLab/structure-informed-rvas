@@ -33,7 +33,7 @@ working-directory/
 ```
 To set this up:
 
-1. Download reference.tar.gz [here](https://www.dropbox.com/scl/fi/4cfclarvxrujqtfmu3l69/reference.tar.gz?rlkey=indsp0h06yv465b4faxjg95kx&dl=0)
+1. Download reference.tar.gz [here](https://www.dropbox.com/scl/fi/4cfclarvxrujqtfmu3l69/reference.tar.gz?rlkey=indsp0h06yv465b4faxjg95kx&dl=0) or `wget -O reference.tar.gz "https://www.dropbox.com/scl/fi/4cfclarvxrujqtfmu3l69/reference.tar.gz?rlkey=indsp0h06yv465b4faxjg95kx&dl=1"`
 2. Move reference.tar.gz to your working directory
 3. Extract it: `tar -xzf reference.tar.gz`
 4. (Optional) Remove the archive: `rm reference.tar.gz`
@@ -53,14 +53,14 @@ python structure-informed-rvas/run.py \
 For variant data formatting, see the section below, **Formatting requirements for --rvas-data-to-map**.
 
 The above commands will result in the creation of two files: 
-`p_values.h5`: results for real and simulated data that will be required to run the FDR computation
+`p_values.h5`: results for real and simulated data that will be required to compute FDR and FWER
 `all_proteins.fdr.tsv`: all neighborhood results, including the UniProt ID, central amino acid residue position, associated p-value, FDR and FWERs, number of case and control variants within the neighborhood, and the regularized case/control ratio within the neighborhood (for visualization).
 
 Additional flags allow for several kinds of customization: e.g., to change the default radius of the neighborhood, the maximum allowable allele count, etc. To see these, run `python structure-informed-rvas/run.py -h`.
 
 ## Example
 
-For the tutorial, we will use schizophrenia (SCZ) rare variant data from the SCHEMA consortium. The tutorial input file `input/SCHEMA_tutorial.tsv.gz` contains ~14,000 missense variants across 36 genes identified as significant in the SCHEMA flagship analysis. It is included in the reference.tar.gz archive described above.
+For the tutorial, we will use schizophrenia (SCZ) rare variant data from the SCHEMA consortium. The tutorial input file `input/SCHEMA_tutorial.tsv.gz` contains ~14,000 missense variants across 36 genes identified either as significant at FDR < 0.05 in the SCHEMA flagship analysis or with a missense-based burden P<0.001. It is included in the reference.tar.gz archive described above.
 
 After extracting the archive, your working directory should look like:
 ```

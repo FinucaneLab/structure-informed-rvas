@@ -1102,6 +1102,33 @@ def cmd_analyze(args):
     return 0
 
 
+def pse_to_png(input_pse):
+    from pymol import cmd
+
+    output_png = input_pse.replace(".pse", ".png")
+    print(f"[INFO] Loading PSE: {input_pse}")
+    print(f"[INFO] Output PNG:  {output_png}")
+
+    cmd.load(input_pse)
+
+    # Rendering settings
+    cmd.set("ambient", 0.5)
+    cmd.set("ray_shadows", 0)
+    cmd.set("ray_trace_mode", 0.2)
+    cmd.set("ray_trace_gain", 0.05)
+    cmd.set("ray_opaque_background", 1)
+    cmd.bg_color("white")
+
+    width  = 2400
+    height = 1800
+    dpi    = 300
+
+    cmd.ray(width, height)
+    cmd.png(output_png, width, height, dpi, 0, 0)
+
+    print(f"[INFO] Saved PNG to: {output_png}")
+    cmd.quit(0)
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -1211,6 +1238,14 @@ def main():
     p_color.add_argument('--chain', required=True, help='Target chain ID (e.g. A)')
     p_color.add_argument('--uniprot', required=True, help='Target UniProt ID')
 
+    # -- pse to png --
+    p_pse_to_png = subparsers.add_parser(
+        'pse_to_png',
+        help='Convert a PyMOL session file (.pse) to a PNG image',
+        description='Loads a PyMOL session file and saves a PNG image of the current view.'
+    )
+    p_pse_to_png.add_argument('input_pse', help='Input PyMOL session file (.pse)')
+
     args = parser.parse_args()
 
     if args.command == 'annotate':
@@ -1223,6 +1258,8 @@ def main():
         return cmd_analyze(args)
     elif args.command == 'color':
         return cmd_color(args)
+    elif args.command == 'pse_to_png':
+        return pse_to_png(args.input_pse)
 
 
 if __name__ == '__main__':
