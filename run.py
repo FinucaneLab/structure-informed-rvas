@@ -1,4 +1,5 @@
 import argparse
+import time
 import pandas as pd
 import numpy as np
 import os
@@ -96,6 +97,7 @@ def map_and_filter_rvas(
 
 
 if __name__ == '__main__':
+    start_time = time.time()
     parser=argparse.ArgumentParser()
     parser.add_argument(
         '--rvas-data-to-map',
@@ -305,6 +307,25 @@ if __name__ == '__main__':
         default=None,
         help='Amino acid residue position in --uniprot-id for center of desired neighborhood'
     )
+    parser.add_argument(
+        '--min-variants',
+        type=int,
+        default=10,
+        help='Minimum number of variants required for a valid neighborhood'
+    )
+    parser.add_argument(
+        '--stat-method',
+        type=str,
+        default='tstat',
+        choices=['tstat', 'pval', 'hill'],
+        help='''
+        Statistic used to score each neighborhood after the t-statistic threshold filter.
+        "tstat": negative absolute t-statistic (default, no df correction).
+        "pval": two-tailed p-value via scipy.stats.t.sf with Satterthwaite degrees of freedom.
+        "hill": negative absolute z-score via the Hill (1970) approximation with Satterthwaite
+                degrees of freedom.
+        '''
+    )
     args = parser.parse_args()
 
     # Input validation
@@ -367,6 +388,7 @@ if __name__ == '__main__':
             args.pae_cutoff,
             args.results_dir,
             args.n_sims,
+            args.min_variants,
             args.no_fdr,
             args.fdr_only,
             args.fdr_cutoff,
@@ -375,6 +397,7 @@ if __name__ == '__main__':
             args.fdr_file,
             args.pval_file,
             args.remove_nbhd,
+            args.stat_method,
         )
         did_nothing = False
 
@@ -425,3 +448,8 @@ if __name__ == '__main__':
 
     if did_nothing:
         raise Exception('no analysis specified')
+
+    elapsed = time.time() - start_time
+    hours, remainder = divmod(int(elapsed), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    logger.info(f"Total runtime: {hours:02d}:{minutes:02d}:{seconds:02d} (hh:mm:ss)")
