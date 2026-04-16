@@ -46,7 +46,7 @@ def map_and_filter_rvas(
             print("Removing common variants from RVAS data")
             keys = ['uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt']
             df_common_var = pd.read_csv(
-                f'{args.reference_dir}/common_variants_uniprot.tsv',
+                f'{reference_dir}/common_variants_uniprot.tsv',
                 sep='\t',
                 usecols = keys,
             )
@@ -94,8 +94,7 @@ def map_and_filter_rvas(
     
     return df_rvas, df_filter
 
-
-if __name__ == '__main__':
+def main():
     parser=argparse.ArgumentParser()
     parser.add_argument(
         '--rvas-data-to-map',
@@ -305,6 +304,24 @@ if __name__ == '__main__':
         default=None,
         help='Amino acid residue position in --uniprot-id for center of desired neighborhood'
     )
+    parser.add_argument(
+        '--logistic-regression',
+        action='store_true',
+        default=False,
+        help='Whether to run logistic regression framework instead (needs additional input file that details variant: covariates for each sample)'
+    )
+    parser.add_argument(
+        '--logistic-regression-annotation-file',
+        type=str,
+        default=None,
+        help='file with relevant variant-specific values to include as covariates for logistic regression'
+    )
+    parser.add_argument(
+        '--parallel',
+        type=int,
+        default=1,
+        help='how many processes to use at a time (by gene)'
+    )
     args = parser.parse_args()
 
     # Input validation
@@ -375,6 +392,9 @@ if __name__ == '__main__':
             args.fdr_file,
             args.pval_file,
             args.remove_nbhd,
+            args.logistic_regression,
+            args.logistic_regression_annotation_file,
+            args.parallel
         )
         did_nothing = False
 
@@ -425,3 +445,8 @@ if __name__ == '__main__':
 
     if did_nothing:
         raise Exception('no analysis specified')
+
+
+if __name__ == '__main__':
+    main()
+    

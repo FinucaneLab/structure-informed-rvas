@@ -9,6 +9,8 @@ from scipy import special
 from utils import get_adjacency_matrix, valid_for_fisher, write_dataset, read_p_values
 from logger_config import get_logger
 from empirical_fdr import compute_fdr
+from logistic_regression import run_logistic_regression
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 logger = get_logger(__name__)
 
@@ -115,8 +117,9 @@ def compute_all_pvals(
         pae_dir,
         uniprot_id,
         n_sims,
+        logistic_regression, logistic_regression_annotation_file,
         radius = 15,
-        pae_cutoff = 15,
+        pae_cutoff = 15
 ):
     adjacency_matrix = get_adjacency_matrix(
         pdb_file_pos_guide,
@@ -128,21 +131,43 @@ def compute_all_pvals(
     )
     n_res = adjacency_matrix.shape[0]
     
-    case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(df, n_res, n_sims)
-    n_case = case_ac_matrix[:,0].sum()
-    n_control = control_ac_matrix[:,0].sum()
-    n_case_nbhd_mat = get_nbhd_counts(adjacency_matrix, case_ac_matrix)
-    n_control_nbhd_mat = get_nbhd_counts(adjacency_matrix, control_ac_matrix)
-    pval_lookup = get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_control)
-    pval_matrix = pval_lookup[n_case_nbhd_mat, n_control_nbhd_mat]
-    pval_columns = ['p_value'] + [f'null_pval_{i}' for i in range(n_sims)]
-    df_pvals = pd.DataFrame(columns = pval_columns, data = pval_matrix)
-    df_pvals['nbhd_case'] = n_case_nbhd_mat[:,0]
-    df_pvals['nbhd_control'] = n_control_nbhd_mat[:,0]
-    # Add original per-residue mutation counts
-    df_pvals['original_case'] = case_ac_matrix[:,0]
-    df_pvals['original_control'] = control_ac_matrix[:,0]
-    df_pvals = df_pvals[['nbhd_case', 'nbhd_control', 'original_case', 'original_control'] + pval_columns]
+
+    if logistic_regression:
+        # Logistic regression
+        pval_matrix = run_logistic_regression(uniprot_id, df, n_res, n_sims, 
+                                              logistic_regression_annotation_file,
+                                              adjacency_matrix)
+        
+        # Replicate format of 3dnt pval outputs
+        pval_columns = ['p_value'] + [f'null_pval_{i}' for i in range(n_sims)]
+        df_pvals = pd.DataFrame(columns = pval_columns, data = pval_matrix)
+
+        case_ac_per_residue = get_ac_per_residue(df, 'ac_case', n_res).flatten()
+        control_ac_per_residue = get_ac_per_residue(df, 'ac_control', n_res).flatten()
+        df_pvals['nbhd_case'] = get_nbhd_counts(adjacency_matrix, case_ac_per_residue)
+        df_pvals['nbhd_control'] = get_nbhd_counts(adjacency_matrix, control_ac_per_residue)
+        df_pvals['original_case'] = case_ac_per_residue.astype(int)
+        df_pvals['original_control'] = control_ac_per_residue.astype(int)
+        df_pvals = df_pvals[['nbhd_case', 'nbhd_control', 'original_case', 'original_control'] + pval_columns]
+
+    else:
+        case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(df, n_res, n_sims)
+        n_case = case_ac_matrix[:,0].sum()
+        n_control = control_ac_matrix[:,0].sum()
+        n_case_nbhd_mat = get_nbhd_counts(adjacency_matrix, case_ac_matrix)
+        n_control_nbhd_mat = get_nbhd_counts(adjacency_matrix, control_ac_matrix)
+        pval_lookup = get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_control)
+        pval_matrix = pval_lookup[n_case_nbhd_mat, n_control_nbhd_mat]
+
+        pval_columns = ['p_value'] + [f'null_pval_{i}' for i in range(n_sims)]
+        df_pvals = pd.DataFrame(columns = pval_columns, data = pval_matrix)
+        df_pvals['nbhd_case'] = n_case_nbhd_mat[:,0]
+        df_pvals['nbhd_control'] = n_control_nbhd_mat[:,0]
+        # Add original per-residue mutation counts
+        df_pvals['original_case'] = case_ac_matrix[:,0]
+        df_pvals['original_control'] = control_ac_matrix[:,0]
+        df_pvals = df_pvals[['nbhd_case', 'nbhd_control', 'original_case', 'original_control'] + pval_columns]
+    
     return df_pvals, adjacency_matrix
 
 def write_df_pvals(results_dir, uniprot_id, df_pvals, pval_file):
@@ -153,7 +178,36 @@ def write_df_pvals(results_dir, uniprot_id, df_pvals, pval_file):
         write_dataset(fid, f'{uniprot_id}_nbhd', df_pvals[['nbhd_case', 'nbhd_control']])
         write_dataset(fid, f'{uniprot_id}_original', df_pvals[['original_case', 'original_control']])
 
-def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir, uniprot_id, radius, pae_cutoff, n_sims, pval_file):
+
+
+def _read_single_result(h5_path, uniprot_id):
+    with h5py.File(h5_path, 'r') as fid:
+        pvals = pd.DataFrame(
+            fid[f'{uniprot_id}'][:],
+            columns=['p_value']
+        )
+        null_pvals = pd.DataFrame(
+            fid[f'{uniprot_id}_null_pval'][:],
+            columns=[f'null_pval_{i}' for i in range(fid[f'{uniprot_id}_null_pval'].shape[1])]
+        )
+        nbhd = pd.DataFrame(
+            fid[f'{uniprot_id}_nbhd'][:],
+            columns=['nbhd_case', 'nbhd_control']
+        )
+        original = pd.DataFrame(
+            fid[f'{uniprot_id}_original'][:],
+            columns=['original_case', 'original_control']
+        )
+    return pd.concat([nbhd, original, pvals, null_pvals], axis=1)
+
+def reformat_parallel_results(uniprot_id_list, results_dir, pval_file):
+    for uniprot_id in uniprot_id_list:
+        logger.info(uniprot_id)
+        d = _read_single_result(os.path.join(results_dir, f"{uniprot_id}_{pval_file}"), uniprot_id)
+        logger.info(d)
+        write_df_pvals(results_dir, uniprot_id, d, pval_file)
+
+def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir, uniprot_id, radius, pae_cutoff, n_sims, pval_file, logistic_regression, logistic_regression_annotation_file):
     df_pvals, adj_mat = compute_all_pvals(
         df,
         pdb_file_pos_guide,
@@ -161,8 +215,9 @@ def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir,
         pae_dir,
         uniprot_id,
         n_sims,
+        logistic_regression, logistic_regression_annotation_file,
         radius,
-        pae_cutoff,
+        pae_cutoff
     )
     write_df_pvals(results_dir, uniprot_id, df_pvals, pval_file)
 
@@ -195,7 +250,7 @@ def _filter_proteins_by_allele_count(df_rvas, df_fdr_filter, min_alleles=5):
     return uniprot_id_list
 
 
-def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, remove_nbhd, pval_file):
+def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, remove_nbhd, pval_file, logistic_regression, logistic_regression_annotation_file):
     """Process each protein individually with scan test."""
     pdb_file_pos_guide = f'{reference_dir}/pdb_pae_file_pos_guide.tsv'
     pdb_dir = f'{reference_dir}/pdb_files/'
@@ -228,7 +283,7 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
             scan_test_one_protein(
                 df, pdb_file_pos_guide, pdb_dir, pae_dir, 
                 results_dir, uniprot_id, radius, pae_cutoff, n_sims,
-                pval_file
+                pval_file, logistic_regression, logistic_regression_annotation_file
             )
         except FileNotFoundError as e:
             logger.error(f'{uniprot_id}: Required file not found - {e}')
@@ -246,6 +301,79 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
             logger.error(f'{uniprot_id}: Unexpected error - {e}')
             continue
 
+def _process_one_protein(uniprot_id, df_rvas, reference_dir, radius, pae_cutoff, results_dir, n_sims, remove_nbhd, pval_file, logistic_regression, logistic_regression_annotation_file):
+    pdb_file_pos_guide = f'{reference_dir}/pdb_pae_file_pos_guide.tsv'
+    pdb_dir = f'{reference_dir}/pdb_files/'
+    pae_dir = f'{reference_dir}/pae_files/'
+    logger.info(f'Processing {uniprot_id}')
+    
+    try:
+        df = df_rvas[df_rvas.uniprot_id == uniprot_id].copy()
+        if remove_nbhd is not None:
+            adjacency_matrix = get_adjacency_matrix(
+                pdb_file_pos_guide,
+                pdb_dir,
+                pae_dir,
+                uniprot_id,
+                radius,
+                pae_cutoff,
+            )
+            for to_remove in map(int, remove_nbhd.split(',')):
+                print(f'Removing neighborhood of position {to_remove} for {uniprot_id}')
+                nbhd = set(np.where(adjacency_matrix[to_remove-1] == 1)[0] + 1)
+                df.drop(df[df['aa_pos'].isin(nbhd)].index, inplace=True)
+            df.reset_index(drop=True, inplace=True)
+
+        if (sum(df.ac_case) < 5) or (sum(df.ac_control) < 5):
+                logger.warning(f'{uniprot_id}: There must be at least 5 case and 5 control alleles. Skipping.')
+                return uniprot_id, "Skipped: insufficient alleles"
+    
+        scan_test_one_protein(
+                df, pdb_file_pos_guide, pdb_dir, pae_dir, 
+                results_dir, uniprot_id, radius, pae_cutoff, n_sims,
+                f"{uniprot_id}_{pval_file}", logistic_regression, logistic_regression_annotation_file
+            )
+        
+        return uniprot_id, 'done'
+    except Exception as e:
+        logger.exception(f'Error processing {uniprot_id}')
+        return uniprot_id, f'error: {e}'
+
+def _process_proteins_parallel(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, remove_nbhd, pval_file, logistic_regression, logistic_regression_annotation_file, parallel):
+    """Process each protein in parallel with scan test."""
+    max_workers = min(parallel, os.cpu_count())
+    logger.info(f'Running {len(uniprot_id_list)} proteins using {max_workers} workers')
+    futures = []
+    results = {}
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        for uniprot_id in uniprot_id_list:
+            futures.append(
+                executor.submit(
+                    _process_one_protein,
+                    uniprot_id,
+                    df_rvas,
+                    reference_dir,
+                    radius,
+                    pae_cutoff,
+                    results_dir,
+                    n_sims,
+                    remove_nbhd,
+                    pval_file,
+                    logistic_regression,
+                    logistic_regression_annotation_file,
+                )
+            )
+
+        for future in as_completed(futures):
+            uniprot_id, status = future.result()
+            results[uniprot_id] = status
+            logger.info(f'{uniprot_id}: {status}')
+
+
+            
+
+
 
 def scan_test(
     df_rvas,
@@ -262,6 +390,9 @@ def scan_test(
     fdr_file,
     pval_file,
     remove_nbhd,
+    logistic_regression,
+    logistic_regression_annotation_file,
+    parallel
 ):
     """
     Perform scan test analysis on protein structure data.
@@ -286,12 +417,21 @@ def scan_test(
     uniprot_id_list = _filter_proteins_by_allele_count(df_processed, df_fdr_filter)
     
     # Process each protein
-    _process_proteins_batch(
-        df_processed, uniprot_id_list, reference_dir, 
-        radius, pae_cutoff, results_dir, n_sims, remove_nbhd,
-        pval_file
-    )
-    
+    if parallel > 1:
+        _process_proteins_parallel(
+            df_processed, uniprot_id_list, reference_dir, 
+            radius, pae_cutoff, results_dir, n_sims, remove_nbhd,
+            pval_file, logistic_regression, logistic_regression_annotation_file,
+            parallel
+        )
+        reformat_parallel_results(uniprot_id_list, results_dir, pval_file)
+
+    else:
+        _process_proteins_batch(
+            df_processed, uniprot_id_list, reference_dir, 
+            radius, pae_cutoff, results_dir, n_sims, remove_nbhd,
+            pval_file, logistic_regression, logistic_regression_annotation_file
+        )
     # Compute FDR if requested
     if not no_fdr:
         df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file)
