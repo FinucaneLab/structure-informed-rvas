@@ -4,7 +4,7 @@ import numpy as np
 import glob
 import bisect
 import h5py
-from scipy.stats import fisher_exact, binom, t as scipy_t_dist
+from scipy.stats import fisher_exact, binom
 from scipy import special
 from scipy import sparse
 from utils import get_adjacency_matrix, valid_for_fisher, write_dataset, read_p_values
@@ -33,20 +33,22 @@ def get_tstat_matrix(n_betahat, sum_betahat, sum_betahat_squared, total_n_betaha
     total_sum_betahat_squared: scalar
 
     returns:
-    neg_abs_tstat_matrix: L x (n_sims + 1); -|t| for valid neighborhoods, 0 otherwise
+    neg_abs_tstat_matrix: L x (n_sims + 1)
     '''
-    n_in = np.asarray(n_betahat).reshape(-1, 1)
+    n_in = np.asarray(n_betahat).reshape(-1, 1) 
     n_out = (total_n_betahat - n_in).reshape(-1, 1)
 
-    # Valid neighborhoods: enough variants inside and outside for variance estimation
+    # Create a mask for valid neighborhoods (must have at least min_variants)
+    # Also ensure there are at least 2 variants outside to calculate outside variance
     valid_mask = (n_in >= min_variants) & (total_n_betahat - n_in >= 2)
 
     with np.errstate(divide='ignore', invalid='ignore'):
         # 1. Neighborhood Stats
         mean_betahat_nbhd = sum_betahat / n_in
         var_betahat_nbhd = (sum_betahat_squared - n_in * (mean_betahat_nbhd ** 2)) / (n_in - 1)
-
+        
         # 2. Outside Stats
+        #n_out = total_n_betahat - n_in
         mean_betahat_outside = (total_sum_betahat - sum_betahat) / n_out
         var_betahat_outside = ((total_sum_betahat_squared - sum_betahat_squared) - n_out*(mean_betahat_outside**2)) / (n_out - 1)
 
@@ -54,85 +56,11 @@ def get_tstat_matrix(n_betahat, sum_betahat, sum_betahat_squared, total_n_betaha
         se_diff = np.sqrt((var_betahat_nbhd / n_in) + (var_betahat_outside / n_out))
         t_stat_matrix = (mean_betahat_nbhd - mean_betahat_outside) / se_diff
 
+    # Apply the mask: only keep values where the threshold was met
+    # Everything else (including NaNs and low-count neighborhoods) becomes 0
     t_stat_matrix = np.where(valid_mask & np.isfinite(t_stat_matrix), t_stat_matrix, 0)
-    return -np.abs(t_stat_matrix)
-
-def _compute_satterthwaite_df(w1, w2, n1, n2):
-    '''
-    Satterthwaite approximation for degrees of freedom.
-    w1 = var1/n1, w2 = var2/n2, n1 and n2 are sample sizes.
-    nu ~ (w1 + w2)^2 / (w1^2/(n1-1) + w2^2/(n2-1))
-    '''
-    numerator = (w1 + w2) ** 2
-    denominator = w1**2 / (n1 - 1) + w2**2 / (n2 - 1)
-    with np.errstate(divide='ignore', invalid='ignore'):
-        df = np.where(denominator > 0, numerator / denominator, 1.0)
-    return df
-
-
-def get_stat_matrix_pval(n_betahat, sum_betahat, sum_betahat_squared, total_n_betahat, total_sum_betahat, total_sum_betahat_squared, min_variants=10):
-    '''
-    Compute two-tailed p-value for each residue's neighborhood using
-    scipy.stats.t.sf with Satterthwaite degrees of freedom.
-
-    Does not apply the large_threshold filter — that is handled externally
-    in compute_all_n_a_tstats.
-
-    Returns: L x (n_sims + 1) array of p_value in (0, 1]; 1.0 for invalid neighborhoods
-    '''
-    n_in = np.asarray(n_betahat).reshape(-1, 1)
-    n_out = (total_n_betahat - n_in).reshape(-1, 1)
-    valid_mask = (n_in >= min_variants) & (total_n_betahat - n_in >= 2)
-
-    with np.errstate(divide='ignore', invalid='ignore'):
-        mean_in = sum_betahat / n_in
-        var_in = (sum_betahat_squared - n_in * mean_in**2) / (n_in - 1)
-
-        mean_out = (total_sum_betahat - sum_betahat) / n_out
-        var_out = ((total_sum_betahat_squared - sum_betahat_squared) - n_out * mean_out**2) / (n_out - 1)
-
-        w1 = var_in / n_in
-        w2 = var_out / n_out
-        t_stat = (mean_in - mean_out) / np.sqrt(w1 + w2)
-
-        df = _compute_satterthwaite_df(w1, w2, n_in, n_out)
-        p_value = 2.0 * scipy_t_dist.sf(np.abs(t_stat), df)
-
-    return np.where(valid_mask & np.isfinite(p_value), p_value, 1.0)
-
-
-def get_stat_matrix_hill(n_betahat, sum_betahat, sum_betahat_squared, total_n_betahat, total_sum_betahat, total_sum_betahat_squared, min_variants=10):
-    '''
-    Compute -|z| where z is the Hill (1970) approximation mapping a t-statistic
-    with Satterthwaite degrees of freedom to a standard-normal score:
-
-        z = t * sqrt((df - 0.5) / (df + t^2 - 1 + 0.5))
-
-    Does not apply the large_threshold filter — that is handled externally
-    in compute_all_n_a_tstats.
-
-    Returns: L x (n_sims + 1) array of -|z|; 0.0 for invalid neighborhoods
-    '''
-    n_in = np.asarray(n_betahat).reshape(-1, 1)
-    n_out = (total_n_betahat - n_in).reshape(-1, 1)
-    valid_mask = (n_in >= min_variants) & (total_n_betahat - n_in >= 2)
-
-    with np.errstate(divide='ignore', invalid='ignore'):
-        mean_in = sum_betahat / n_in
-        var_in = (sum_betahat_squared - n_in * mean_in**2) / (n_in - 1)
-
-        mean_out = (total_sum_betahat - sum_betahat) / n_out
-        var_out = ((total_sum_betahat_squared - sum_betahat_squared) - n_out * mean_out**2) / (n_out - 1)
-
-        w1 = var_in / n_in
-        w2 = var_out / n_out
-        t_stat = (mean_in - mean_out) / np.sqrt(w1 + w2)
-
-        df = _compute_satterthwaite_df(w1, w2, n_in, n_out)
-        z = t_stat * np.sqrt((df - 0.5) / (df + t_stat**2 - 1 + 0.5))
-
-    return np.where(valid_mask & np.isfinite(z), -np.abs(z), 0.0)
-
+    neg_abs_tstat_matrix = -np.abs(t_stat_matrix)
+    return neg_abs_tstat_matrix
 
 def get_betahats_per_residue(df, n_res, n_sims, colname='betahat'):
     '''
@@ -222,8 +150,6 @@ def compute_all_n_a_tstats(
         min_variants = 10,
         radius = 15,
         pae_cutoff = 15,
-        method = 'tstat',
-        large_threshold = -2.0,
 ):
     adjacency_matrix = get_adjacency_matrix(
         pdb_file_pos_guide,
@@ -255,41 +181,17 @@ def compute_all_n_a_tstats(
     total_sum_betahat = df['betahat'].sum()
     total_sum_betahat_squared = (df['betahat'] ** 2).sum()
 
-    if method not in ('tstat', 'pval', 'hill'):
-        raise ValueError(f"Unknown method '{method}'. Choose from: 'tstat', 'pval', 'hill'")
-
-    # Step 1: always compute the t-statistic first.
-    # Returns -|t| for valid neighborhoods, 0 otherwise.
+    # neg_abs_tstat_matrix: L x (n_sims+1)
+    # negative absolute value of the t-statistic
     neg_abs_tstat_matrix = get_tstat_matrix(
-        n_betahat, sum_betahat, sum_betahat_squared,
-        total_n_betahat, total_sum_betahat, total_sum_betahat_squared,
-        min_variants,
+        n_betahat,
+        sum_betahat,
+        sum_betahat_squared,
+        total_n_betahat,
+        total_sum_betahat,
+        total_sum_betahat_squared,
+        min_variants
     )
-
-    # Step 2: threshold filter.  Entries where -|t| > large_threshold
-    # (i.e. |t| below the threshold) do not pass.
-    pass_mask = neg_abs_tstat_matrix <= large_threshold
-
-    # Step 3: convert passing entries; apply method-specific neutral to non-passing ones.
-    if method == 'tstat':
-        # -|t| already computed; just zero out sub-threshold entries.
-        neg_abs_tstat_matrix = np.where(pass_mask, neg_abs_tstat_matrix, 0)
-    elif method == 'pval':
-        # p-value (two-tailed, Satterthwaite df) for passing entries; 1.0 elsewhere.
-        p_matrix = get_stat_matrix_pval(
-            n_betahat, sum_betahat, sum_betahat_squared,
-            total_n_betahat, total_sum_betahat, total_sum_betahat_squared,
-            min_variants,
-        )
-        neg_abs_tstat_matrix = np.where(pass_mask, p_matrix, 1.0)
-    else:  # 'hill'
-        # -|z| (Hill approximation, Satterthwaite df) for passing entries; 0.0 elsewhere.
-        z_matrix = get_stat_matrix_hill(
-            n_betahat, sum_betahat, sum_betahat_squared,
-            total_n_betahat, total_sum_betahat, total_sum_betahat_squared,
-            min_variants,
-        )
-        neg_abs_tstat_matrix = np.where(pass_mask, z_matrix, 0.0)
 
     # Create a mask to avoid division by zero
     valid_n = n_betahat > 0
@@ -321,7 +223,7 @@ def write_df_n_a_tstats(results_dir, uniprot_id, df_n_a_tstats, n_a_tstat_file):
         write_dataset(fid, f'{uniprot_id}_null_n_a_tstat', df_n_a_tstats[null_n_a_tstat_cols])
         write_dataset(fid, f'{uniprot_id}_mean_beta', df_n_a_tstats[['mean_betahat', 'n_betahat']])
 
-def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir, uniprot_id, radius, pae_cutoff, n_sims, min_variants, large_threshold, n_a_tstat_file, method='tstat', select_nbhds=None):
+def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir, uniprot_id, radius, pae_cutoff, n_sims, min_variants, large_threshold, n_a_tstat_file):
     df_n_a_tstats = compute_all_n_a_tstats(
         df,
         pdb_file_pos_guide,
@@ -332,17 +234,7 @@ def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir,
         min_variants,
         radius,
         pae_cutoff,
-        method=method,
-        large_threshold=large_threshold,
     )
-
-    # If a neighborhood selection was provided, retain only the requested aa_pos rows.
-    # df_n_a_tstats uses a 0-based index; aa_pos in the selection file is 1-based.
-    if select_nbhds is not None:
-        selected_pos = select_nbhds.loc[
-            select_nbhds['uniprot_id'] == uniprot_id, 'aa_pos'
-        ].values
-        df_n_a_tstats = df_n_a_tstats[df_n_a_tstats.index.isin(selected_pos - 1)]
 
     # Zero out residues with n_a_tstat above a large_threshold
     # tmp_stat = df_n_a_tstats.n_a_tstat
@@ -350,12 +242,10 @@ def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir,
     # tmp_n = df_n_a_tstats.n_betahat
     null_n_a_tstat_cols = [c for c in df_n_a_tstats.columns if c.startswith('null_n_a_tstat')]
     cols = null_n_a_tstat_cols #+ ['n_a_tstat']
-
-    # Older mask before introducing the method-specific neutral values:
-    # df_n_a_tstats.loc[:, cols] = df_n_a_tstats.loc[:, cols].mask(
-    #     df_n_a_tstats.loc[:, cols] > large_threshold,
-    #     0
-    # )
+    df_n_a_tstats.loc[:, cols] = df_n_a_tstats.loc[:, cols].mask(
+        df_n_a_tstats.loc[:, cols] > large_threshold,
+        0
+    )
     ## Test:
     # mask_rows = df_n_a_tstats["n_betahat"] < 30
     # # Zero out selected columns for those rows
@@ -363,18 +253,7 @@ def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir,
 
     write_df_n_a_tstats(results_dir, uniprot_id, df_n_a_tstats, n_a_tstat_file)
 
-    # Determine whether any neighborhood has a non-neutral statistic.
-    # Neutral values differ by method: 1.0 for 'pval' (p-values are never < -2.0,
-    # so the old `lt(large_threshold)` check always returned False for pval),
-    # and 0.0 for 'tstat'/'hill'.
-    neutral_value = 1.0 if method == 'pval' else 0.0
-    n_passing = (df_n_a_tstats['n_a_tstat'] != neutral_value).sum()
-    logger.info(
-        f"{uniprot_id}: {n_passing} neighborhoods with non-neutral statistic "
-        f"(method='{method}', neutral={neutral_value})"
-    )
-
-    if n_passing > 0:
+    if df_n_a_tstats.n_a_tstat.lt(large_threshold).any():
         return 1
     else:
         return 0
@@ -411,7 +290,7 @@ def _filter_proteins_for_valid_tests(df_rvas, df_fdr_filter, threshold=10):
     return uniprot_id_list
 
 
-def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, remove_nbhd, min_variants, large_threshold, n_a_tstat_file, method='tstat', select_nbhds=None):
+def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, remove_nbhd, min_variants, large_threshold, n_a_tstat_file):
     """Process each protein individually with scan test."""
     pdb_file_pos_guide = f'{reference_dir}/pdb_pae_file_pos_guide.tsv'
     pdb_dir = f'{reference_dir}/pdb_files/'
@@ -443,9 +322,9 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
             # add filter to at least 10 betahats
             
             valid_protein = scan_test_one_protein(
-                df, pdb_file_pos_guide, pdb_dir, pae_dir,
+                df, pdb_file_pos_guide, pdb_dir, pae_dir, 
                 results_dir, uniprot_id, radius, pae_cutoff, n_sims, min_variants, large_threshold,
-                n_a_tstat_file, method=method, select_nbhds=select_nbhds,
+                n_a_tstat_file
             )
             count_proteins = count_proteins + valid_protein
 
@@ -484,8 +363,6 @@ def q_scan_test(
     fdr_file,
     n_a_tstat_file,
     remove_nbhd,
-    method='tstat',
-    select_nbhds=None,
 ):
     """
     Perform scan test analysis on protein structure data.
@@ -516,18 +393,12 @@ def q_scan_test(
     
     # Filter proteins by allele count
     uniprot_id_list = _filter_proteins_for_valid_tests(df_processed, df_fdr_filter)
-
-    # If a neighborhood selection file was provided, restrict to those proteins only
-    if select_nbhds is not None:
-        selected_uniprots = set(select_nbhds['uniprot_id'].unique())
-        uniprot_id_list = [u for u in uniprot_id_list if u in selected_uniprots]
-        logger.info(f"After applying --select-nbhds: {len(uniprot_id_list)} proteins to process")
-
+    
     # Process each protein
     count_proteins = _process_proteins_batch(
-        df_processed, uniprot_id_list, reference_dir,
+        df_processed, uniprot_id_list, reference_dir, 
         radius, pae_cutoff, results_dir, n_sims, remove_nbhd, min_variants, large_threshold,
-        n_a_tstat_file, method=method, select_nbhds=select_nbhds,
+        n_a_tstat_file
     )
     
     if count_proteins == 0:

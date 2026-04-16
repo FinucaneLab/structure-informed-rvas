@@ -326,6 +326,16 @@ if __name__ == '__main__':
                 degrees of freedom.
         '''
     )
+    parser.add_argument(
+        '--select-nbhds',
+        type=str,
+        default=None,
+        help='''
+        Path to a tab-separated file with columns "uniprot_id" and "aa_pos" specifying
+        the exact set of neighborhoods to test. If not provided, all neighborhoods for
+        all qualifying proteins are tested (default behavior).
+        '''
+    )
     args = parser.parse_args()
 
     # Input validation
@@ -371,6 +381,12 @@ if __name__ == '__main__':
         args.dont_remove_common,
     )
 
+    if args.select_nbhds is not None:
+        select_nbhds = pd.read_csv(args.select_nbhds, sep='\t', usecols=['uniprot_id', 'aa_pos'])
+        logger.info(f"Loaded {len(select_nbhds)} selected neighborhoods from {args.select_nbhds}")
+    else:
+        select_nbhds = None
+
 
     did_nothing = True
 
@@ -398,6 +414,7 @@ if __name__ == '__main__':
             args.pval_file,
             args.remove_nbhd,
             args.stat_method,
+            select_nbhds,
         )
         did_nothing = False
 
