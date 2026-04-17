@@ -493,8 +493,6 @@ def q_scan_test(
     Main orchestration function for the structure-informed rare variant association study.
     Processes variants across proteins and computes statistical associations with 3D neighborhoods.
     """
-    df_rvas = df_rvas.rename(columns={"ac_case": "betahat"})
-
     # logger.info("df_rvas columns: " + ", ".join(df_rvas.columns))
     # logger.info(f"df_rvas: {df_rvas.head()}")
 

@@ -43,6 +43,60 @@ def load_ref_for_chrom(path, chrom, pos_filter):
     return df
 
 
+def map_to_protein_q(
+    rvas_path,
+    beta_col,
+    reference_directory,
+    which_proteins='all',
+    genome_build=None,
+    delimiter=None,
+):
+    '''
+    Quantitative analogue of map_to_protein. Expects columns chr, pos, ref, alt plus
+    a column named by beta_col (default "BETA"). Any additional columns are dropped
+    immediately after loading to keep memory usage low.
+
+    Returns a dataframe with columns: uniprot_id, aa_pos, aa_ref, aa_alt, betahat
+    '''
+    pandas_engine = 'python' if delimiter is None else None
+    compression = 'gzip' if rvas_path.endswith('.bgz') else 'infer'
+    rvas_data = pd.read_csv(rvas_path, sep=delimiter, engine=pandas_engine, compression=compression)
+
+    if beta_col not in rvas_data.columns:
+        raise ValueError(
+            f"Beta column '{beta_col}' not found in input data. "
+            f"Available columns: {list(rvas_data.columns)}"
+        )
+
+    # Rename effect-size column and drop everything else beyond the positional columns
+    rvas_data = rvas_data.rename(columns={beta_col: 'betahat'})
+    rvas_data = rvas_data[['chr', 'pos', 'ref', 'alt', 'betahat']]
+
+    # Build Variant ID in chr-pos-ref-alt format
+    rvas_data['Variant ID'] = (
+        rvas_data['chr'].astype(str) + '-' +
+        rvas_data['pos'].astype(str) + '-' +
+        rvas_data['ref'] + '-' +
+        rvas_data['alt']
+    )
+
+    result = []
+    ref_path = f'{reference_directory}/all_missense_variants_gr38.h5'
+    for chrom, rvas_data_by_chr in rvas_data.groupby('chr'):
+        ref = load_ref_for_chrom(ref_path, chrom, rvas_data_by_chr['pos'])
+        if ref is None:
+            continue
+        joined = rvas_data_by_chr.join(ref, on='Variant ID', how='inner', rsuffix='_ref')
+        joined = joined[['uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt', 'betahat']]
+        result.append(joined)
+
+    if not result:
+        logger.warning('Could not identify any proteins.')
+        return pd.DataFrame(columns=['uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt', 'betahat'])
+
+    return pd.concat(result)
+
+
 def map_to_protein(
     rvas_path,
     variant_id_col,

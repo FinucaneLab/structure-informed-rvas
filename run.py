@@ -5,8 +5,9 @@ import numpy as np
 import os
 import h5py
 import glob
+from scan_test import scan_test
 from q_scan_test import q_scan_test
-from read_data import map_to_protein
+from read_data import map_to_protein, map_to_protein_q
 #from pymol_code import run_all
 #from pymol_code import make_movie_from_pse
 from logger_config import get_logger
@@ -96,6 +97,67 @@ def map_and_filter_rvas(
     return df_rvas, df_filter
 
 
+def map_and_filter_rvas_q(
+        rvas_data_to_map,
+        beta_col,
+        reference_dir,
+        uniprot_id,
+        genome_build,
+        df_filter,
+):
+    '''
+    Quantitative analogue of map_and_filter_rvas.
+    Loads chr,pos,ref,alt,BETA input (extra columns dropped for memory efficiency),
+    maps variants to proteins, and applies protein/FDR filters.
+    No allele-count filter or common-variant removal (not applicable to quantitative data).
+    '''
+    if rvas_data_to_map is not None:
+        df_rvas = map_to_protein_q(
+            rvas_data_to_map,
+            beta_col,
+            reference_dir,
+            uniprot_id,
+            genome_build,
+        )
+    else:
+        df_rvas = None
+
+    # Load FDR filter if provided
+    if df_filter is not None:
+        filter_files = df_filter.split(',')
+        def read_filter_file(f):
+            df_f = pd.read_csv(f, sep='\t')
+            if 'aa_pos' in df_f.columns:
+                df_f = df_f[['uniprot_id', 'aa_pos']]
+            else:
+                df_f = df_f[['uniprot_id']]
+            return df_f.drop_duplicates()
+        df_filter = read_filter_file(filter_files[0])
+        for f in filter_files[1:]:
+            df_filter = pd.merge(df_filter, read_filter_file(f))
+        uniprots_from_fdr_filter = list(df_filter[['uniprot_id']].drop_duplicates().values.flatten())
+    else:
+        df_filter = None
+
+    if uniprot_id is not None:
+        if os.path.exists(uniprot_id):
+            uniprot_list = [x.rstrip() for x in open(uniprot_id).readlines()]
+        else:
+            uniprot_list = uniprot_id.split(',')
+        if df_filter is not None:
+            uniprot_list = list(set(uniprots_from_fdr_filter) & set(uniprot_list))
+    elif df_filter is not None:
+        uniprot_list = uniprots_from_fdr_filter
+    else:
+        uniprot_list = None
+
+    if uniprot_list is not None and df_rvas is not None:
+        df_rvas = pd.merge(df_rvas, pd.DataFrame({'uniprot_id': uniprot_list}),
+                           on='uniprot_id', how='inner')
+
+    return df_rvas, df_filter
+
+
 if __name__ == '__main__':
     start_time = time.time()
     parser=argparse.ArgumentParser()
@@ -104,12 +166,13 @@ if __name__ == '__main__':
         type=str,
         default=None,
         help='''
-            .tsv.gz file with columns chr, pos, ref, alt, ac_case, ac_control.
-            If chr/pos/ref/alt are not available, can also provide a column with 
-            variant ID in chr:pos:ref:alt or chr-pos-ref-alt format with the 
-            --variant-id-col flag. Can also use --ac-case-col and --ac-control-col
-            flags to specify different column names for allele counts in cases
-            and controls.
+            For --run-3dnt (binary): .tsv.gz with columns chr, pos, ref, alt,
+            ac_case, ac_control. A variant-ID column may be supplied instead of
+            chr/pos/ref/alt via --variant-id-col; column name overrides are
+            available via --ac-case-col and --ac-control-col.
+            For --run-q3dnt (quantitative): .tsv.gz with columns chr, pos, ref,
+            alt, BETA (or the name given by --beta-col). Additional columns are
+            allowed and will be ignored.
         ''',
     )
     parser.add_argument(
@@ -132,7 +195,19 @@ if __name__ == '__main__':
         '--run-3dnt',
         action='store_true',
         default=False,
-        help = 'perform the 3D neighborhood test',
+        help='Perform the 3D neighborhood scan test for binary phenotypes (calls scan_test).',
+    )
+    parser.add_argument(
+        '--run-q3dnt',
+        action='store_true',
+        default=False,
+        help='Perform the 3D neighborhood scan test for quantitative phenotypes (calls q_scan_test).',
+    )
+    parser.add_argument(
+        '--beta-col',
+        type=str,
+        default='betahat',
+        help='Name of the effect-size column in the --rvas-data-to-map file (used with --run-q3dnt). Default: betahat.',
     )
     parser.add_argument(
         '--neighborhood-radius',
@@ -368,23 +443,34 @@ if __name__ == '__main__':
         os.makedirs(args.results_dir, exist_ok=True)
 
 
-    df_rvas, df_filter = map_and_filter_rvas(
-        args.rvas_data_to_map,
-        args.variant_id_col,
-        args.ac_case_col,
-        args.ac_control_col,
-        args.reference_dir,
-        args.uniprot_id,
-        args.genome_build,
-        args.df_filter,
-        args.ac_filter,
-        args.dont_remove_common,
-    )
-
-    if args.select_nbhds is not None:
-        select_nbhds = pd.read_csv(args.select_nbhds, sep='\t', usecols=['uniprot_id', 'aa_pos'])
-        logger.info(f"Loaded {len(select_nbhds)} selected neighborhoods from {args.select_nbhds}")
+    # Load and map RVAS data using the format appropriate for the selected test
+    if args.run_q3dnt:
+        df_rvas, df_filter = map_and_filter_rvas_q(
+            args.rvas_data_to_map,
+            args.beta_col,
+            args.reference_dir,
+            args.uniprot_id,
+            args.genome_build,
+            args.df_filter,
+        )
+        if args.select_nbhds is not None:
+            select_nbhds = pd.read_csv(args.select_nbhds, sep='\t', usecols=['uniprot_id', 'aa_pos'])
+            logger.info(f"Loaded {len(select_nbhds)} selected neighborhoods from {args.select_nbhds}")
+        else:
+            select_nbhds = None
     else:
+        df_rvas, df_filter = map_and_filter_rvas(
+            args.rvas_data_to_map,
+            args.variant_id_col,
+            args.ac_case_col,
+            args.ac_control_col,
+            args.reference_dir,
+            args.uniprot_id,
+            args.genome_build,
+            args.df_filter,
+            args.ac_filter,
+            args.dont_remove_common,
+        )
         select_nbhds = None
 
 
@@ -395,8 +481,28 @@ if __name__ == '__main__':
         df_rvas.to_csv(args.save_df_rvas, sep='\t', index=False)
         did_nothing = False
 
-    if args.run_3dnt: 
-        logger.info("Starting scan test analysis")
+    if args.run_3dnt:
+        logger.info("Starting binary scan test analysis")
+        scan_test(
+            df_rvas,
+            args.reference_dir,
+            args.neighborhood_radius,
+            args.pae_cutoff,
+            args.results_dir,
+            args.n_sims,
+            args.no_fdr,
+            args.fdr_only,
+            args.fdr_cutoff,
+            df_filter,
+            args.ignore_ac,
+            args.fdr_file,
+            args.pval_file,
+            args.remove_nbhd,
+        )
+        did_nothing = False
+
+    elif args.run_q3dnt:
+        logger.info("Starting quantitative scan test analysis")
         q_scan_test(
             df_rvas,
             args.reference_dir,
