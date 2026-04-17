@@ -26,6 +26,7 @@ def map_and_filter_rvas(
         df_filter,
         ac_filter,
         dont_remove_common,
+        include_lcr,
 ):
     
     if rvas_data_to_map is not None:
@@ -45,10 +46,10 @@ def map_and_filter_rvas(
     if df_rvas is not None:
         df_rvas = df_rvas[df_rvas.ac_case + df_rvas.ac_control < ac_filter]
         if not dont_remove_common:
-            print("Removing common variants from RVAS data")
+            logger.info("Removing common variants from RVAS data")
             keys = ['uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt']
             df_common_var = pd.read_csv(
-                f'{args.reference_dir}/common_variants_uniprot.tsv',
+                f'{reference_dir}/common_variants_uniprot.tsv',
                 sep='\t',
                 usecols = keys,
             )
@@ -56,6 +57,22 @@ def map_and_filter_rvas(
             df_rvas = df_rvas.set_index(keys)
             df_rvas = df_rvas[~df_rvas.index.isin(to_remove)]
             df_rvas = df_rvas.reset_index()
+
+        if not include_lcr:
+            lcr_path = f'{reference_dir}/lcr_positions_uniprot.tsv'
+            if not os.path.exists(lcr_path):
+                logger.warning(
+                    f"LCR positions file not found at {lcr_path}. "
+                    "Skipping LCR filter. To suppress this warning, pass --include-lcr."
+                )
+            else:
+                logger.info("Removing variants in low complexity regions")
+                keys = ['uniprot_id', 'aa_pos']
+                df_lcr = pd.read_csv(lcr_path, sep='\t', usecols=keys)
+                lcr_index = df_lcr.set_index(keys).index
+                df_rvas = df_rvas.set_index(keys)
+                df_rvas = df_rvas[~df_rvas.index.isin(lcr_index)]
+                df_rvas = df_rvas.reset_index()
 
     # Load FDR filter if provided
 
@@ -347,10 +364,10 @@ if __name__ == '__main__':
         help='do not remove common variants from RVAS data',
     )
     parser.add_argument(
-        '--visualization',
+        '--include-lcr',
         action='store_true',
         default=False,
-        help='Run visualization tools on a specific UniProt ID'
+        help='include variants in low complexity regions (LCRs); by default LCR positions are excluded',
     )
     parser.add_argument(
         '--uniprot-id',
@@ -470,11 +487,18 @@ if __name__ == '__main__':
             args.df_filter,
             args.ac_filter,
             args.dont_remove_common,
+            args.include_lcr,
         )
         select_nbhds = None
 
 
     did_nothing = True
+
+    if args.fdr_only and not args.run_3dnt and not args.run_q3dnt:
+        from empirical_fdr import compute_fdr
+        df_results = compute_fdr(args.results_dir, args.fdr_cutoff, df_filter, args.reference_dir, args.pval_file)
+        df_results.to_csv(f'{args.results_dir}/{args.fdr_file}', sep='\t', index=False)
+        did_nothing = False
 
     if args.save_df_rvas is not None:
         logger.info(f"Saving mapped RVAS dataframe to {args.save_df_rvas}")
@@ -524,12 +548,6 @@ if __name__ == '__main__':
         )
         did_nothing = False
 
-    elif args.visualization:
-        if not (args.uniprot_id and args.reference_dir and args.results_dir):
-            raise ValueError("For visualization, you must provide --uniprot_id, --reference_dir and --results_dir")
-        run_all(args.uniprot_id, args.results_dir, args.reference_dir)
-        did_nothing = False
-    
     elif args.make_movie:
         if not (args.pse and args.results_dir):
             raise ValueError("For making a movie, you must provide --pse and --results_dir")

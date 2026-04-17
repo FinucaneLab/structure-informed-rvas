@@ -22,13 +22,11 @@ def _prepare_fdr_filters(df_fdr_filter):
     
     uniprot_filter_list = np.unique(df_fdr_filter['uniprot_id'])
     aa_pos_filters = None
-    
+
     # Extract amino acid positions to keep for each protein
     if 'aa_pos' in df_fdr_filter.columns:
-        aa_pos_filters = {}
-        for uniprot_id in uniprot_filter_list:
-            aa_pos_keep = set(df_fdr_filter.loc[df_fdr_filter.uniprot_id == uniprot_id, 'aa_pos'].values)
-            aa_pos_filters[uniprot_id] = aa_pos_keep
+        grouped = df_fdr_filter.groupby('uniprot_id')['aa_pos'].apply(set)
+        aa_pos_filters = grouped.to_dict()
     
     return uniprot_filter_list, aa_pos_filters
 
@@ -223,8 +221,8 @@ def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file
     df_results = _apply_corrections(df_pvals, false_discoveries, fwer)
     
     # Add gene name
-    df_gene = pd.read_csv(f'{reference_dir}/gene_to_uniprot_id.tsv', sep='\t')
-    df_results = df_results.merge(df_gene, how='left', on='uniprot_id')
+    df_gene = pd.read_csv(f'{reference_dir}/protein_sequence_guide.tsv', sep='\t')
+    df_results = df_results.merge(df_gene[['gene_name', 'uniprot_id']], how='left', on='uniprot_id')
     
     # Summarize and return results
     summarize_results(df_results, fdr_cutoff)
