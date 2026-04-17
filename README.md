@@ -32,7 +32,7 @@ working-directory/
 ```
 To set this up:
 
-1. Download sir-data.tar.gz [here](https://www.dropbox.com/scl/fi/t4it7sa9lkdx9maj0vois/sir-data.tar.gz?rlkey=flvsvmzyopj1cbn6gya0c3am0&st=uyk0l7iw&dl=0) or `wget -O sir-data.tar.gz "https://www.dropbox.com/scl/fi/t4it7sa9lkdx9maj0vois/sir-data.tar.gz?rlkey=flvsvmzyopj1cbn6gya0c3am0&st=uyk0l7iw&dl=1"`
+1. Download sir-data.tar.gz [here](https://www.dropbox.com/scl/fi/83t5e8u33refxp1rin2sv/sir-data.tar.gz?rlkey=ect07qn4dmp6ewhnrp7jyymej&st=rke4l0y9&dl=0) or `wget -O sir-data.tar.gz "https://www.dropbox.com/scl/fi/83t5e8u33refxp1rin2sv/sir-data.tar.gz?rlkey=ect07qn4dmp6ewhnrp7jyymej&st=rke4l0y9&dl=0"`
 2. Move sir-data.tar.gz to your working directory
 3. Extract it: `tar -xzf sir-data.tar.gz`
 4. (Optional) Remove the archive: `rm sir-data.tar.gz`
