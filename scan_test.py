@@ -12,6 +12,10 @@ from empirical_fdr import compute_fdr
 
 logger = get_logger(__name__)
 
+MULTI_RADII_SMALL = [6, 9, 12, 15, 18, 21]
+MULTI_RADII_BIG = [10, 15, 20, 30, 40]
+P_FLOOR = np.finfo(float).tiny
+
 def get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_ctrl):
     max_n_case_nbhd = np.max(n_case_nbhd_mat)
     max_n_control_nbhd = np.max(n_control_nbhd_mat)
@@ -76,6 +80,12 @@ def get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_
     
     return pvals
 
+def _compute_pval_matrix_for_radius(adjacency_matrix, case_ac_matrix, control_ac_matrix, n_case, n_control):
+    n_case_nbhd = get_nbhd_counts(adjacency_matrix, case_ac_matrix)
+    n_control_nbhd = get_nbhd_counts(adjacency_matrix, control_ac_matrix)
+    pval_lookup = get_pval_lookup_case_control(n_case_nbhd, n_control_nbhd, n_case, n_control)
+    return pval_lookup[n_case_nbhd, n_control_nbhd], n_case_nbhd, n_control_nbhd
+
 def get_nbhd_counts(adjacency_matrix, ac_per_residue):
     # allele count per residue has one row per residue and one
     # column per simulation
@@ -117,31 +127,70 @@ def compute_all_pvals(
         radius = 15,
         pae_cutoff = 15,
 ):
-    adjacency_matrix = get_adjacency_matrix(
-        pdb_file_pos_guide,
-        pdb_dir,
-        pae_dir,
-        uniprot_id,
-        radius,
-        pae_cutoff,
-    )
-    n_res = adjacency_matrix.shape[0]
-    
-    case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(df, n_res, n_sims)
-    n_case = case_ac_matrix[:,0].sum()
-    n_control = control_ac_matrix[:,0].sum()
-    n_case_nbhd_mat = get_nbhd_counts(adjacency_matrix, case_ac_matrix)
-    n_control_nbhd_mat = get_nbhd_counts(adjacency_matrix, control_ac_matrix)
-    pval_lookup = get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_control)
-    pval_matrix = pval_lookup[n_case_nbhd_mat, n_control_nbhd_mat]
+    if radius in ('multiple-small', 'multiple-big'):
+        radii = MULTI_RADII_SMALL if radius == 'multiple-small' else MULTI_RADII_BIG
+        adj_matrices = {
+            r: get_adjacency_matrix(pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id, r, pae_cutoff)
+            for r in radii
+        }
+        n_res = adj_matrices[radii[0]].shape[0]
+        case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(df, n_res, n_sims)
+        n_case = case_ac_matrix[:,0].sum()
+        n_control = control_ac_matrix[:,0].sum()
+
+        pval_mats = []
+        nbhd_counts = {}
+        for r in radii:
+            pval_mat, n_case_nbhd, n_ctrl_nbhd = _compute_pval_matrix_for_radius(
+                adj_matrices[r], case_ac_matrix, control_ac_matrix, n_case, n_control
+            )
+            pval_mats.append(pval_mat)
+            nbhd_counts[r] = (n_case_nbhd, n_ctrl_nbhd)
+
+        stacked = np.stack(pval_mats, axis=0)  # (n_radii, n_res, n_sims+1)
+        stacked = np.maximum(stacked, P_FLOOR)
+        pval_matrix = len(radii) / np.sum(1.0 / stacked, axis=0)
+
+        # Per-position best radius: the radius with the smallest observed p-value
+        best_radius_idx = np.argmin(stacked[:, :, 0], axis=0)   # (n_res,)
+        radius_col = np.array([radii[i] for i in best_radius_idx], dtype=float)
+
+        # Build nbhd counts from each position's best radius
+        case_nbhd_by_radius = np.stack([nbhd_counts[r][0][:, 0] for r in radii], axis=0)  # (n_radii, n_res)
+        ctrl_nbhd_by_radius = np.stack([nbhd_counts[r][1][:, 0] for r in radii], axis=0)
+        _pos_idx = np.arange(case_nbhd_by_radius.shape[1])
+        n_case_nbhd_mat    = case_nbhd_by_radius[best_radius_idx, _pos_idx].reshape(-1, 1)
+        n_control_nbhd_mat = ctrl_nbhd_by_radius[best_radius_idx, _pos_idx].reshape(-1, 1)
+
+        adjacency_matrix = adj_matrices[15]  # used only for --remove-nbhd; radius 15 is a reasonable default
+    else:
+        adjacency_matrix = get_adjacency_matrix(
+            pdb_file_pos_guide,
+            pdb_dir,
+            pae_dir,
+            uniprot_id,
+            radius,
+            pae_cutoff,
+        )
+        n_res = adjacency_matrix.shape[0]
+        case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(df, n_res, n_sims)
+        n_case = case_ac_matrix[:,0].sum()
+        n_control = control_ac_matrix[:,0].sum()
+        n_case_nbhd_mat = get_nbhd_counts(adjacency_matrix, case_ac_matrix)
+        n_control_nbhd_mat = get_nbhd_counts(adjacency_matrix, control_ac_matrix)
+        pval_lookup = get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_control)
+        pval_matrix = pval_lookup[n_case_nbhd_mat, n_control_nbhd_mat]
+        radius_col = float(radius)
+
     pval_columns = ['p_value'] + [f'null_pval_{i}' for i in range(n_sims)]
     df_pvals = pd.DataFrame(columns = pval_columns, data = pval_matrix)
     df_pvals['nbhd_case'] = n_case_nbhd_mat[:,0]
     df_pvals['nbhd_control'] = n_control_nbhd_mat[:,0]
+    df_pvals['radius'] = radius_col
     # Add original per-residue mutation counts
     df_pvals['original_case'] = case_ac_matrix[:,0]
     df_pvals['original_control'] = control_ac_matrix[:,0]
-    df_pvals = df_pvals[['nbhd_case', 'nbhd_control', 'original_case', 'original_control'] + pval_columns]
+    df_pvals = df_pvals[['nbhd_case', 'nbhd_control', 'radius', 'original_case', 'original_control'] + pval_columns]
     return df_pvals, adjacency_matrix
 
 def write_df_pvals(results_dir, uniprot_id, df_pvals, pval_file):
@@ -150,6 +199,7 @@ def write_df_pvals(results_dir, uniprot_id, df_pvals, pval_file):
         write_dataset(fid, f'{uniprot_id}', df_pvals[['p_value']])
         write_dataset(fid, f'{uniprot_id}_null_pval', df_pvals[null_pval_cols])
         write_dataset(fid, f'{uniprot_id}_nbhd', df_pvals[['nbhd_case', 'nbhd_control']])
+        write_dataset(fid, f'{uniprot_id}_radius', df_pvals[['radius']])
         write_dataset(fid, f'{uniprot_id}_original', df_pvals[['original_case', 'original_control']])
 
 def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir, uniprot_id, radius, pae_cutoff, n_sims, pval_file):
@@ -206,12 +256,13 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
         try:
             df = df_rvas[df_rvas.uniprot_id == uniprot_id]
             if remove_nbhd is not None:
+                    adj_radius = 15 if radius == 'multiple' else radius
                     adjacency_matrix = get_adjacency_matrix(
                         pdb_file_pos_guide,
                         pdb_dir,
                         pae_dir,
                         uniprot_id,
-                        radius,
+                        adj_radius,
                         pae_cutoff,
                     )
                     for to_remove in map(int, remove_nbhd.split(',')):

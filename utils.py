@@ -217,20 +217,24 @@ def read_p_values(fid, uniprot_id):
     """
     pvalue_data = fid[uniprot_id][:]
     case_control = fid[f'{uniprot_id}_nbhd'][:]
-    
+
     # Calculate ratio on-the-fly
     nbhd_case = case_control[:, 0]
     nbhd_control = case_control[:, 1]
     n_case_total = nbhd_case.sum()
     n_control_total = nbhd_control.sum()
     ratio = (nbhd_case + 2) / (nbhd_control + 2 * n_control_total / n_case_total)
-    
+
+    radius_key = f'{uniprot_id}_radius'
+    radius_vals = fid[radius_key][:, 0].astype(float) if radius_key in fid else np.full(len(nbhd_case), np.nan)
+
     df = pd.DataFrame({'uniprot_id': uniprot_id,
                        'aa_pos': np.arange(1, pvalue_data.shape[0]+1),
                        'p_value': pvalue_data[:, 0],
                        'ratio': ratio,
                        'nbhd_case': nbhd_case,
-                       'nbhd_control': nbhd_control})
+                       'nbhd_control': nbhd_control,
+                       'radius': radius_vals})
     return df
 
 def read_original_mutation_data(fid, uniprot_id):

@@ -14,6 +14,7 @@ logger = get_logger(__name__)
 
 def map_and_filter_rvas(
         rvas_data_to_map,
+        pre_mapped_rvas,
         variant_id_col,
         ac_case_col,
         ac_control_col,
@@ -25,8 +26,11 @@ def map_and_filter_rvas(
         dont_remove_common,
         include_lcr,
 ):
-    
-    if rvas_data_to_map is not None:
+
+    if pre_mapped_rvas is not None:
+        logger.info(f"Loading pre-mapped RVAS dataframe from {pre_mapped_rvas}")
+        df_rvas = pd.read_csv(pre_mapped_rvas, sep='\t')
+    elif rvas_data_to_map is not None:
         df_rvas = map_to_protein(
             rvas_data_to_map,
             variant_id_col,
@@ -40,7 +44,7 @@ def map_and_filter_rvas(
         df_rvas = None
 
 
-    if df_rvas is not None:
+    if df_rvas is not None and pre_mapped_rvas is None:
         df_rvas = df_rvas[df_rvas.ac_case + df_rvas.ac_control < ac_filter]
         if not dont_remove_common:
             logger.info("Removing common variants from RVAS data")
@@ -104,12 +108,22 @@ def map_and_filter_rvas(
     else:
         uniprot_list = None
     
-    if uniprot_list is not None and df_rvas is not None:
+    if uniprot_list is not None and df_rvas is not None and pre_mapped_rvas is None:
         df_filter_uniprot = pd.DataFrame({'uniprot_id': uniprot_list})
         df_rvas = pd.merge(df_rvas, df_filter_uniprot, on='uniprot_id', how='inner')
     
     return df_rvas, df_filter
 
+
+def _neighborhood_radius_type(value):
+    if value in ('multiple-small', 'multiple-big'):
+        return value
+    try:
+        return float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"Invalid neighborhood radius: '{value}'. Must be a number, 'multiple-small', or 'multiple-big'."
+        )
 
 if __name__ == '__main__':
     parser=argparse.ArgumentParser()
@@ -150,9 +164,9 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--neighborhood-radius',
-        type=float,
+        type=_neighborhood_radius_type,
         default=15.0,
-        help='neighborhood radius (in Angstroms)',
+        help="neighborhood radius in Angstroms, 'multiple-small' to test radii 6,9,12,15,18,21, or 'multiple-big' to test radii 10,15,20,30,40; both combine p-values with harmonic mean",
     )
     parser.add_argument(
         '--pae-cutoff',
@@ -226,8 +240,8 @@ if __name__ == '__main__':
     parser.add_argument(
         '--pval-file',
         type=str,
-        default='p_values.h5',
-        help='p-value file name to save p-values to.'
+        default=None,
+        help='p-value file name to save p-values to. Defaults to the fdr file name with .h5 extension.'
     )
     parser.add_argument(
         '--combine-pval-files',
@@ -271,6 +285,38 @@ if __name__ == '__main__':
         help='''
         Save the mapped RVAS dataframe. This can be run with only --rvas-data-to-map and
         --reference-dir and will perform the mapping with no additional analysis.
+        '''
+    )
+    parser.add_argument(
+        '--pre-mapped-rvas',
+        type=str,
+        default=None,
+        help='''
+        Path to an already-mapped RVAS dataframe (TSV) produced by a previous run with
+        --save-df-rvas. Skips map_to_protein and all variant-level filters (AC, common
+        variants, LCR); df_filter is still processed if --df-filter is provided (for FDR).
+        '''
+    )
+    parser.add_argument(
+        '--permute',
+        action='store_true',
+        default=False,
+        help='''
+        Permute case/control allele counts within each gene (uniprot_id) before saving
+        with --save-df-rvas. Within each gene the total case and control allele counts are
+        preserved; individual variant counts are redrawn from the hypergeometric distribution
+        (equivalent to shuffling allele labels at random). Requires --save-df-rvas.
+        '''
+    )
+    parser.add_argument(
+        '--permute-gene-filter',
+        type=str,
+        default=None,
+        help='''
+        Comma-separated list of filter files (same format as --df-filter) whose uniprot_id
+        columns are intersected to define the set of genes to permute. Only variants in those
+        genes are written to the --save-df-rvas output; all variants per gene are retained
+        (no position-level filtering). Requires --permute.
         '''
     )
     parser.add_argument(
@@ -323,12 +369,22 @@ if __name__ == '__main__':
     )
     args = parser.parse_args()
 
+    # Derive pval file name from fdr file name if not explicitly set
+    if args.pval_file is None:
+        if args.fdr_file.endswith('.fdr.tsv'):
+            base = args.fdr_file[:-len('.fdr.tsv')]
+        elif args.fdr_file.endswith('.tsv'):
+            base = args.fdr_file[:-len('.tsv')]
+        else:
+            base = args.fdr_file
+        args.pval_file = base + '.pvals.h5'
+
     # Input validation
     
     if args.genome_build not in ['hg37', 'hg38']:
         raise ValueError(f"Invalid genome build: {args.genome_build}. Must be 'hg37' or 'hg38'")
     
-    if args.neighborhood_radius < 0:
+    if args.neighborhood_radius not in ('multiple-small', 'multiple-big') and args.neighborhood_radius < 0:
         raise ValueError(f"Neighborhood radius must be non-negative, got {args.neighborhood_radius}")
     
     if args.pae_cutoff < 0:
@@ -347,14 +403,21 @@ if __name__ == '__main__':
 
     if args.reference_dir and not os.path.exists(args.reference_dir):
         raise FileNotFoundError(f"Reference directory not found: {args.reference_dir}")
-    
+
     if args.results_dir and not os.path.exists(args.results_dir):
         logger.info(f"Creating results directory: {args.results_dir}")
         os.makedirs(args.results_dir, exist_ok=True)
 
+    if args.permute and args.save_df_rvas is None:
+        raise ValueError("--permute requires --save-df-rvas")
+    if args.permute_gene_filter is not None and not args.permute:
+        raise ValueError("--permute-gene-filter requires --permute")
+    if args.pre_mapped_rvas is not None and args.rvas_data_to_map is not None:
+        raise ValueError("--pre-mapped-rvas and --rvas-data-to-map are mutually exclusive")
 
     df_rvas, df_filter = map_and_filter_rvas(
         args.rvas_data_to_map,
+        args.pre_mapped_rvas,
         args.variant_id_col,
         args.ac_case_col,
         args.ac_control_col,
@@ -371,6 +434,35 @@ if __name__ == '__main__':
     did_nothing = True
 
     if args.save_df_rvas is not None:
+        if args.permute:
+            logger.info("Permuting case/control labels within each gene (hypergeometric)")
+            if args.permute_gene_filter is not None:
+                filter_files = args.permute_gene_filter.split(',')
+                gene_sets = [
+                    set(pd.read_csv(f, sep='\t')['uniprot_id'].unique())
+                    for f in filter_files
+                ]
+                permute_uniprot_ids = gene_sets[0].intersection(*gene_sets[1:])
+                df_rvas = df_rvas[df_rvas['uniprot_id'].isin(permute_uniprot_ids)].reset_index(drop=True)
+                logger.info(f"Restricting permutation to {len(permute_uniprot_ids)} genes from --permute-gene-filter")
+            rng = np.random.default_rng()
+            for uniprot, idx in df_rvas.groupby('uniprot_id').groups.items():
+                ac_case = df_rvas.loc[idx, 'ac_case'].values.astype(int)
+                ac_control = df_rvas.loc[idx, 'ac_control'].values.astype(int)
+                n_each = ac_case + ac_control
+                # Explode: one entry per allele across all variants, 1=case 0=control
+                labels = np.repeat([1, 0], [ac_case.sum(), ac_control.sum()])
+                rng.shuffle(labels)
+                # Group back: count case alleles per variant
+                ends = np.cumsum(n_each)
+                starts = np.concatenate([[0], ends[:-1]])
+                new_ac_case = np.array([labels[s:e].sum() for s, e in zip(starts, ends)])
+                df_rvas.loc[idx, 'ac_case'] = new_ac_case
+                df_rvas.loc[idx, 'ac_control'] = n_each - new_ac_case
+            # Remove any variants that appear in more than one gene
+            counts = df_rvas['Variant ID'].value_counts()
+            df_rvas = df_rvas[df_rvas['Variant ID'].isin(counts[counts == 1].index)].reset_index(drop=True)
+            logger.info(f"After removing multi-gene variants: {len(df_rvas)} variants")
         logger.info(f"Saving mapped RVAS dataframe to {args.save_df_rvas}")
         df_rvas.to_csv(args.save_df_rvas, sep='\t', index=False)
         did_nothing = False
@@ -410,7 +502,22 @@ if __name__ == '__main__':
     elif args.get_nbhd:
         if not (args.uniprot_id and args.reference_dir and args.aa_pos):
             raise ValueError("For neighborhood residue lists, you must provide --uniprot_id, --reference_dir and --aa_pos")
-        nbhd, cases, cntrls = get_nbhd_info(df_rvas, args.uniprot_id, args.aa_pos, args.reference_dir, args.neighborhood_radius, args.pae_cutoff)
+        if args.neighborhood_radius in ('multiple-small', 'multiple-big'):
+            # Look up the per-position best radius recorded in the FDR file
+            fdr_path = os.path.join(args.results_dir, args.fdr_file)
+            nbhd_radius = 15.0  # fallback
+            if os.path.exists(fdr_path):
+                df_fdr_lookup = pd.read_csv(fdr_path, sep='\t')
+                if 'radius' in df_fdr_lookup.columns:
+                    row_match = df_fdr_lookup[
+                        (df_fdr_lookup['uniprot_id'] == args.uniprot_id) &
+                        (df_fdr_lookup['aa_pos'] == args.aa_pos)
+                    ]
+                    if len(row_match) > 0 and not pd.isna(row_match.iloc[0]['radius']):
+                        nbhd_radius = float(row_match.iloc[0]['radius'])
+        else:
+            nbhd_radius = args.neighborhood_radius
+        nbhd, cases, cntrls = get_nbhd_info(df_rvas, args.uniprot_id, args.aa_pos, args.reference_dir, nbhd_radius, args.pae_cutoff)
         print('Residues in neighborhood:')
         print(nbhd)
         print('Case Variants in neighborhood:')

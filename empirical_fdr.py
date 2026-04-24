@@ -158,7 +158,7 @@ def _apply_corrections(df_pvals, false_discoveries, fwer):
     # Add FWER
     df_pvals['fwer'] = fwer
     
-    return df_pvals[['uniprot_id', 'aa_pos', 'p_value', 'fdr', 'fwer', 'nbhd_case', 'nbhd_control', 'ratio']]
+    return df_pvals[['uniprot_id', 'aa_pos', 'p_value', 'fdr', 'fwer', 'nbhd_case', 'nbhd_control', 'ratio', 'radius']]
 
 
 def summarize_results(df_results, fdr_cutoff, fwer_cutoff=0.05):
