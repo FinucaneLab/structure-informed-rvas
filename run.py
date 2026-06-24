@@ -9,6 +9,7 @@ from read_data import map_to_protein
 from pymol_code import make_movie_from_pse
 from logger_config import get_logger
 from utils import get_nbhd_info
+from annotation_test import annotation_test
 
 logger = get_logger(__name__)
 
@@ -104,6 +105,7 @@ def map_and_filter_rvas(
                 next_fdr_filter = read_filter_file(f)
                 df_filter = pd.merge(df_filter, next_fdr_filter)
         uniprots_from_fdr_filter = list(df_filter[['uniprot_id']].drop_duplicates().values.flatten())
+        print(df_filter.columns)
     else:
         df_filter = None
 
@@ -514,6 +516,23 @@ if __name__ == '__main__':
         default=None,
         help='Amino acid residue position in --uniprot-id for center of desired neighborhood'
     )
+    parser.add_argument(
+        '--annotation_file',
+        type=str,
+        default=None,
+        help='perform a burden test using this annotation',
+    )
+    parser.add_argument(
+        '--annotation_id',
+        type=str,
+        default=None,
+        help='''
+        Can be a column name in annotation_file, 
+        or a comma-separated list of column names. 
+        Used with --annotation_file. Determines what
+        loop_annotations in annotation_test.py will loop over.
+        '''
+    )
     args = parser.parse_args()
 
     # Derive pval file name from fdr file name if not explicitly set
@@ -733,6 +752,21 @@ if __name__ == '__main__':
             args.pval_file,
             args.remove_nbhd,
             args.seed,
+        )
+        did_nothing = False
+    
+    elif args.annotation_file is not None:
+        logger.info('Starting annotation test analysis')
+        annotation_test(
+            df_rvas,
+            args.annotation_file,
+            args.annotation_id,
+            args.reference_dir,
+            args.neighborhood_radius,
+            args.pae_cutoff,
+            args.results_dir,
+            df_filter,
+            args.ignore_ac,
         )
         did_nothing = False
 
