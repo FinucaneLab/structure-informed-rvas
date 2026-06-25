@@ -795,6 +795,8 @@ if __name__ == '__main__':
         else:
             nbhd_radius = args.neighborhood_radius
         nbhd, cases, cntrls = get_nbhd_info(df_rvas, args.uniprot_id, args.aa_pos, args.reference_dir, nbhd_radius, args.pae_cutoff)
+        df_nbhd = pd.concat([cases, cntrls], ignore_index=True)
+        df_nbhd.to_csv(f'{args.uniprot_id}_{args.aa_pos}_nbhd_variants.tsv', sep='\t', index=False)
         print('Residues in neighborhood:')
         print(nbhd)
         print('Case Variants in neighborhood:')

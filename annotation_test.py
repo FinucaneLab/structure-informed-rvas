@@ -69,7 +69,8 @@ def expand_annot_neighborhood(df_annot, pdb_file_pos_guide, pdb_dir, pae_dir, re
     
     adjacency_matrix = adjacency_matrix[:, resAnnot_checked-1] # restrict columns to annotation residues (correct for zero-based indexing)
     is_neighbor = adjacency_matrix.max(axis=1)
-    return np.where(is_neighbor>0)[0]    
+    #return np.where(is_neighbor>0)[0]
+    return np.where(is_neighbor>0)[0] + 1 # re-add one to go back to aa-pos one-based indexing!! 
 
 def loop_annotations(annotation_id, df_rvas, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir, df_annot, df_filter, radius, pae_cutoff):
     
