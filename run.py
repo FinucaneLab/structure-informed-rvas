@@ -204,6 +204,26 @@ if __name__ == '__main__':
         '''
     )
     parser.add_argument(
+        '--max-residues',
+        type=int,
+        default=10000,
+        help='''
+        Skip proteins longer than this. The pairwise distance matrix scales as n_res^2,
+        so titin (34,350 residues) alone would need 9.4 GB. Default 10000 skips 2 of the
+        750 ASD analysis genes.
+        '''
+    )
+    parser.add_argument(
+        '--simulate-null-from-mu',
+        action='store_true',
+        default=False,
+        help='''
+        Replace the observed de novo counts with draws from the mutation rate model and
+        run the full pipeline on them, as a null calibration check. P-values should be
+        uniform and FDR should come out at its nominal level.
+        '''
+    )
+    parser.add_argument(
         '--min-mu-coverage',
         type=float,
         default=0.0,
@@ -640,6 +660,7 @@ if __name__ == '__main__':
             df_filter, args.fdr_file, args.pval_file, args.rate_calibration,
             args.rate_calibration_genes, args.min_denovo, args.n_trios, args.seed,
             args.mu_residue_file, args.mu_col is not None, args.min_mu_coverage,
+            args.max_residues, args.simulate_null_from_mu,
         )
         did_nothing = False
 
@@ -673,6 +694,8 @@ if __name__ == '__main__':
             args.mu_residue_file,
             args.mu_col is not None,
             args.min_mu_coverage,
+            args.max_residues,
+            args.simulate_null_from_mu,
         )
         did_nothing = False
 

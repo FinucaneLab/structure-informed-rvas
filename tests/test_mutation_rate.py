@@ -150,10 +150,89 @@ def test_regional_constraint():
     check('max(p_A, p_B) stays valid', rate_max <= 0.05 * 1.10, f'rate {rate_max:.4f}')
 
 
+def _rejection_rates(x, m, lambda_hat, adj, region, n_g_from_sim=True):
+    """Run both tests on each simulated replicate and pool p-values over `region`."""
+    p_a_all, p_b_all = [], []
+    for s in range(x.shape[1]):
+        col = x[:, s:s + 1]
+        n_g = int(col.sum())
+        if n_g == 0:
+            continue
+        p_a, p_b, _, _, _ = _pvals_for_radius(adj, col, col, m, lambda_hat, n_g, float(m.sum()))
+        p_a_all.append(p_a[region, 0])
+        p_b_all.append(p_b[region, 0])
+    return np.concatenate(p_a_all), np.concatenate(p_b_all)
+
+
+# ---------------------------------------------------------------------------
+def test_gene_level_inflation():
+    """
+    The mirror of the regional-constraint case. A gene uniformly enriched 3x with no
+    spatial clustering: Test A fires everywhere (it is measuring the gene-level excess),
+    Test B stays calibrated, and so does max(p_A, p_B).
+    """
+    print('\n5. Gene-level inflation (mirror case)')
+    n_res, n_sims = 300, 2000
+    adj = banded_adjacency(n_res, 8)
+    rng = np.random.default_rng(11)
+    m = np.full((n_res, 1), 1.0)
+    lambda_hat = 0.2
+
+    x = rng.poisson(3.0 * lambda_hat * m, size=(n_res, n_sims))
+    region = slice(12, n_res - 12)
+    p_a, p_b = _rejection_rates(x, m, lambda_hat, adj, region)
+
+    rate_a = float((p_a <= 0.05).mean())
+    rate_b = float((p_b <= 0.05).mean())
+    rate_max = float((np.maximum(p_a, p_b) <= 0.05).mean())
+    print(f'      rejection at alpha=0.05:  Test A {rate_a:.4f}   Test B {rate_b:.4f}'
+          f'   max {rate_max:.4f}')
+    check('Test A is inflated by gene-level enrichment', rate_a > 0.20, f'rate {rate_a:.4f}')
+    check('Test B stays valid under gene-level enrichment', rate_b <= 0.05 * 1.10,
+          f'rate {rate_b:.4f}')
+    check('max(p_A, p_B) stays valid', rate_max <= 0.05 * 1.10, f'rate {rate_max:.4f}')
+
+
+# ---------------------------------------------------------------------------
+def test_injected_cluster_recovery():
+    """
+    Power check: a genuine cluster on top of each of the two problem backgrounds must be
+    detected by both tests, so that requiring both does not cost us real signal.
+    """
+    print('\n6. Injected cluster recovery (power)')
+    n_res, n_sims = 400, 400
+    half = 10
+    adj = banded_adjacency(n_res, half)
+    rng = np.random.default_rng(12)
+    m = np.full((n_res, 1), 1.0)
+    lambda_hat = 0.25
+    centre = 300
+    window = np.zeros((n_res, 1))
+    window[centre - half: centre + half + 1] = 1.0
+
+    backgrounds = {
+        'flat': np.ones((n_res, 1)),
+        'regional constraint elsewhere': np.where(np.arange(n_res)[:, None] < 0.4 * n_res, 0.2, 1.0),
+        'gene-level 3x inflation': np.full((n_res, 1), 3.0),
+    }
+
+    for label, bg in backgrounds.items():
+        rate = lambda_hat * m * bg + 4.0 * lambda_hat * m * window
+        x = rng.poisson(rate, size=(n_res, n_sims))
+        p_a, p_b = _rejection_rates(x, m, lambda_hat, adj, slice(centre, centre + 1))
+        power_max = float((np.maximum(p_a, p_b) <= 0.05).mean())
+        print(f'      {label:32s} power(max) = {power_max:.3f}  '
+              f'A {float((p_a <= 0.05).mean()):.3f}  B {float((p_b <= 0.05).mean()):.3f}')
+        check(f'cluster recovered on background: {label}', power_max > 0.80,
+              f'power {power_max:.3f}')
+
+
 if __name__ == '__main__':
     test_uniform_rate_degeneracy()
     test_lookup_equivalence()
     test_null_calibration()
     test_regional_constraint()
+    test_gene_level_inflation()
+    test_injected_cluster_recovery()
     print('\n' + ('ALL TESTS PASSED' if not FAILURES else f'FAILURES: {FAILURES}'))
     sys.exit(1 if FAILURES else 0)

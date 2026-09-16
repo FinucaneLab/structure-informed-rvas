@@ -240,8 +240,12 @@ def _pvals_for_radius(adjacency_matrix, x_a, x_b, m, lambda_hat, n_g, m_g):
     Returns (p_a, p_b, x_nbhd_obs, exp_a, exp_b) for one adjacency matrix.
     x_a / x_b are (n_res, n_sims + 1) with the observed counts in column 0.
     """
-    nbhd_a = adjacency_matrix @ x_a
-    nbhd_b = adjacency_matrix @ x_b
+    # float32 rather than integer matmul: numpy has no BLAS path for integer dtypes, and
+    # this product is n_res^2 * n_sims, the dominant cost of a run. Counts are small
+    # integers and exactly representable, so rounding back is lossless.
+    adj32 = adjacency_matrix.astype(np.float32)
+    nbhd_a = np.rint(adj32 @ x_a.astype(np.float32)).astype(np.int64)
+    nbhd_b = np.rint(adj32 @ x_b.astype(np.float32)).astype(np.int64)
     m_nbhd = (adjacency_matrix @ m).flatten()
 
     exp_a = lambda_hat * m_nbhd
@@ -359,6 +363,32 @@ def write_df_pvals_mu(results_dir, uniprot_id, df_pvals, pval_file, group):
         write_dataset(node, f'{uniprot_id}_original', df_pvals[['original_case', 'original_mu']])
 
 
+def simulate_null_input(df_rvas, mu_lookup, lambda_hat, seed=None):
+    """
+    Replace observed de novo counts with draws from the rate model, for the exome-wide
+    null calibration check (--simulate-null-from-mu). Returns a frame shaped like the
+    mapped input, one row per (gene, residue), so the rest of the pipeline -- including
+    re-estimating lambda_hat and computing FDR -- runs exactly as it would on real data.
+    """
+    rng = np.random.default_rng(seed)
+    genes = sorted(set(df_rvas.uniprot_id.unique()) & set(mu_lookup))
+    parts = []
+    for uniprot_id in genes:
+        aa_pos, mu, _, _ = mu_lookup[uniprot_id]
+        if mu.sum() <= 0:
+            continue
+        parts.append(pd.DataFrame({'uniprot_id': uniprot_id,
+                                   'aa_pos': aa_pos,
+                                   'ac_case': rng.poisson(lambda_hat * mu)}))
+    df = pd.concat(parts, ignore_index=True)
+    df['Variant ID'] = df.uniprot_id + ':' + df.aa_pos.astype(str)
+    logger.info(
+        f'Simulated null from the rate model: {int(df.ac_case.sum())} de novos across '
+        f'{df.uniprot_id.nunique()} genes at lambda_hat = {lambda_hat:.6g}'
+    )
+    return df
+
+
 # ---------------------------------------------------------------------------
 # orchestration
 # ---------------------------------------------------------------------------
@@ -420,11 +450,33 @@ def _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage
 
 
 def _process_proteins_batch_mu(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
-                               results_dir, n_sims, pval_file, lambda_hat, mu_lookup, seed=None):
+                               results_dir, n_sims, pval_file, lambda_hat, mu_lookup,
+                               seed=None, max_residues=None):
     """Run both tests for each protein. Returns per-gene totals for the output table."""
     pdb_file_pos_guide = f'{reference_dir}/pdb_pae_file_pos_guide.tsv'
     pdb_dir = f'{reference_dir}/pdb_files/'
     pae_dir = f'{reference_dir}/pae_files/'
+
+    # Skip very long proteins up front. get_distance_matrix_structure allocates an
+    # n_res x n_res float matrix, which is 9.4 GB for titin (34,350 residues); without
+    # this the run thrashes before failing with MemoryError.
+    struct_len = {}
+    try:
+        guide = pd.read_csv(pdb_file_pos_guide, sep='\t')
+        ends = guide.pos_covered.str.extract(r'(\d+)\s*\]')[0].astype(float)
+        struct_len = guide.assign(end=ends).groupby('uniprot_id')['end'].max().to_dict()
+    except Exception as e:
+        logger.warning(f'Could not read structure lengths for the size guard: {e}')
+
+    if max_residues is not None:
+        too_big = [u for u in uniprot_id_list if struct_len.get(u, 0) > max_residues]
+        if too_big:
+            logger.warning(
+                f'{len(too_big)} proteins exceed --max-residues {max_residues} and are '
+                f'skipped (the distance matrix scales as n_res^2): '
+                f'{", ".join(sorted(too_big)[:10])}'
+            )
+            uniprot_id_list = [u for u in uniprot_id_list if u not in set(too_big)]
 
     gene_totals = {}
     n_proteins = len(uniprot_id_list)
@@ -524,6 +576,8 @@ def mutation_rate_scan_test(
     mu_residue_file=None,
     mu_from_input=False,
     min_mu_coverage=0.0,
+    max_residues=10000,
+    simulate_null=False,
 ):
     """3D neighborhood test against a mutation-rate null. See module docstring."""
 
@@ -562,13 +616,19 @@ def mutation_rate_scan_test(
     # lambda_hat BEFORE gene-level selection -- see estimate_lambda.
     lambda_hat = estimate_lambda(df_rvas, df_mu, rate_calibration, calibration_genes, n_trios)
 
+    if simulate_null:
+        # Generate with the real lambda_hat, then re-estimate from the synthetic counts
+        # so the check exercises the calibration step too.
+        df_rvas = simulate_null_input(df_rvas, mu_lookup, lambda_hat, seed)
+        lambda_hat = estimate_lambda(df_rvas, df_mu, rate_calibration, calibration_genes, n_trios)
+
     uniprot_id_list = _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage)
     if len(uniprot_id_list) == 0:
         raise ValueError('No genes passed the --min-denovo filter; nothing to test.')
 
     gene_totals = _process_proteins_batch_mu(
         df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
-        results_dir, n_sims, pval_file, lambda_hat, mu_lookup, seed,
+        results_dir, n_sims, pval_file, lambda_hat, mu_lookup, seed, max_residues,
     )
 
     with h5py.File(os.path.join(results_dir, pval_file), 'a') as fid:
