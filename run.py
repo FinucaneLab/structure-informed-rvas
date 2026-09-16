@@ -225,6 +225,16 @@ if __name__ == '__main__':
         '''
     )
     parser.add_argument(
+        '--seed',
+        type=int,
+        default=None,
+        help='''
+        Random seed for the mutation-rate null simulations, making a run reproducible.
+        Each protein is given its own derived stream so results do not depend on how
+        the genes are split across jobs.
+        '''
+    )
+    parser.add_argument(
         '--n-trios',
         type=int,
         default=None,
@@ -584,7 +594,7 @@ if __name__ == '__main__':
             df_rvas, args.reference_dir, args.neighborhood_radius, args.pae_cutoff,
             args.results_dir, args.n_sims, args.no_fdr, True, args.fdr_cutoff,
             df_filter, args.fdr_file, args.pval_file, args.rate_calibration,
-            args.rate_calibration_genes, args.min_denovo, args.n_trios,
+            args.rate_calibration_genes, args.min_denovo, args.n_trios, args.seed,
         )
         did_nothing = False
 
@@ -614,6 +624,7 @@ if __name__ == '__main__':
             args.rate_calibration_genes,
             args.min_denovo,
             args.n_trios,
+            args.seed,
         )
         did_nothing = False
 

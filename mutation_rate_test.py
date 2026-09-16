@@ -311,7 +311,7 @@ def _select_genes(df_rvas, df_fdr_filter, min_denovo):
 
 
 def _process_proteins_batch_mu(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
-                               results_dir, n_sims, pval_file, lambda_hat):
+                               results_dir, n_sims, pval_file, lambda_hat, seed=None):
     """Run both tests for each protein. Returns per-gene totals for the output table."""
     pdb_file_pos_guide = f'{reference_dir}/pdb_pae_file_pos_guide.tsv'
     pdb_dir = f'{reference_dir}/pdb_files/'
@@ -323,9 +323,12 @@ def _process_proteins_batch_mu(df_rvas, uniprot_id_list, reference_dir, radius, 
         logger.info(f'Processing {uniprot_id} (protein {i+1} out of {n_proteins})')
         try:
             df = df_rvas[df_rvas.uniprot_id == uniprot_id]
+            # Derive a per-protein stream from the seed so results do not depend on
+            # how genes are split across parallel jobs.
+            protein_seed = None if seed is None else [seed, i]
             df_a, df_b, _ = compute_all_pvals_mu(
                 df, pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id,
-                n_sims, lambda_hat, radius, pae_cutoff,
+                n_sims, lambda_hat, radius, pae_cutoff, seed=protein_seed,
             )
             write_df_pvals_mu(results_dir, uniprot_id, df_a, pval_file, POISSON_GROUP)
             write_df_pvals_mu(results_dir, uniprot_id, df_b, pval_file, BINOMIAL_GROUP)
@@ -407,6 +410,7 @@ def mutation_rate_scan_test(
     rate_calibration_genes,
     min_denovo,
     n_trios,
+    seed=None,
 ):
     """3D neighborhood test against a mutation-rate null. See module docstring."""
 
@@ -433,7 +437,7 @@ def mutation_rate_scan_test(
 
     gene_totals = _process_proteins_batch_mu(
         df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
-        results_dir, n_sims, pval_file, lambda_hat,
+        results_dir, n_sims, pval_file, lambda_hat, seed,
     )
 
     with h5py.File(os.path.join(results_dir, pval_file), 'a') as fid:
@@ -442,6 +446,8 @@ def mutation_rate_scan_test(
         fid.attrs['rate_calibration'] = rate_calibration
         fid.attrs['n_sims'] = n_sims
         fid.attrs['min_denovo'] = min_denovo
+        if seed is not None:
+            fid.attrs['seed'] = seed
 
     if no_fdr:
         return
