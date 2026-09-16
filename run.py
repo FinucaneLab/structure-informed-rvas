@@ -229,9 +229,11 @@ if __name__ == '__main__':
         type=int,
         default=None,
         help='''
-        Random seed for the mutation-rate null simulations, making a run reproducible.
-        Each protein is given its own derived stream so results do not depend on how
-        the genes are split across jobs.
+        Random seed for the null simulations, making a run reproducible. Applies to both
+        the standard and the mutation-rate tests. Each protein is given its own derived
+        stream so results do not depend on how the genes are split across jobs. If not
+        given, a seed is generated and logged so that any run can be reproduced after
+        the fact.
         '''
     )
     parser.add_argument(
@@ -466,6 +468,14 @@ if __name__ == '__main__':
             base = args.fdr_file
         args.pval_file = base + '.pvals.h5'
 
+    # A seed is always chosen and recorded, so that a run with no --seed is still
+    # reproducible after the fact from the logged value.
+    if args.seed is None:
+        args.seed = int(np.random.SeedSequence().entropy % (2**31 - 1))
+        logger.info(f'No --seed given; using generated seed {args.seed}')
+    else:
+        logger.info(f'Using seed {args.seed}')
+
     # Input validation
     
     if args.genome_build not in ['hg37', 'hg38']:
@@ -645,6 +655,7 @@ if __name__ == '__main__':
             args.fdr_file,
             args.pval_file,
             args.remove_nbhd,
+            args.seed,
         )
         did_nothing = False
 
