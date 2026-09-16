@@ -264,3 +264,134 @@ python structure-informed-rvas/visualize_and_interpret.py run_all \
 ```
 
 For each significant protein this produces the PSE files described above, plus `_nbhd.tsv` and `_nbhd_features.tsv` files in `results_schema/neighborhoods/`. Use `--significance-column fwer` to filter by FWER instead of FDR. Use `--skip-visualization` to run only annotation and neighborhood steps without PyMOL.
+
+## 3DNT with a mutation-rate null
+
+The basic 3DNT compares case to control variants within a neighborhood. For de novo
+data there are no controls, and stand-ins such as untransmitted parental singletons are
+a poor proxy for mutational opportunity: they have already been filtered by selection
+and their trinucleotide spectrum differs from the de novo spectrum. This mode replaces
+the control variants with a mutation-rate model.
+
+For a neighborhood `N(i)` with observed de novo count `X_i` and summed mutation rate
+`M_i`, in a gene with totals `N_g` and `M_g` over structure-covered residues:
+
+| | test | null |
+|---|---|---|
+| **Test B** (`binomial`) | `X_i \| N_g ~ Binomial(N_g, M_i / M_g)` | enrichment relative to the rest of the same gene |
+| **Test A** (`poisson`) | `X_i ~ Poisson(lambda_hat * M_i)` | enrichment relative to the mutation rate |
+
+Both are one-sided (upper tail).
+
+**Test B is the test of interest** — a within-gene comparison of a neighborhood against
+the rest of the gene is what the 3DNT has always been, with rate-weighted rest-of-gene
+replacing the control variants. **Test A guards against the way Test B fails under
+regional constraint.** When a region of a gene is depleted for variation because
+mutations there are incompatible with life, and because these are *de novo* mutations
+so selection acts within a single generation, that region yields fewer observed de novos
+among living probands than its mutation rate predicts. Test B conditions on `N_g` and
+distributes it by mutation rate, so the de novos that do exist are pushed into the
+unconstrained regions, and a neighborhood there looks enriched without being special.
+Such a neighborhood sits at `X_i ~ lambda_hat * M_i`, so Test A does not call it.
+
+Each test is corrected separately by the usual empirical FDR/FWER machinery, and a
+neighborhood passes when it passes both: `fdr_max = max(fdr_poisson, fdr_binomial)`,
+likewise `fwer_max`. On simulated data each test rejects at 4% under the true null,
+Test B inflates to 17% under regional constraint while Test A stays at 4%, Test A
+inflates to 80% under uniform gene-level enrichment while Test B stays at 4%, and
+requiring both still recovers an injected cluster with at least 98% power.
+
+### Setting up the rate reference
+
+Mutational opportunity must be the summed rate over **all possible missense SNVs** at a
+residue. A cohort de novo file cannot supply that, because it lists only variants
+someone observed — for the ASD counts file that is 1.8M of 72.7M possible missense
+variants, about 1% of each gene's real opportunity and selected on having been observed.
+Using it skews observed/expected by up to 19.7x across mutation-rate deciles, against
+1.37x for the full universe.
+
+So build the per-residue table once, from the reference enumeration joined to the rate
+file:
+
+```
+python structure-informed-rvas/precompute_mu_per_residue.py \
+  --reference-dir sir-reference-data/
+```
+
+This writes `sir-reference-data/mu_per_residue.parquet` (11.1M residues, 19,576 genes).
+
+### Running it
+
+```
+python structure-informed-rvas/run.py \
+  --rvas-data-to-map input/ASD_de_novos.tsv.gz \
+  --reference-dir sir-reference-data/ \
+  --mu-file \
+  --results-dir results_asd \
+  --run-3dnt \
+  --n-sims 1000 \
+  --seed 1 \
+  --fdr-file ASD_mutation_rate.fdr.tsv
+```
+
+`--mu-file` with no argument uses `<reference-dir>/roulette_missenses_filtered.parquet`.
+The input file supplies only the observed de novo counts, in `ac_case` (or via
+`--ac-case-col`); no control column is needed.
+
+`--mu-col NAME` is the alternative: a rate column already present in the input file,
+for comparison against a rate reference. It is only valid if that file enumerates every
+possible missense variant including those with no observed de novos, and it warns
+accordingly. `--mu-col` and `--mu-file` are mutually exclusive.
+
+### Where lambda_hat is estimated, and why it matters
+
+`lambda_hat = sum(x) / sum(mu)` converts relative rates into expected counts. It is
+estimated **after all variant-level filters and before any gene-level selection**.
+Gene-level selection is selection on the outcome. Measured on the ASD data, the
+variant-level filters (common variants, LCR, max-AC) move `lambda_hat` by under 0.2%,
+while applying the `--min-denovo` gene filter first inflates it by **1.43x**, because
+that filter keeps only genes whose de novo count came out high.
+
+`--rate-calibration-genes` restricts the calibration set; it defaults to the whole input
+file. `--rate-calibration fixed:<v>` supplies `lambda_hat` directly, and `none` sets it
+to 1 for a model that already gives absolute expected counts.
+
+### Other flags
+
+- `--min-denovo` (default 5) minimum de novos per gene, applied as strictly greater
+  than, matching `scan_test._filter_proteins_by_allele_count`; so the default requires
+  at least 6. Note the existing gene filter is internally inconsistent — it gates on
+  `> 5` in one place and `< 5` in another — and this mode mirrors the binding one.
+- `--max-residues` (default 10000) skips very long proteins; the distance matrix scales
+  as `n_res^2`, so titin alone would need 9.4 GB.
+- `--min-mu-coverage` (default 0, i.e. report only) skips genes whose rate coverage is
+  below a threshold.
+- `--simulate-null-from-mu` replaces observed counts with draws from the rate model and
+  runs the whole pipeline on them, as a calibration check.
+- `--seed` makes a run reproducible. It applies to the standard 3DNT too. If not given,
+  a seed is generated, logged, and stored in the p-value file attributes.
+- `--ignore-ac` is rejected in this mode: collapsing de novo counts to 0/1 discards
+  recurrence, which is signal here.
+
+### Output
+
+Results are written per test into the `poisson` and `binomial` HDF5 groups of the
+p-value file, and merged into one TSV with `p_`/`fdr_`/`fwer_` columns for each test,
+plus `fdr_max`, `fwer_max`, per-gene `n_denovo_gene`, `mu_gene`, and `mu_coverage`.
+
+### Limitations
+
+- **The Roulette rate file covers autosomes only.** No chrX rates are available in it,
+  so 1,510 genes (2.83M possible missense variants, 421,858 residues) cannot be tested;
+  they are skipped with an explicit message. Supply a rate file including chrX to
+  include them.
+- Autosomal rate coverage is 82–96% per chromosome (median ~92%, lowest on chr19), and
+  the gaps cluster spatially within low-coverage genes. This costs power rather than
+  biasing the tests: a variant's de novo count and its rate are dropped together, so
+  `x_j` and `m_j` stay on the same variant set at every residue and each test remains
+  exact over a narrower region. A neighborhood with no rate data has `M_i = 0` and
+  necessarily `X_i = 0`, so it returns p = 1. Per-gene coverage is reported as
+  `mu_coverage` (median 0.986 genome-wide; 0.981 across the ASD analysis genes).
+- FDR control over the *intersection* of two rejection sets is not guaranteed by the two
+  marginal FDRs as a theorem. It is conservative in practice, since an intersection can
+  only remove discoveries, and the simulations above measure it directly.
