@@ -379,6 +379,20 @@ Results are written per test into the `poisson` and `binomial` HDF5 groups of th
 p-value file, and merged into one TSV with `p_`/`fdr_`/`fwer_` columns for each test,
 plus `fdr_max`, `fwer_max`, per-gene `n_denovo_gene`, `mu_gene`, and `mu_coverage`.
 
+### Splitting the scan across jobs
+
+`--combine-pval-files` descends into the per-test groups, so the three-step
+parallel workflow above works in this mode too. One extra requirement: `lambda_hat`
+is estimated from whatever is in front of it, so a per-chromosome job would calibrate
+on its own chromosome. Compute it once exome-wide and pass it to every chunk:
+
+```
+# from a full-input run's log, or the lambda_hat attribute of its p-value file
+--rate-calibration fixed:0.0045
+```
+
+Combining warns if the chunks disagree on `lambda_hat`.
+
 ### Limitations
 
 - **The Roulette rate file covers autosomes only.** No chrX rates are available in it,

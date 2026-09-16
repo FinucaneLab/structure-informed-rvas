@@ -760,18 +760,39 @@ if __name__ == '__main__':
             pattern = os.path.join(args.results_dir, args.combine_pval_files)
             pval_files_to_combine = glob.glob(pattern)
 
+        def _merge_node(node_in, node_out):
+            """
+            Copy datasets across, recursing into groups. Mutation-rate results are stored
+            per test in the 'poisson' and 'binomial' groups, so those keys collide on
+            every file after the first and must be descended into rather than read as
+            datasets.
+            """
+            for key in node_in.keys():
+                item = node_in[key]
+                if isinstance(item, h5py.Group):
+                    _merge_node(item, node_out.require_group(key))
+                elif key not in node_out:
+                    node_in.copy(key, node_out, name=key)
+                else:
+                    combined = np.concatenate([node_out[key][:], item[:]], axis=0)
+                    del node_out[key]
+                    node_out.create_dataset(key, data=combined)
+
         with h5py.File(os.path.join(args.results_dir, args.pval_file), 'w') as fid_out:
             for file in pval_files_to_combine:
                 with h5py.File(file, 'r') as fid_in:
-                    for key in fid_in.keys():
-                        if key not in fid_out:
-                            fid_in.copy(key, fid_out)
+                    _merge_node(fid_in, fid_out)
+                    for name, value in fid_in.attrs.items():
+                        if name in fid_out.attrs and fid_out.attrs[name] != value:
+                            logger.warning(
+                                f"{os.path.basename(file)}: attribute '{name}' is {value}, "
+                                f"but {fid_out.attrs[name]} was recorded from an earlier "
+                                "file. For a mutation-rate run split across jobs, pass an "
+                                "exome-wide --rate-calibration fixed:<value> so every chunk "
+                                "shares one lambda_hat."
+                            )
                         else:
-                            existing = fid_out[key][:]
-                            new_data = fid_in[key][:]
-                            combined = np.concatenate([existing, new_data], axis=0)
-                            del fid_out[key]
-                            fid_out.create_dataset(key, data=combined)
+                            fid_out.attrs[name] = value
         did_nothing=False
 
     if did_nothing:
