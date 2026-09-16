@@ -1,0 +1,462 @@
+"""
+3D neighborhood test with a mutation-rate null.
+
+For a neighborhood N(i) with observed de novo count X_i and summed mutation rate M_i,
+in a gene with totals N_g and M_g over structure-covered residues:
+
+  Test A (poisson)   X_i ~ Poisson(lambda_hat * M_i)
+  Test B (binomial)  X_i | N_g ~ Binomial(N_g, M_i / M_g)
+
+Test B is the test of interest: a within-gene comparison of a neighborhood against the
+rest of the gene, with rate-weighted rest-of-gene replacing the control variants used by
+the standard 3DNT.
+
+Test A guards against the specific way Test B fails under regional constraint. When part
+of a gene is depleted for variation because mutations there are incompatible with life,
+the de novos that do exist are pushed into the unconstrained regions, and a neighborhood
+sitting in one of those looks enriched relative to M_i / M_g without being special. Such a
+neighborhood sits at X_i ~= lambda_hat * M_i, so Test A does not call it.
+
+Both tests are one-sided (upper tail). Each is corrected separately by the existing
+empirical FDR/FWER machinery; a neighborhood passes when it passes both, which is
+recorded as fdr_max = max(fdr_poisson, fdr_binomial) and likewise for FWER.
+"""
+
+import os
+import h5py
+import numpy as np
+import pandas as pd
+from scipy.stats import poisson, binom
+
+from utils import get_adjacency_matrix, write_dataset
+from logger_config import get_logger
+from empirical_fdr import compute_fdr
+from scan_test import MULTI_RADII_SMALL, MULTI_RADII_BIG, P_FLOOR
+
+logger = get_logger(__name__)
+
+POISSON_GROUP = 'poisson'
+BINOMIAL_GROUP = 'binomial'
+
+
+# ---------------------------------------------------------------------------
+# lambda_hat
+# ---------------------------------------------------------------------------
+
+def estimate_lambda(df_rvas, rate_calibration, calibration_genes=None, n_trios=None):
+    """
+    Estimate the factor converting relative mutation rates into expected de novo counts.
+
+    MUST be called after all variant-level filters (missense mapping, rate join, common
+    variant and LCR removal, max-AC) and BEFORE any gene-level selection. Gene-level
+    selection is selection on the outcome: restricting to an associated gene set lets
+    lambda_hat absorb the very enrichment Test A exists to verify, and applying
+    --min-denovo first keeps only genes whose de novo count came out high, which inflates
+    lambda_hat badly.
+    """
+    if rate_calibration == 'none':
+        logger.info('Rate calibration: none (lambda_hat = 1). '
+                    'Mutation rates are assumed to be absolute expected counts.')
+        return 1.0
+
+    if rate_calibration.startswith('fixed:'):
+        lambda_hat = float(rate_calibration.split(':', 1)[1])
+        logger.info(f'Rate calibration: fixed, lambda_hat = {lambda_hat:.6g}')
+        return lambda_hat
+
+    # A variant mapping to several proteins appears once per protein; count it once.
+    df_cal = df_rvas.drop_duplicates(subset='Variant ID')
+    if calibration_genes is not None:
+        gene_set = set(calibration_genes)
+        df_cal = df_cal[df_cal.uniprot_id.isin(gene_set)]
+        logger.info(f'Estimating lambda_hat within {len(gene_set)} genes from --rate-calibration-genes')
+
+    sum_x = float(df_cal.ac_case.sum())
+    sum_mu = float(df_cal.mu.sum())
+    if sum_mu <= 0:
+        raise ValueError('Total mutation rate over the calibration set is zero; cannot estimate lambda_hat.')
+
+    lambda_hat = sum_x / sum_mu
+    logger.info(
+        f'lambda_hat = {lambda_hat:.6g}  '
+        f'(sum_x = {sum_x:.0f}, sum_mu = {sum_mu:.6g}, '
+        f'{len(df_cal)} variants in {df_cal.uniprot_id.nunique()} genes)'
+    )
+    if n_trios is not None and n_trios > 0:
+        logger.info(
+            f'Units check: lambda_hat / (2 * n_trios) = {lambda_hat / (2 * n_trios):.6g} '
+            '(expect ~1 if the rate model is per-haploid-per-generation)'
+        )
+    return lambda_hat
+
+
+# ---------------------------------------------------------------------------
+# per-residue aggregation
+# ---------------------------------------------------------------------------
+
+def restrict_to_structure(df, n_res, uniprot_id):
+    """Drop variants whose residue position falls outside the solved structure."""
+    in_range = (df.aa_pos >= 1) & (df.aa_pos <= n_res)
+    n_out = int((~in_range).sum())
+    if n_out:
+        logger.warning(
+            f'{uniprot_id}: dropping {n_out} variants with aa_pos outside the structure '
+            f'(n_res = {n_res})'
+        )
+        df = df[in_range]
+    return df
+
+
+def sum_per_residue(df, colname, n_res, dtype=float):
+    """Sum a per-variant column onto residues. Returns an (n_res, 1) column vector."""
+    out = np.zeros((n_res, 1), dtype=dtype)
+    by_pos = df.groupby('aa_pos')[colname].sum()
+    out[by_pos.index.values.astype(int) - 1, 0] = by_pos.values
+    return out
+
+
+# ---------------------------------------------------------------------------
+# p-value lookup tables
+#
+# M_i is continuous so it cannot index a table, but it is fixed per residue across all
+# simulations and X_i is a small integer. Building L[i, k] once costs n_res * (x_max + 1)
+# special-function calls instead of n_res * (n_sims + 1), so the cost does not grow with
+# --n-sims.
+# ---------------------------------------------------------------------------
+
+def poisson_pval_lookup(expected, x_max):
+    """L[i, k] = P(X >= k) for X ~ Poisson(expected[i]). Shape (n_res, x_max + 1)."""
+    k = np.arange(x_max + 1)
+    expected = np.maximum(np.asarray(expected, dtype=float), P_FLOOR)
+    return poisson.sf(k[np.newaxis, :] - 1, expected[:, np.newaxis])
+
+
+def binomial_pval_lookup(p_nbhd, n_trials, x_max):
+    """L[i, k] = P(X >= k) for X ~ Binomial(n_trials, p_nbhd[i]). Shape (n_res, x_max + 1)."""
+    k = np.arange(x_max + 1)
+    p_nbhd = np.clip(np.asarray(p_nbhd, dtype=float), 0.0, 1.0)
+    return binom.sf(k[np.newaxis, :] - 1, n_trials, p_nbhd[:, np.newaxis])
+
+
+# ---------------------------------------------------------------------------
+# null simulation
+# ---------------------------------------------------------------------------
+
+def simulate_poisson_null(m, lambda_hat, n_sims, rng):
+    """Test A null: de novos drawn independently per residue at the modelled rate."""
+    return rng.poisson(lambda_hat * m, size=(m.shape[0], n_sims))
+
+
+def simulate_multinomial_null(m, n_g, n_sims, rng):
+    """
+    Test B null: the gene's N_g de novos redistributed across residues in proportion to
+    mutation rate. Preserves N_g, the exact analogue of the multivariate hypergeometric
+    step in the standard 3DNT.
+    """
+    total = m.sum()
+    if total <= 0:
+        return np.zeros((m.shape[0], n_sims), dtype=int)
+    p = (m.flatten() / total)
+    p = p / p.sum()  # guard against float drift
+    return rng.multinomial(int(n_g), p, size=n_sims).T
+
+
+# ---------------------------------------------------------------------------
+# core computation
+# ---------------------------------------------------------------------------
+
+def _pvals_for_radius(adjacency_matrix, x_a, x_b, m, lambda_hat, n_g, m_g):
+    """
+    Returns (p_a, p_b, x_nbhd_obs, exp_a, exp_b) for one adjacency matrix.
+    x_a / x_b are (n_res, n_sims + 1) with the observed counts in column 0.
+    """
+    nbhd_a = adjacency_matrix @ x_a
+    nbhd_b = adjacency_matrix @ x_b
+    m_nbhd = (adjacency_matrix @ m).flatten()
+
+    exp_a = lambda_hat * m_nbhd
+    p_frac = m_nbhd / m_g if m_g > 0 else np.zeros_like(m_nbhd)
+    exp_b = n_g * p_frac
+
+    lookup_a = poisson_pval_lookup(exp_a, int(nbhd_a.max()))
+    lookup_b = binomial_pval_lookup(p_frac, n_g, int(nbhd_b.max()))
+
+    rows = np.arange(adjacency_matrix.shape[0])[:, np.newaxis]
+    p_a = lookup_a[rows, nbhd_a]
+    p_b = lookup_b[rows, nbhd_b]
+    return p_a, p_b, nbhd_a[:, 0], exp_a, exp_b
+
+
+def _harmonic_mean_combine(pval_mats):
+    """Combine p-values across radii, as the standard 3DNT does for --neighborhood-radius multiple-*."""
+    stacked = np.maximum(np.stack(pval_mats, axis=0), P_FLOOR)
+    combined = stacked.shape[0] / np.sum(1.0 / stacked, axis=0)
+    best_idx = np.argmin(stacked[:, :, 0], axis=0)
+    return combined, best_idx
+
+
+def compute_all_pvals_mu(
+        df,
+        pdb_file_pos_guide,
+        pdb_dir,
+        pae_dir,
+        uniprot_id,
+        n_sims,
+        lambda_hat,
+        radius=15,
+        pae_cutoff=15,
+        seed=None,
+):
+    """
+    Returns (df_pvals_poisson, df_pvals_binomial, adjacency_matrix) for one protein.
+    """
+    rng = np.random.default_rng(seed)
+
+    multi = radius in ('multiple-small', 'multiple-big')
+    radii = (MULTI_RADII_SMALL if radius == 'multiple-small' else MULTI_RADII_BIG) if multi else [radius]
+
+    adj_matrices = {
+        r: get_adjacency_matrix(pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id, r, pae_cutoff)
+        for r in radii
+    }
+    if any(a is None for a in adj_matrices.values()):
+        raise FileNotFoundError(f'No structure available for {uniprot_id}')
+
+    n_res = adj_matrices[radii[0]].shape[0]
+    df = restrict_to_structure(df, n_res, uniprot_id)
+
+    x_obs = sum_per_residue(df, 'ac_case', n_res, dtype=int)
+    m = sum_per_residue(df, 'mu', n_res, dtype=float)
+    n_g = int(x_obs.sum())
+    m_g = float(m.sum())
+
+    # Observed counts sit in column 0 of both matrices, so the two tests see identical
+    # observed data and differ only in their null.
+    x_a = np.hstack([x_obs, simulate_poisson_null(m, lambda_hat, n_sims, rng)])
+    x_b = np.hstack([x_obs, simulate_multinomial_null(m, n_g, n_sims, rng)])
+
+    per_radius = {r: _pvals_for_radius(adj_matrices[r], x_a, x_b, m, lambda_hat, n_g, m_g)
+                  for r in radii}
+
+    if multi:
+        p_a, best_a = _harmonic_mean_combine([per_radius[r][0] for r in radii])
+        p_b, best_b = _harmonic_mean_combine([per_radius[r][1] for r in radii])
+        pos_idx = np.arange(n_res)
+        nbhd_by_radius = np.stack([per_radius[r][2] for r in radii], axis=0)
+        exp_a_by_radius = np.stack([per_radius[r][3] for r in radii], axis=0)
+        exp_b_by_radius = np.stack([per_radius[r][4] for r in radii], axis=0)
+        nbhd_a_obs, exp_a = nbhd_by_radius[best_a, pos_idx], exp_a_by_radius[best_a, pos_idx]
+        nbhd_b_obs, exp_b = nbhd_by_radius[best_b, pos_idx], exp_b_by_radius[best_b, pos_idx]
+        radius_a = np.array([radii[i] for i in best_a], dtype=float)
+        radius_b = np.array([radii[i] for i in best_b], dtype=float)
+        adjacency_matrix = adj_matrices.get(15, adj_matrices[radii[0]])
+    else:
+        p_a, p_b, nbhd_obs, exp_a, exp_b = per_radius[radii[0]]
+        nbhd_a_obs = nbhd_b_obs = nbhd_obs
+        radius_a = radius_b = float(radii[0])
+        adjacency_matrix = adj_matrices[radii[0]]
+
+    def _build(pval_matrix, nbhd_obs, expected, radius_col):
+        pval_columns = ['p_value'] + [f'null_pval_{i}' for i in range(n_sims)]
+        out = pd.DataFrame(columns=pval_columns, data=pval_matrix)
+        out['nbhd_case'] = nbhd_obs
+        out['nbhd_expected'] = expected
+        out['radius'] = radius_col
+        out['original_case'] = x_obs[:, 0]
+        out['original_mu'] = m[:, 0]
+        return out[['nbhd_case', 'nbhd_expected', 'radius', 'original_case', 'original_mu'] + pval_columns]
+
+    return (_build(p_a, nbhd_a_obs, exp_a, radius_a),
+            _build(p_b, nbhd_b_obs, exp_b, radius_b),
+            adjacency_matrix)
+
+
+def write_df_pvals_mu(results_dir, uniprot_id, df_pvals, pval_file, group):
+    with h5py.File(os.path.join(results_dir, pval_file), 'a') as fid:
+        node = fid.require_group(group)
+        null_pval_cols = [c for c in df_pvals.columns if c.startswith('null_pval')]
+        write_dataset(node, f'{uniprot_id}', df_pvals[['p_value']])
+        # float32 is plenty: null p-values are only ever rank-compared.
+        write_dataset(node, f'{uniprot_id}_null_pval', df_pvals[null_pval_cols].astype(np.float32))
+        write_dataset(node, f'{uniprot_id}_nbhd', df_pvals[['nbhd_case', 'nbhd_expected']])
+        write_dataset(node, f'{uniprot_id}_radius', df_pvals[['radius']])
+        write_dataset(node, f'{uniprot_id}_original', df_pvals[['original_case', 'original_mu']])
+
+
+# ---------------------------------------------------------------------------
+# orchestration
+# ---------------------------------------------------------------------------
+
+def _select_genes(df_rvas, df_fdr_filter, min_denovo):
+    """
+    Gene-level selection. Called AFTER estimate_lambda -- see the note there on why the
+    order matters.
+
+    Applied as strictly greater than min_denovo, matching the existing 3DNT gene filter
+    in scan_test._filter_proteins_by_allele_count (which uses `> min_alleles`), so the
+    default of 5 requires at least 6 de novos.
+    """
+    grouped = df_rvas.groupby('uniprot_id')[['ac_case', 'mu']].sum()
+    keep = grouped[(grouped['ac_case'] > min_denovo) & (grouped['mu'] > 0)]
+    uniprot_id_list = keep.index.tolist()
+
+    if df_fdr_filter is not None:
+        uniprot_id_list = list(np.intersect1d(uniprot_id_list, np.unique(df_fdr_filter.uniprot_id)))
+
+    logger.info(
+        f'Selected {len(uniprot_id_list)} of {len(grouped)} genes for analysis '
+        f'(more than {min_denovo} de novos each)'
+    )
+    return uniprot_id_list
+
+
+def _process_proteins_batch_mu(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
+                               results_dir, n_sims, pval_file, lambda_hat):
+    """Run both tests for each protein. Returns per-gene totals for the output table."""
+    pdb_file_pos_guide = f'{reference_dir}/pdb_pae_file_pos_guide.tsv'
+    pdb_dir = f'{reference_dir}/pdb_files/'
+    pae_dir = f'{reference_dir}/pae_files/'
+
+    gene_totals = {}
+    n_proteins = len(uniprot_id_list)
+    for i, uniprot_id in enumerate(uniprot_id_list):
+        logger.info(f'Processing {uniprot_id} (protein {i+1} out of {n_proteins})')
+        try:
+            df = df_rvas[df_rvas.uniprot_id == uniprot_id]
+            df_a, df_b, _ = compute_all_pvals_mu(
+                df, pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id,
+                n_sims, lambda_hat, radius, pae_cutoff,
+            )
+            write_df_pvals_mu(results_dir, uniprot_id, df_a, pval_file, POISSON_GROUP)
+            write_df_pvals_mu(results_dir, uniprot_id, df_b, pval_file, BINOMIAL_GROUP)
+            gene_totals[uniprot_id] = (int(df_a['original_case'].sum()),
+                                       float(df_a['original_mu'].sum()))
+        except FileNotFoundError as e:
+            logger.error(f'{uniprot_id}: Required file not found - {e}')
+        except KeyError as e:
+            logger.error(f'{uniprot_id}: Missing required column or key - {e}')
+        except ValueError as e:
+            logger.error(f'{uniprot_id}: Invalid data or parameter - {e}')
+        except MemoryError as e:
+            logger.error(f'{uniprot_id}: Insufficient memory for processing - {e}')
+        except Exception as e:
+            logger.error(f'{uniprot_id}: Unexpected error - {e}')
+    return gene_totals
+
+
+def _merge_test_results(df_a, df_b):
+    """Join the two independently corrected result tables and take the max FDR/FWER."""
+    a = df_a.rename(columns={'p_value': 'p_poisson', 'fdr': 'fdr_poisson',
+                             'fwer': 'fwer_poisson', 'nbhd_expected': 'exp_poisson',
+                             'obs_exp': 'obs_exp_poisson', 'radius': 'radius_poisson'})
+    b = df_b.rename(columns={'p_value': 'p_binomial', 'fdr': 'fdr_binomial',
+                             'fwer': 'fwer_binomial', 'nbhd_expected': 'exp_binomial',
+                             'obs_exp': 'obs_exp_binomial', 'radius': 'radius_binomial'})
+    keep_b = ['uniprot_id', 'aa_pos', 'p_binomial', 'fdr_binomial', 'fwer_binomial',
+              'exp_binomial', 'obs_exp_binomial', 'radius_binomial']
+    merged = a.merge(b[keep_b], on=['uniprot_id', 'aa_pos'], how='inner')
+
+    # A neighborhood passes only if it passes both tests.
+    merged['fdr_max'] = merged[['fdr_poisson', 'fdr_binomial']].max(axis=1)
+    merged['fwer_max'] = merged[['fwer_poisson', 'fwer_binomial']].max(axis=1)
+    return merged
+
+
+def _compute_both_fdrs(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file):
+    logger.info('Computing FDR and FWER for Test A (Poisson, absolute)')
+    df_a = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file,
+                       group=POISSON_GROUP, mu_mode=True)
+    logger.info('Computing FDR and FWER for Test B (binomial, vs rest of gene)')
+    df_b = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file,
+                       group=BINOMIAL_GROUP, mu_mode=True)
+    return _merge_test_results(df_a, df_b)
+
+
+def summarize_mu_results(df_results, fdr_cutoff):
+    top = df_results.loc[df_results.groupby('uniprot_id')['fdr_max'].idxmin()]
+    sig = top[top.fdr_max < fdr_cutoff].sort_values(by='fdr_max')
+    logger.info('')
+    logger.info(f'{len(sig)} of {len(top)} proteins have a neighborhood passing BOTH tests '
+                f'at FDR < {fdr_cutoff}')
+    if len(sig) > 0:
+        logger.info(f'Top 20 hits:\n{sig[0:20].to_string()}')
+
+    b_only = df_results[(df_results.fdr_binomial < fdr_cutoff) & (df_results.fdr_poisson >= fdr_cutoff)]
+    a_only = df_results[(df_results.fdr_poisson < fdr_cutoff) & (df_results.fdr_binomial >= fdr_cutoff)]
+    logger.info(
+        f'{len(b_only)} neighborhoods pass Test B but NOT Test A -- these are the ones '
+        'regional constraint would otherwise have handed us as false positives.'
+    )
+    logger.info(f'{len(a_only)} neighborhoods pass Test A but not Test B.')
+
+
+def mutation_rate_scan_test(
+    df_rvas,
+    reference_dir,
+    radius,
+    pae_cutoff,
+    results_dir,
+    n_sims,
+    no_fdr,
+    fdr_only,
+    fdr_cutoff,
+    df_fdr_filter,
+    fdr_file,
+    pval_file,
+    rate_calibration,
+    rate_calibration_genes,
+    min_denovo,
+    n_trios,
+):
+    """3D neighborhood test against a mutation-rate null. See module docstring."""
+
+    if fdr_only:
+        df_results = _compute_both_fdrs(results_dir, fdr_cutoff, df_fdr_filter,
+                                        reference_dir, pval_file)
+        summarize_mu_results(df_results, fdr_cutoff)
+        df_results.to_csv(f'{results_dir}/{fdr_file}', sep='\t', index=False)
+        return
+
+    logger.info(f'Input dataset contains {len(df_rvas)} variants across '
+                f'{df_rvas["uniprot_id"].nunique()} proteins')
+
+    calibration_genes = None
+    if rate_calibration_genes is not None:
+        calibration_genes = pd.read_csv(rate_calibration_genes, sep='\t')['uniprot_id'].unique()
+
+    # lambda_hat BEFORE gene-level selection -- see estimate_lambda.
+    lambda_hat = estimate_lambda(df_rvas, rate_calibration, calibration_genes, n_trios)
+
+    uniprot_id_list = _select_genes(df_rvas, df_fdr_filter, min_denovo)
+    if len(uniprot_id_list) == 0:
+        raise ValueError('No genes passed the --min-denovo filter; nothing to test.')
+
+    gene_totals = _process_proteins_batch_mu(
+        df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
+        results_dir, n_sims, pval_file, lambda_hat,
+    )
+
+    with h5py.File(os.path.join(results_dir, pval_file), 'a') as fid:
+        fid.attrs['test_type'] = 'mutation_rate'
+        fid.attrs['lambda_hat'] = lambda_hat
+        fid.attrs['rate_calibration'] = rate_calibration
+        fid.attrs['n_sims'] = n_sims
+        fid.attrs['min_denovo'] = min_denovo
+
+    if no_fdr:
+        return
+
+    fdr_filter = df_fdr_filter
+    if fdr_filter is None:
+        fdr_filter = pd.DataFrame({'uniprot_id': list(gene_totals.keys())})
+    df_results = _compute_both_fdrs(results_dir, fdr_cutoff, fdr_filter,
+                                    reference_dir, pval_file)
+
+    df_totals = pd.DataFrame(
+        [(uid, n_g, m_g) for uid, (n_g, m_g) in gene_totals.items()],
+        columns=['uniprot_id', 'n_denovo_gene', 'mu_gene'],
+    )
+    df_results = df_results.merge(df_totals, on='uniprot_id', how='left')
+
+    summarize_mu_results(df_results, fdr_cutoff)
+    df_results.to_csv(f'{results_dir}/{fdr_file}', sep='\t', index=False)

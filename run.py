@@ -25,6 +25,8 @@ def map_and_filter_rvas(
         ac_filter,
         dont_remove_common,
         include_lcr,
+        mu_col=None,
+        mu_file=None,
 ):
 
     if pre_mapped_rvas is not None:
@@ -38,14 +40,23 @@ def map_and_filter_rvas(
             ac_control_col,
             reference_dir,
             uniprot_id,
-            genome_build
+            genome_build,
+            mu_col=mu_col,
+            mu_file=mu_file,
         )
     else:
         df_rvas = None
 
 
+    mutation_rate_mode = (mu_col is not None) or (mu_file is not None)
+
     if df_rvas is not None and pre_mapped_rvas is None:
-        df_rvas = df_rvas[df_rvas.ac_case + df_rvas.ac_control < ac_filter]
+        # With a mutation-rate null there is no ac_control, so the max-AC filter
+        # applies to case allele counts alone.
+        if mutation_rate_mode:
+            df_rvas = df_rvas[df_rvas.ac_case < ac_filter]
+        else:
+            df_rvas = df_rvas[df_rvas.ac_case + df_rvas.ac_control < ac_filter]
         if not dont_remove_common:
             logger.info("Removing common variants from RVAS data")
             keys = ['uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt']
@@ -155,6 +166,72 @@ if __name__ == '__main__':
         '--ac-control-col',
         type=str,
         help='name of the column that has allele count in controls',
+    )
+    parser.add_argument(
+        '--mu-file',
+        type=str,
+        nargs='?',
+        const='__reference_default__',
+        default=None,
+        help='''
+        Path to a mutation-rate reference file (parquet) with columns chrom, pos, ref,
+        alt and a rate column, inner-joined to the variant data on chr-pos-ref-alt.
+        Pass the flag with no argument to use
+        <reference-dir>/roulette_missenses_filtered.parquet. Switches on the
+        mutation-rate null. Mutually exclusive with --mu-col.
+        '''
+    )
+    parser.add_argument(
+        '--mu-col',
+        type=str,
+        default=None,
+        help='''
+        Name of a mutation-rate column already present in --rvas-data-to-map, used
+        instead of a rate reference file. Switches on the mutation-rate null.
+        Mutually exclusive with --mu-file.
+        '''
+    )
+    parser.add_argument(
+        '--rate-calibration',
+        type=str,
+        default='global',
+        help='''
+        How to convert relative mutation rates into expected de novo counts for Test A
+        (the absolute test). 'global' (default) estimates lambda_hat = sum(x)/sum(mu)
+        over the calibration set; 'none' uses lambda_hat = 1, appropriate only when the
+        rate column already holds absolute expected counts; 'fixed:<value>' supplies it
+        directly. lambda_hat is always estimated AFTER variant-level filters and BEFORE
+        any gene-level selection.
+        '''
+    )
+    parser.add_argument(
+        '--rate-calibration-genes',
+        type=str,
+        default=None,
+        help='''
+        Optional file (same format as --df-filter) restricting the gene set used to
+        estimate lambda_hat. Defaults to the whole input file after variant-level
+        filters.
+        '''
+    )
+    parser.add_argument(
+        '--min-denovo',
+        type=int,
+        default=5,
+        help='''
+        Minimum case allele count per gene for the mutation-rate test, applied as
+        strictly greater than this value (so the default of 5 requires at least 6),
+        matching the existing 3DNT gene filter.
+        '''
+    )
+    parser.add_argument(
+        '--n-trios',
+        type=int,
+        default=None,
+        help='''
+        Optional number of trios, used only to report lambda_hat / (2 * n_trios) as a
+        units sanity check on the mutation rate model.
+        '''
     )
     parser.add_argument(
         '--run-3dnt',
@@ -415,6 +492,38 @@ if __name__ == '__main__':
     if args.pre_mapped_rvas is not None and args.rvas_data_to_map is not None:
         raise ValueError("--pre-mapped-rvas and --rvas-data-to-map are mutually exclusive")
 
+    if args.mu_col is not None and args.mu_file is not None:
+        raise ValueError("--mu-col and --mu-file are mutually exclusive")
+
+    mutation_rate_mode = (args.mu_col is not None) or (args.mu_file is not None)
+
+    if mutation_rate_mode:
+        if args.ac_control_col is not None:
+            raise ValueError("--mu-col/--mu-file cannot be combined with --ac-control-col")
+        if args.ignore_ac:
+            raise ValueError(
+                "--ignore-ac is not supported with a mutation-rate null: collapsing de novo "
+                "counts to 0/1 discards recurrence, which is signal here."
+            )
+        if args.mu_file == '__reference_default__':
+            if not args.reference_dir:
+                raise ValueError("--mu-file with no argument requires --reference-dir")
+            args.mu_file = os.path.join(args.reference_dir, 'roulette_missenses_filtered.parquet')
+        if args.mu_file is not None and not os.path.exists(args.mu_file):
+            raise FileNotFoundError(f"Mutation rate file not found: {args.mu_file}")
+        if args.rate_calibration not in ('global', 'none') and not args.rate_calibration.startswith('fixed:'):
+            raise ValueError(
+                f"Invalid --rate-calibration: {args.rate_calibration}. "
+                "Must be 'global', 'none', or 'fixed:<value>'."
+            )
+        if args.rate_calibration.startswith('fixed:'):
+            try:
+                float(args.rate_calibration.split(':', 1)[1])
+            except ValueError:
+                raise ValueError(f"Could not parse a number from --rate-calibration {args.rate_calibration}")
+        if args.min_denovo < 0:
+            raise ValueError(f"--min-denovo must be non-negative, got {args.min_denovo}")
+
     df_rvas, df_filter = map_and_filter_rvas(
         args.rvas_data_to_map,
         args.pre_mapped_rvas,
@@ -428,6 +537,8 @@ if __name__ == '__main__':
         args.ac_filter,
         args.dont_remove_common,
         args.include_lcr,
+        args.mu_col,
+        args.mu_file,
     )
 
 
@@ -467,10 +578,43 @@ if __name__ == '__main__':
         df_rvas.to_csv(args.save_df_rvas, sep='\t', index=False)
         did_nothing = False
 
-    if args.fdr_only and not args.run_3dnt:
+    if args.fdr_only and not args.run_3dnt and mutation_rate_mode:
+        from mutation_rate_test import mutation_rate_scan_test
+        mutation_rate_scan_test(
+            df_rvas, args.reference_dir, args.neighborhood_radius, args.pae_cutoff,
+            args.results_dir, args.n_sims, args.no_fdr, True, args.fdr_cutoff,
+            df_filter, args.fdr_file, args.pval_file, args.rate_calibration,
+            args.rate_calibration_genes, args.min_denovo, args.n_trios,
+        )
+        did_nothing = False
+
+    elif args.fdr_only and not args.run_3dnt:
         from empirical_fdr import compute_fdr
         df_results = compute_fdr(args.results_dir, args.fdr_cutoff, df_filter, args.reference_dir, args.pval_file)
         df_results.to_csv(f'{args.results_dir}/{args.fdr_file}', sep='\t', index=False)
+        did_nothing = False
+
+    elif args.run_3dnt and mutation_rate_mode:
+        logger.info("Starting scan test analysis with a mutation-rate null")
+        from mutation_rate_test import mutation_rate_scan_test
+        mutation_rate_scan_test(
+            df_rvas,
+            args.reference_dir,
+            args.neighborhood_radius,
+            args.pae_cutoff,
+            args.results_dir,
+            args.n_sims,
+            args.no_fdr,
+            args.fdr_only,
+            args.fdr_cutoff,
+            df_filter,
+            args.fdr_file,
+            args.pval_file,
+            args.rate_calibration,
+            args.rate_calibration_genes,
+            args.min_denovo,
+            args.n_trios,
+        )
         did_nothing = False
 
     elif args.run_3dnt:

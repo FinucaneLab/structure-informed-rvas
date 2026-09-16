@@ -210,32 +210,46 @@ def write_dataset(fid, name, data, clevel=5):
     )
 
 
-def read_p_values(fid, uniprot_id):
+def read_p_values(fid, uniprot_id, mu_mode=False):
     """
     Reads the p values for one uniprot_id from an HDF5 results file,
     with the exception of the null values.
+
+    When mu_mode is True the second column of the _nbhd dataset holds the expected
+    de novo count under that test's null rather than a control allele count, and the
+    reported effect size is a regularized observed/expected ratio.
     """
     pvalue_data = fid[uniprot_id][:]
     case_control = fid[f'{uniprot_id}_nbhd'][:]
 
-    # Calculate ratio on-the-fly
     nbhd_case = case_control[:, 0]
-    nbhd_control = case_control[:, 1]
-    n_case_total = nbhd_case.sum()
-    n_control_total = nbhd_control.sum()
-    ratio = (nbhd_case + 2) / (nbhd_control + 2 * n_control_total / n_case_total)
+    second = case_control[:, 1]
 
     radius_key = f'{uniprot_id}_radius'
     radius_vals = fid[radius_key][:, 0].astype(float) if radius_key in fid else np.full(len(nbhd_case), np.nan)
 
-    df = pd.DataFrame({'uniprot_id': uniprot_id,
-                       'aa_pos': np.arange(1, pvalue_data.shape[0]+1),
-                       'p_value': pvalue_data[:, 0],
-                       'ratio': ratio,
-                       'nbhd_case': nbhd_case,
-                       'nbhd_control': nbhd_control,
-                       'radius': radius_vals})
-    return df
+    base = {'uniprot_id': uniprot_id,
+            'aa_pos': np.arange(1, pvalue_data.shape[0]+1),
+            'p_value': pvalue_data[:, 0]}
+
+    if mu_mode:
+        base.update({'obs_exp': (nbhd_case + 1) / (second + 1),
+                     'nbhd_case': nbhd_case,
+                     'nbhd_expected': second,
+                     'radius': radius_vals})
+        return pd.DataFrame(base)
+
+    # Calculate ratio on-the-fly
+    nbhd_control = second
+    n_case_total = nbhd_case.sum()
+    n_control_total = nbhd_control.sum()
+    ratio = (nbhd_case + 2) / (nbhd_control + 2 * n_control_total / n_case_total)
+
+    base.update({'ratio': ratio,
+                 'nbhd_case': nbhd_case,
+                 'nbhd_control': nbhd_control,
+                 'radius': radius_vals})
+    return pd.DataFrame(base)
 
 def read_original_mutation_data(fid, uniprot_id):
     """
