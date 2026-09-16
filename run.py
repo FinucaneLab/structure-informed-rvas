@@ -192,6 +192,29 @@ if __name__ == '__main__':
         '''
     )
     parser.add_argument(
+        '--mu-residue-file',
+        type=str,
+        default=None,
+        help='''
+        Per-residue mutation rate table built by precompute_mu_per_residue.py, giving the
+        summed rate over ALL possible missense variants at each residue. Required with
+        --mu-file; defaults to <reference-dir>/mu_per_residue.parquet. This is what makes
+        the denominator the gene's real mutational opportunity rather than only the
+        variants present in the de novo file.
+        '''
+    )
+    parser.add_argument(
+        '--min-mu-coverage',
+        type=float,
+        default=0.0,
+        help='''
+        Skip genes where the rate model covers less than this fraction of their possible
+        missense variants. Default 0 (report mu_coverage but exclude nothing): coverage
+        gaps cost power rather than biasing the tests, because a variant's de novo count
+        and its rate are dropped together. Raise it to exclude poorly covered genes.
+        '''
+    )
+    parser.add_argument(
         '--rate-calibration',
         type=str,
         default='global',
@@ -543,6 +566,17 @@ if __name__ == '__main__':
                 raise ValueError(f"Could not parse a number from --rate-calibration {args.rate_calibration}")
         if args.min_denovo < 0:
             raise ValueError(f"--min-denovo must be non-negative, got {args.min_denovo}")
+        if args.mu_file is not None:
+            if args.mu_residue_file is None:
+                if not args.reference_dir:
+                    raise ValueError("--mu-file requires --reference-dir or --mu-residue-file")
+                args.mu_residue_file = os.path.join(args.reference_dir, 'mu_per_residue.parquet')
+            if not os.path.exists(args.mu_residue_file):
+                raise FileNotFoundError(
+                    f"Per-residue mutation rate table not found: {args.mu_residue_file}\n"
+                    f"Build it with: python precompute_mu_per_residue.py "
+                    f"--reference-dir {args.reference_dir}"
+                )
 
     df_rvas, df_filter = map_and_filter_rvas(
         args.rvas_data_to_map,
@@ -605,6 +639,7 @@ if __name__ == '__main__':
             args.results_dir, args.n_sims, args.no_fdr, True, args.fdr_cutoff,
             df_filter, args.fdr_file, args.pval_file, args.rate_calibration,
             args.rate_calibration_genes, args.min_denovo, args.n_trios, args.seed,
+            args.mu_residue_file, args.mu_col is not None, args.min_mu_coverage,
         )
         did_nothing = False
 
@@ -635,6 +670,9 @@ if __name__ == '__main__':
             args.min_denovo,
             args.n_trios,
             args.seed,
+            args.mu_residue_file,
+            args.mu_col is not None,
+            args.min_mu_coverage,
         )
         did_nothing = False
 

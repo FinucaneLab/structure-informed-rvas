@@ -20,6 +20,14 @@ neighborhood sits at X_i ~= lambda_hat * M_i, so Test A does not call it.
 Both tests are one-sided (upper tail). Each is corrected separately by the existing
 empirical FDR/FWER machinery; a neighborhood passes when it passes both, which is
 recorded as fdr_max = max(fdr_poisson, fdr_binomial) and likewise for FWER.
+
+M_i must be the summed rate of ALL possible missense SNVs in the neighborhood, so it
+comes from the precomputed per-residue table (precompute_mu_per_residue.py), not from
+the variant file. A cohort de novo file lists only variants someone observed: taking
+the universe from one makes M_g an observation-selected subset of the gene's real
+opportunity. For the ASD counts file that subset was ~1% of possible missense variants
+and skewed observed/expected by up to 19.7x across mutation-rate deciles, while the
+full universe is flat to within 1.37x.
 """
 
 import os
@@ -40,19 +48,70 @@ BINOMIAL_GROUP = 'binomial'
 
 
 # ---------------------------------------------------------------------------
+# per-residue mutation rate table
+# ---------------------------------------------------------------------------
+
+def load_mu_per_residue(path):
+    """Load the precomputed per-(gene, residue) mutation rate table."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f'Per-residue mutation rate table not found at {path}. Build it with:\n'
+            f'  python precompute_mu_per_residue.py --reference-dir <REFERENCE_DIR>'
+        )
+    df_mu = pd.read_parquet(path)
+    logger.info(f'Loaded per-residue mutation rates: {len(df_mu)} residues across '
+                f'{df_mu.uniprot_id.nunique()} genes from {os.path.basename(path)}')
+    return df_mu
+
+
+def build_mu_lookup(df_mu):
+    """Group the table once into {uniprot_id: (aa_pos, mu, n_with_mu, n_possible)}."""
+    lookup = {}
+    for uniprot_id, g in df_mu.groupby('uniprot_id', sort=False):
+        lookup[uniprot_id] = (g.aa_pos.values.astype(int),
+                              g.mu.values.astype(float),
+                              g.n_with_mu.values.astype(float),
+                              g.n_possible.values.astype(float))
+    return lookup
+
+
+def mu_vector_for_protein(mu_lookup, uniprot_id, n_res):
+    """
+    Per-residue mutation rate as an (n_res, 1) column, plus the rate-table coverage
+    over the residues the structure covers.
+    """
+    entry = mu_lookup.get(uniprot_id)
+    if entry is None:
+        raise ValueError(f'no mutation rate data for {uniprot_id}')
+    aa_pos, mu, n_with_mu, n_possible = entry
+    in_range = (aa_pos >= 1) & (aa_pos <= n_res)
+    m = np.zeros((n_res, 1), dtype=float)
+    m[aa_pos[in_range] - 1, 0] = mu[in_range]
+    denom = n_possible[in_range].sum()
+    coverage = float(n_with_mu[in_range].sum() / denom) if denom > 0 else np.nan
+    return m, coverage
+
+
+# ---------------------------------------------------------------------------
 # lambda_hat
 # ---------------------------------------------------------------------------
 
-def estimate_lambda(df_rvas, rate_calibration, calibration_genes=None, n_trios=None):
+def estimate_lambda(df_rvas, df_mu, rate_calibration, calibration_genes=None, n_trios=None):
     """
     Estimate the factor converting relative mutation rates into expected de novo counts.
+
+    The denominator is the total rate over the FULL set of possible missense variants in
+    the relevant genes (from df_mu), not over the variants present in the de novo file.
+    Using the file's own variants understates the opportunity by ~100x and biases the
+    result, because such a file contains only variants that were observed.
 
     MUST be called after all variant-level filters (missense mapping, rate join, common
     variant and LCR removal, max-AC) and BEFORE any gene-level selection. Gene-level
     selection is selection on the outcome: restricting to an associated gene set lets
     lambda_hat absorb the very enrichment Test A exists to verify, and applying
-    --min-denovo first keeps only genes whose de novo count came out high, which inflates
-    lambda_hat badly.
+    --min-denovo first keeps only genes whose de novo count came out high. Measured on
+    the ASD data, the variant-level filters move lambda_hat by under 0.2% while applying
+    the gene filter first inflates it by 1.43x.
     """
     if rate_calibration == 'none':
         logger.info('Rate calibration: none (lambda_hat = 1). '
@@ -64,29 +123,40 @@ def estimate_lambda(df_rvas, rate_calibration, calibration_genes=None, n_trios=N
         logger.info(f'Rate calibration: fixed, lambda_hat = {lambda_hat:.6g}')
         return lambda_hat
 
-    # A variant mapping to several proteins appears once per protein; count it once.
-    df_cal = df_rvas.drop_duplicates(subset='Variant ID')
+    # Genes where a de novo could have been seen at all, i.e. those the input maps to.
+    genes = set(df_rvas.uniprot_id.unique())
     if calibration_genes is not None:
-        gene_set = set(calibration_genes)
-        df_cal = df_cal[df_cal.uniprot_id.isin(gene_set)]
-        logger.info(f'Estimating lambda_hat within {len(gene_set)} genes from --rate-calibration-genes')
+        genes &= set(calibration_genes)
+        logger.info(f'Estimating lambda_hat within {len(genes)} genes from --rate-calibration-genes')
 
+    df_cal = df_rvas[df_rvas.uniprot_id.isin(genes)]
+    mu_cal = df_mu[df_mu.uniprot_id.isin(genes)]
+
+    # Not de-duplicated by variant: df_mu carries one row per (gene, residue), so a
+    # variant shared by two genes contributes opportunity to both, and the matching
+    # numerator must count its de novos once per gene too.
     sum_x = float(df_cal.ac_case.sum())
-    sum_mu = float(df_cal.mu.sum())
+    sum_mu = float(mu_cal.mu.sum())
     if sum_mu <= 0:
         raise ValueError('Total mutation rate over the calibration set is zero; cannot estimate lambda_hat.')
 
     lambda_hat = sum_x / sum_mu
     logger.info(
         f'lambda_hat = {lambda_hat:.6g}  '
-        f'(sum_x = {sum_x:.0f}, sum_mu = {sum_mu:.6g}, '
-        f'{len(df_cal)} variants in {df_cal.uniprot_id.nunique()} genes)'
+        f'(sum_x = {sum_x:.0f} de novos, sum_mu = {sum_mu:.6g} over all possible '
+        f'missense variants in {len(genes)} genes)'
     )
     if n_trios is not None and n_trios > 0:
-        logger.info(
-            f'Units check: lambda_hat / (2 * n_trios) = {lambda_hat / (2 * n_trios):.6g} '
-            '(expect ~1 if the rate model is per-haploid-per-generation)'
-        )
+        # lambda_hat itself is not interpretable when the rate model is relative (as
+        # Roulette's is), so check the quantity that is: de novo missense per trio.
+        per_trio = sum_x / n_trios
+        logger.info(f'Sanity check: {per_trio:.3f} de novo missense per trio '
+                    f'({sum_x:.0f} over {n_trios} trios); expect roughly 0.6-1.1')
+        if not 0.3 < per_trio < 2.0:
+            logger.warning(
+                f'{per_trio:.3f} de novo missense per trio is outside the plausible '
+                'range. Check --n-trios, and whether the input is exome-wide.'
+            )
     return lambda_hat
 
 
@@ -203,12 +273,14 @@ def compute_all_pvals_mu(
         uniprot_id,
         n_sims,
         lambda_hat,
+        mu_lookup,
         radius=15,
         pae_cutoff=15,
         seed=None,
 ):
     """
-    Returns (df_pvals_poisson, df_pvals_binomial, adjacency_matrix) for one protein.
+    Returns (df_pvals_poisson, df_pvals_binomial, adjacency_matrix, mu_coverage)
+    for one protein.
     """
     rng = np.random.default_rng(seed)
 
@@ -226,9 +298,13 @@ def compute_all_pvals_mu(
     df = restrict_to_structure(df, n_res, uniprot_id)
 
     x_obs = sum_per_residue(df, 'ac_case', n_res, dtype=int)
-    m = sum_per_residue(df, 'mu', n_res, dtype=float)
+    # Opportunity comes from the full possible-missense universe, not from the observed
+    # variants in df -- see the module docstring.
+    m, mu_coverage = mu_vector_for_protein(mu_lookup, uniprot_id, n_res)
     n_g = int(x_obs.sum())
     m_g = float(m.sum())
+    if m_g <= 0:
+        raise ValueError(f'total mutation rate over the structure is zero for {uniprot_id}')
 
     # Observed counts sit in column 0 of both matrices, so the two tests see identical
     # observed data and differ only in their null.
@@ -268,7 +344,7 @@ def compute_all_pvals_mu(
 
     return (_build(p_a, nbhd_a_obs, exp_a, radius_a),
             _build(p_b, nbhd_b_obs, exp_b, radius_b),
-            adjacency_matrix)
+            adjacency_matrix, mu_coverage)
 
 
 def write_df_pvals_mu(results_dir, uniprot_id, df_pvals, pval_file, group):
@@ -287,7 +363,7 @@ def write_df_pvals_mu(results_dir, uniprot_id, df_pvals, pval_file, group):
 # orchestration
 # ---------------------------------------------------------------------------
 
-def _select_genes(df_rvas, df_fdr_filter, min_denovo):
+def _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage=0.0):
     """
     Gene-level selection. Called AFTER estimate_lambda -- see the note there on why the
     order matters.
@@ -296,9 +372,42 @@ def _select_genes(df_rvas, df_fdr_filter, min_denovo):
     in scan_test._filter_proteins_by_allele_count (which uses `> min_alleles`), so the
     default of 5 requires at least 6 de novos.
     """
-    grouped = df_rvas.groupby('uniprot_id')[['ac_case', 'mu']].sum()
-    keep = grouped[(grouped['ac_case'] > min_denovo) & (grouped['mu'] > 0)]
-    uniprot_id_list = keep.index.tolist()
+    grouped = df_rvas.groupby('uniprot_id')['ac_case'].sum()
+    uniprot_id_list = grouped[grouped > min_denovo].index.tolist()
+
+    # A gene is only testable if it carries a nonzero total mutation rate. Genes with
+    # rows in the table but zero total rate are those the rate model does not cover at
+    # all -- the Roulette file is autosomes only, so every chrX gene lands here.
+    missing = [u for u in uniprot_id_list if u not in mu_lookup]
+    zero_rate = [u for u in uniprot_id_list
+                 if u in mu_lookup and mu_lookup[u][1].sum() <= 0]
+    if missing:
+        logger.warning(f'{len(missing)} genes are absent from the rate table and are skipped')
+    if zero_rate:
+        logger.warning(
+            f'{len(zero_rate)} genes have zero total mutation rate and are skipped. The '
+            'Roulette rate file covers autosomes only, so chrX genes cannot be tested '
+            'with it; supply a rate file with chrX to include them.'
+        )
+    skip = set(missing) | set(zero_rate)
+    uniprot_id_list = [u for u in uniprot_id_list if u not in skip]
+
+    # Rate-table coverage costs power rather than biasing the tests -- a variant's de novo
+    # count and its rate are dropped together, so x_j and m_j stay on the same variant set
+    # at every residue and the test simply covers a narrower region. Coverage gaps do
+    # cluster spatially though (Moran's I p<0.05 in 29 of the 30 lowest-coverage analysis
+    # genes), so in those genes some neighborhoods carry no rate data at all. Reported per
+    # gene as mu_coverage; excluded only if asked for.
+    if min_mu_coverage > 0:
+        low = []
+        for u in uniprot_id_list:
+            _, _, n_with_mu, n_possible = mu_lookup[u]
+            denom = n_possible.sum()
+            if denom > 0 and (n_with_mu.sum() / denom) < min_mu_coverage:
+                low.append(u)
+        if low:
+            logger.info(f'{len(low)} genes have mu_coverage < {min_mu_coverage} and are skipped')
+            uniprot_id_list = [u for u in uniprot_id_list if u not in set(low)]
 
     if df_fdr_filter is not None:
         uniprot_id_list = list(np.intersect1d(uniprot_id_list, np.unique(df_fdr_filter.uniprot_id)))
@@ -311,7 +420,7 @@ def _select_genes(df_rvas, df_fdr_filter, min_denovo):
 
 
 def _process_proteins_batch_mu(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
-                               results_dir, n_sims, pval_file, lambda_hat, seed=None):
+                               results_dir, n_sims, pval_file, lambda_hat, mu_lookup, seed=None):
     """Run both tests for each protein. Returns per-gene totals for the output table."""
     pdb_file_pos_guide = f'{reference_dir}/pdb_pae_file_pos_guide.tsv'
     pdb_dir = f'{reference_dir}/pdb_files/'
@@ -326,14 +435,15 @@ def _process_proteins_batch_mu(df_rvas, uniprot_id_list, reference_dir, radius, 
             # Derive a per-protein stream from the seed so results do not depend on
             # how genes are split across parallel jobs.
             protein_seed = None if seed is None else [seed, i]
-            df_a, df_b, _ = compute_all_pvals_mu(
+            df_a, df_b, _, mu_coverage = compute_all_pvals_mu(
                 df, pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id,
-                n_sims, lambda_hat, radius, pae_cutoff, seed=protein_seed,
+                n_sims, lambda_hat, mu_lookup, radius, pae_cutoff, seed=protein_seed,
             )
             write_df_pvals_mu(results_dir, uniprot_id, df_a, pval_file, POISSON_GROUP)
             write_df_pvals_mu(results_dir, uniprot_id, df_b, pval_file, BINOMIAL_GROUP)
             gene_totals[uniprot_id] = (int(df_a['original_case'].sum()),
-                                       float(df_a['original_mu'].sum()))
+                                       float(df_a['original_mu'].sum()),
+                                       mu_coverage)
         except FileNotFoundError as e:
             logger.error(f'{uniprot_id}: Required file not found - {e}')
         except KeyError as e:
@@ -411,6 +521,9 @@ def mutation_rate_scan_test(
     min_denovo,
     n_trios,
     seed=None,
+    mu_residue_file=None,
+    mu_from_input=False,
+    min_mu_coverage=0.0,
 ):
     """3D neighborhood test against a mutation-rate null. See module docstring."""
 
@@ -428,16 +541,34 @@ def mutation_rate_scan_test(
     if rate_calibration_genes is not None:
         calibration_genes = pd.read_csv(rate_calibration_genes, sep='\t')['uniprot_id'].unique()
 
-    # lambda_hat BEFORE gene-level selection -- see estimate_lambda.
-    lambda_hat = estimate_lambda(df_rvas, rate_calibration, calibration_genes, n_trios)
+    if mu_from_input:
+        # --mu-col: the universe is whatever the input file lists. Correct only if that
+        # file enumerates every possible missense variant, with zero-count rows kept.
+        logger.warning(
+            'Using --mu-col, so mutational opportunity is taken from the input file. '
+            'This is only valid if the file lists ALL possible missense variants, '
+            'including those with no observed de novos. A file restricted to observed '
+            'variants will understate opportunity and bias both tests.'
+        )
+        df_mu = (df_rvas.groupby(['uniprot_id', 'aa_pos'], as_index=False)
+                 .agg(mu=('mu', 'sum')))
+        df_mu['n_with_mu'] = np.nan
+        df_mu['n_possible'] = np.nan
+    else:
+        df_mu = load_mu_per_residue(mu_residue_file)
 
-    uniprot_id_list = _select_genes(df_rvas, df_fdr_filter, min_denovo)
+    mu_lookup = build_mu_lookup(df_mu)
+
+    # lambda_hat BEFORE gene-level selection -- see estimate_lambda.
+    lambda_hat = estimate_lambda(df_rvas, df_mu, rate_calibration, calibration_genes, n_trios)
+
+    uniprot_id_list = _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage)
     if len(uniprot_id_list) == 0:
         raise ValueError('No genes passed the --min-denovo filter; nothing to test.')
 
     gene_totals = _process_proteins_batch_mu(
         df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
-        results_dir, n_sims, pval_file, lambda_hat, seed,
+        results_dir, n_sims, pval_file, lambda_hat, mu_lookup, seed,
     )
 
     with h5py.File(os.path.join(results_dir, pval_file), 'a') as fid:
@@ -459,8 +590,8 @@ def mutation_rate_scan_test(
                                     reference_dir, pval_file)
 
     df_totals = pd.DataFrame(
-        [(uid, n_g, m_g) for uid, (n_g, m_g) in gene_totals.items()],
-        columns=['uniprot_id', 'n_denovo_gene', 'mu_gene'],
+        [(uid, n_g, m_g, cov) for uid, (n_g, m_g, cov) in gene_totals.items()],
+        columns=['uniprot_id', 'n_denovo_gene', 'mu_gene', 'mu_coverage'],
     )
     df_results = df_results.merge(df_totals, on='uniprot_id', how='left')
 
