@@ -222,9 +222,40 @@ def binomial_pval_lookup(p_nbhd, n_trials, x_max, direction='enrichment'):
 # null simulation
 # ---------------------------------------------------------------------------
 
-def simulate_poisson_null(m, lambda_hat, n_sims, rng):
-    """Test A null: de novos drawn independently per residue at the modelled rate."""
-    return rng.poisson(lambda_hat * m, size=(m.shape[0], n_sims))
+def simulate_poisson_null(m, lambda_hat, n_sims, rng, min_total=None):
+    """
+    Test A null: de novos drawn independently per residue at the modelled rate.
+
+    min_total makes the null respect the --min-denovo gene filter. That filter is
+    selection on the outcome, so without it the observed data sits systematically above
+    its own null: on the simulated-null ASD run the selected genes had a median
+    observed/expected gene total of 1.50, and Test A's per-gene FWER came out at 14%
+    instead of 5%. Test B never had this problem because conditioning on N_g cancels the
+    selection exactly.
+
+    Conditioning is done by drawing the gene total from a truncated Poisson and then
+    spreading it multinomially, which is exactly Poisson-conditional-on-the-total and
+    avoids rejection sampling.
+    """
+    if min_total is None or min_total <= 0:
+        return rng.poisson(lambda_hat * m, size=(m.shape[0], n_sims))
+
+    total_mean = float(lambda_hat * m.sum())
+    # the filter keeps genes with strictly more than min_total, so condition on > min_total
+    cdf_lo = min(float(poisson.cdf(int(min_total), total_mean)), 1.0 - 1e-12)
+    u = rng.random(n_sims)
+    totals = poisson.ppf(cdf_lo + u * (1.0 - cdf_lo), total_mean)
+    totals = np.nan_to_num(totals, posinf=0.0).astype(np.int64)
+
+    p = m.flatten() / m.sum()
+    p = p / p.sum()
+    try:
+        return rng.multinomial(totals, p).T
+    except (TypeError, ValueError):   # older numpy: n must be a scalar
+        out = np.empty((m.shape[0], n_sims), dtype=np.int64)
+        for s in range(n_sims):
+            out[:, s] = rng.multinomial(int(totals[s]), p)
+        return out
 
 
 def simulate_multinomial_null(m, n_g, n_sims, rng):
@@ -293,6 +324,7 @@ def compute_all_pvals_mu(
         pae_cutoff=15,
         seed=None,
         direction='enrichment',
+        min_denovo=None,
 ):
     """
     Returns (df_pvals_poisson, df_pvals_binomial, adjacency_matrix, mu_coverage)
@@ -324,7 +356,7 @@ def compute_all_pvals_mu(
 
     # Observed counts sit in column 0 of both matrices, so the two tests see identical
     # observed data and differ only in their null.
-    x_a = np.hstack([x_obs, simulate_poisson_null(m, lambda_hat, n_sims, rng)])
+    x_a = np.hstack([x_obs, simulate_poisson_null(m, lambda_hat, n_sims, rng, min_denovo)])
     x_b = np.hstack([x_obs, simulate_multinomial_null(m, n_g, n_sims, rng)])
 
     per_radius = {r: _pvals_for_radius(adj_matrices[r], x_a, x_b, m, lambda_hat, n_g, m_g,
@@ -464,7 +496,8 @@ def _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage
 
 def _process_proteins_batch_mu(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
                                results_dir, n_sims, pval_file, lambda_hat, mu_lookup,
-                               seed=None, max_residues=None, direction='enrichment'):
+                               seed=None, max_residues=None, direction='enrichment',
+                               min_denovo=None):
     """Run both tests for each protein. Returns per-gene totals for the output table."""
     pdb_file_pos_guide = f'{reference_dir}/pdb_pae_file_pos_guide.tsv'
     pdb_dir = f'{reference_dir}/pdb_files/'
@@ -503,7 +536,7 @@ def _process_proteins_batch_mu(df_rvas, uniprot_id_list, reference_dir, radius, 
             df_a, df_b, _, mu_coverage = compute_all_pvals_mu(
                 df, pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id,
                 n_sims, lambda_hat, mu_lookup, radius, pae_cutoff, seed=protein_seed,
-                direction=direction,
+                direction=direction, min_denovo=min_denovo,
             )
             write_df_pvals_mu(results_dir, uniprot_id, df_a, pval_file, POISSON_GROUP)
             write_df_pvals_mu(results_dir, uniprot_id, df_b, pval_file, BINOMIAL_GROUP)
@@ -523,7 +556,7 @@ def _process_proteins_batch_mu(df_rvas, uniprot_id_list, reference_dir, radius, 
     return gene_totals
 
 
-def _merge_test_results(df_a, df_b):
+def _merge_test_results(df_a, df_b, fdr_cutoff=0.05, fwer_cutoff=0.05):
     """Join the two independently corrected result tables and take the max FDR/FWER."""
     a = df_a.rename(columns={'p_value': 'p_poisson', 'fdr': 'fdr_poisson',
                              'fwer': 'fwer_poisson', 'nbhd_expected': 'exp_poisson',
@@ -538,17 +571,20 @@ def _merge_test_results(df_a, df_b):
     # A neighborhood passes only if it passes both tests.
     merged['fdr_max'] = merged[['fdr_poisson', 'fdr_binomial']].max(axis=1)
     merged['fwer_max'] = merged[['fwer_poisson', 'fwer_binomial']].max(axis=1)
+    merged['sig_fwer_both'] = merged['fwer_max'] < fwer_cutoff
+    merged['sig_fdr_both'] = merged['fdr_max'] < fdr_cutoff
     return merged
 
 
-def _compute_both_fdrs(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file):
+def _compute_both_fdrs(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file,
+                       fwer_cutoff=0.05):
     logger.info('Computing FDR and FWER for Test A (Poisson, absolute)')
     df_a = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file,
                        group=POISSON_GROUP, mu_mode=True)
     logger.info('Computing FDR and FWER for Test B (binomial, vs rest of gene)')
     df_b = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file,
                        group=BINOMIAL_GROUP, mu_mode=True)
-    return _merge_test_results(df_a, df_b)
+    return _merge_test_results(df_a, df_b, fdr_cutoff, fwer_cutoff)
 
 
 def summarize_mu_results(df_results, fdr_cutoff):
@@ -567,6 +603,10 @@ def summarize_mu_results(df_results, fdr_cutoff):
         'regional constraint would otherwise have handed us as false positives.'
     )
     logger.info(f'{len(a_only)} neighborhoods pass Test A but not Test B.')
+    n_fwer = int(df_results.sig_fwer_both.sum())
+    n_fwer_genes = int(df_results.loc[df_results.sig_fwer_both, 'uniprot_id'].nunique())
+    logger.info(f'{n_fwer} neighborhoods in {n_fwer_genes} genes pass both tests at '
+                f'FWER < 0.05 (column sig_fwer_both).')
 
 
 def mutation_rate_scan_test(
@@ -647,7 +687,7 @@ def mutation_rate_scan_test(
     gene_totals = _process_proteins_batch_mu(
         df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
         results_dir, n_sims, pval_file, lambda_hat, mu_lookup, seed, max_residues,
-        direction,
+        direction, min_denovo,
     )
 
     with h5py.File(os.path.join(results_dir, pval_file), 'a') as fid:

@@ -266,6 +266,52 @@ def test_depletion_direction():
     check('enrichment tail does not', enr < 0.05, f'rate {enr:.3f}')
 
 
+# ---------------------------------------------------------------------------
+def test_min_denovo_selection_bias():
+    """
+    --min-denovo is selection on the outcome: it keeps genes whose count came out high.
+    Test A's null must be conditioned on the same filter or the observed data sits above
+    its own null. Test B is immune because it conditions on N_g.
+
+    Regression guard for the real finding: on the simulated-null ASD run, Test A's
+    per-gene FWER was 14.3% instead of 5%, with selected genes showing a median
+    observed/expected gene total of 1.50.
+    """
+    print('\n8. --min-denovo selection bias in the Test A null')
+    n_res, n_sims, min_denovo = 250, 600, 5
+    adj = banded_adjacency(n_res, 8)
+    rng = np.random.default_rng(11)
+
+    hits = {False: 0, True: 0}
+    n_kept = 0
+    ratio = 0.0
+    tried = 0
+    while n_kept < 120 and tried < 100000:
+        tried += 1
+        m = rng.uniform(0.2, 3.0, size=(n_res, 1))
+        lam = 4.0 / m.sum()            # expected total ~4, so ">5" really is selective
+        obs = rng.poisson(lam * m, size=(n_res, 1))
+        if obs.sum() <= min_denovo:
+            continue
+        n_kept += 1
+        n_g = int(obs.sum())
+        ratio += n_g / (lam * m.sum())
+        for cond in (False, True):
+            nul = simulate_poisson_null(m, lam, n_sims, rng, min_denovo if cond else None)
+            x = np.hstack([obs, nul])
+            p_a, _, _, _, _ = _pvals_for_radius(adj, x, x, m, lam, n_g, float(m.sum()))
+            o = p_a[:, 0].min()
+            hits[cond] += (p_a[:, 1:].min(axis=0) <= o).mean() < 0.05
+
+    unc = 100 * hits[False] / n_kept
+    con = 100 * hits[True] / n_kept
+    print(f'      {n_kept} genes kept, mean observed/expected {ratio / n_kept:.2f}; '
+          f'per-gene FWER unconditioned {unc:.1f}%, conditioned {con:.1f}%')
+    check('unconditioned Test A null is inflated by the gene filter', unc > 9.0,
+          f'{unc:.1f}%')
+    check('conditioning on the filter restores calibration', con <= 9.0, f'{con:.1f}%')
+
+
 if __name__ == '__main__':
     test_uniform_rate_degeneracy()
     test_lookup_equivalence()
@@ -274,5 +320,6 @@ if __name__ == '__main__':
     test_gene_level_inflation()
     test_injected_cluster_recovery()
     test_depletion_direction()
+    test_min_denovo_selection_bias()
     print('\n' + ('ALL TESTS PASSED' if not FAILURES else f'FAILURES: {FAILURES}'))
     sys.exit(1 if FAILURES else 0)
