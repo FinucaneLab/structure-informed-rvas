@@ -222,40 +222,34 @@ def binomial_pval_lookup(p_nbhd, n_trials, x_max, direction='enrichment'):
 # null simulation
 # ---------------------------------------------------------------------------
 
-def simulate_poisson_null(m, lambda_hat, n_sims, rng, min_total=None):
+def simulate_poisson_null(m, lambda_hat, n_sims, rng):
     """
     Test A null: de novos drawn independently per residue at the modelled rate.
 
-    min_total makes the null respect the --min-denovo gene filter. That filter is
-    selection on the outcome, so without it the observed data sits systematically above
-    its own null: on the simulated-null ASD run the selected genes had a median
-    observed/expected gene total of 1.50, and Test A's per-gene FWER came out at 14%
-    instead of 5%. Test B never had this problem because conditioning on N_g cancels the
-    selection exactly.
+    Deliberately NOT conditioned on the --min-denovo gene filter. That filter is there to
+    spend compute where there is power, not as part of the inferential design, so the null
+    stays the plain rate model.
 
-    Conditioning is done by drawing the gene total from a truncated Poisson and then
-    spreading it multinomially, which is exactly Poisson-conditional-on-the-total and
-    avoids rejection sampling.
+    The cost of that choice has to be carried into interpretation rather than the code.
+    --min-denovo keeps genes whose de novo count came out high, so the observed data sits
+    above this null and Test A's empirical FDR/FWER are anti-conservative. Measured on the
+    simulated-null ASD run: selected genes had a median observed/expected gene total of
+    1.50 (1.39x in aggregate), and Test A's per-gene FWER came out at 14.3% against a
+    nominal 5%.
+
+    Two consequences:
+      - Test A's standalone FDR/FWER are not calibrated and should not be quoted as
+        significance. Use it as a direction-of-effect guard.
+      - Because Test A IS the guard against regional constraint, a too-liberal Test A
+        under-flags. "Passes Test B but not Test A" coming out empty is weak evidence,
+        not a demonstration that no hit is a constraint artifact.
+
+    Test B is unaffected: conditioning on N_g cancels the selection exactly (4.3% on the
+    same run). And the primary criterion max(fdr_poisson, fdr_binomial) < q requires
+    fdr_binomial < q, so the reported set is a subset of the Test B set and inherits its
+    validity.
     """
-    if min_total is None or min_total <= 0:
-        return rng.poisson(lambda_hat * m, size=(m.shape[0], n_sims))
-
-    total_mean = float(lambda_hat * m.sum())
-    # the filter keeps genes with strictly more than min_total, so condition on > min_total
-    cdf_lo = min(float(poisson.cdf(int(min_total), total_mean)), 1.0 - 1e-12)
-    u = rng.random(n_sims)
-    totals = poisson.ppf(cdf_lo + u * (1.0 - cdf_lo), total_mean)
-    totals = np.nan_to_num(totals, posinf=0.0).astype(np.int64)
-
-    p = m.flatten() / m.sum()
-    p = p / p.sum()
-    try:
-        return rng.multinomial(totals, p).T
-    except (TypeError, ValueError):   # older numpy: n must be a scalar
-        out = np.empty((m.shape[0], n_sims), dtype=np.int64)
-        for s in range(n_sims):
-            out[:, s] = rng.multinomial(int(totals[s]), p)
-        return out
+    return rng.poisson(lambda_hat * m, size=(m.shape[0], n_sims))
 
 
 def simulate_multinomial_null(m, n_g, n_sims, rng):
@@ -324,7 +318,6 @@ def compute_all_pvals_mu(
         pae_cutoff=15,
         seed=None,
         direction='enrichment',
-        min_denovo=None,
 ):
     """
     Returns (df_pvals_poisson, df_pvals_binomial, adjacency_matrix, mu_coverage)
@@ -356,7 +349,7 @@ def compute_all_pvals_mu(
 
     # Observed counts sit in column 0 of both matrices, so the two tests see identical
     # observed data and differ only in their null.
-    x_a = np.hstack([x_obs, simulate_poisson_null(m, lambda_hat, n_sims, rng, min_denovo)])
+    x_a = np.hstack([x_obs, simulate_poisson_null(m, lambda_hat, n_sims, rng)])
     x_b = np.hstack([x_obs, simulate_multinomial_null(m, n_g, n_sims, rng)])
 
     per_radius = {r: _pvals_for_radius(adj_matrices[r], x_a, x_b, m, lambda_hat, n_g, m_g,
@@ -496,8 +489,7 @@ def _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage
 
 def _process_proteins_batch_mu(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
                                results_dir, n_sims, pval_file, lambda_hat, mu_lookup,
-                               seed=None, max_residues=None, direction='enrichment',
-                               min_denovo=None):
+                               seed=None, max_residues=None, direction='enrichment'):
     """Run both tests for each protein. Returns per-gene totals for the output table."""
     pdb_file_pos_guide = f'{reference_dir}/pdb_pae_file_pos_guide.tsv'
     pdb_dir = f'{reference_dir}/pdb_files/'
@@ -536,7 +528,7 @@ def _process_proteins_batch_mu(df_rvas, uniprot_id_list, reference_dir, radius, 
             df_a, df_b, _, mu_coverage = compute_all_pvals_mu(
                 df, pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id,
                 n_sims, lambda_hat, mu_lookup, radius, pae_cutoff, seed=protein_seed,
-                direction=direction, min_denovo=min_denovo,
+                direction=direction,
             )
             write_df_pvals_mu(results_dir, uniprot_id, df_a, pval_file, POISSON_GROUP)
             write_df_pvals_mu(results_dir, uniprot_id, df_b, pval_file, BINOMIAL_GROUP)
@@ -687,7 +679,7 @@ def mutation_rate_scan_test(
     gene_totals = _process_proteins_batch_mu(
         df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
         results_dir, n_sims, pval_file, lambda_hat, mu_lookup, seed, max_residues,
-        direction, min_denovo,
+        direction,
     )
 
     with h5py.File(os.path.join(results_dir, pval_file), 'a') as fid:

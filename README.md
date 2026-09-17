@@ -406,6 +406,24 @@ Combining warns if the chunks disagree on `lambda_hat`.
   exact over a narrower region. A neighborhood with no rate data has `M_i = 0` and
   necessarily `X_i = 0`, so it returns p = 1. Per-gene coverage is reported as
   `mu_coverage` (median 0.986 genome-wide; 0.981 across the ASD analysis genes).
+- **Test A's standalone FDR/FWER are not calibrated when `--min-denovo` is in use, by
+  design.** That filter keeps genes whose de novo count came out high, and Test A's null
+  is deliberately left as the plain rate model rather than being conditioned on the
+  filter -- the filter is there to spend compute where there is power, not as part of the
+  inferential design. So the observed data sits above Test A's null: on the
+  simulated-null ASD run the selected genes had a median observed/expected gene total of
+  1.50, and Test A's per-gene FWER came out at 14.3% against a nominal 5%.
+
+  Read Test A as a direction-of-effect guard, not as significance. Two things follow.
+  Quote `fdr_binomial` / `fwer_binomial` and the combined `fdr_max` / `fwer_max`, never
+  `fdr_poisson` on its own. And since Test A is the guard against regional constraint, a
+  too-liberal Test A under-flags, so "passes Test B but not Test A" coming out empty is
+  weak evidence rather than a demonstration that no hit is a constraint artifact.
+
+  Test B is unaffected (4.3% on the same run) because conditioning on `N_g` cancels the
+  selection exactly, and `fdr_max < q` requires `fdr_binomial < q`, so the reported set
+  is a subset of the Test B set and inherits its validity. Running without `--min-denovo`
+  removes the issue at the cost of testing every gene.
 - FDR control over the *intersection* of two rejection sets is not guaranteed by the two
   marginal FDRs as a theorem. It is conservative in practice, since an intersection can
   only remove discoveries, and the simulations above measure it directly.

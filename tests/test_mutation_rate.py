@@ -269,21 +269,24 @@ def test_depletion_direction():
 # ---------------------------------------------------------------------------
 def test_min_denovo_selection_bias():
     """
-    --min-denovo is selection on the outcome: it keeps genes whose count came out high.
-    Test A's null must be conditioned on the same filter or the observed data sits above
-    its own null. Test B is immune because it conditions on N_g.
+    Documents a KNOWN, DELIBERATELY UNFIXED property rather than checking a fix.
 
-    Regression guard for the real finding: on the simulated-null ASD run, Test A's
-    per-gene FWER was 14.3% instead of 5%, with selected genes showing a median
-    observed/expected gene total of 1.50.
+    --min-denovo selects genes whose de novo count came out high. Test A's null is not
+    conditioned on that filter -- by choice, since the filter is there to spend compute
+    where there is power, not as part of the inferential design -- so Test A's empirical
+    FDR/FWER are anti-conservative on the selected set. Test B is immune because
+    conditioning on N_g cancels the selection exactly.
+
+    This test pins the magnitude so that a change in it gets noticed. Test A's per-gene
+    FWER should land well above nominal and Test B's should stay near it. On the real
+    simulated-null ASD run the figures were 14.3% and 4.3%.
     """
-    print('\n8. --min-denovo selection bias in the Test A null')
+    print('\n8. --min-denovo selection bias (known, deliberately not fixed)')
     n_res, n_sims, min_denovo = 250, 600, 5
     adj = banded_adjacency(n_res, 8)
     rng = np.random.default_rng(11)
 
-    hits = {False: 0, True: 0}
-    n_kept = 0
+    hits_a = hits_b = n_kept = 0
     ratio = 0.0
     tried = 0
     while n_kept < 120 and tried < 100000:
@@ -296,20 +299,26 @@ def test_min_denovo_selection_bias():
         n_kept += 1
         n_g = int(obs.sum())
         ratio += n_g / (lam * m.sum())
-        for cond in (False, True):
-            nul = simulate_poisson_null(m, lam, n_sims, rng, min_denovo if cond else None)
-            x = np.hstack([obs, nul])
-            p_a, _, _, _, _ = _pvals_for_radius(adj, x, x, m, lam, n_g, float(m.sum()))
-            o = p_a[:, 0].min()
-            hits[cond] += (p_a[:, 1:].min(axis=0) <= o).mean() < 0.05
+        nul_a = simulate_poisson_null(m, lam, n_sims, rng)
+        nul_b = simulate_multinomial_null(m, n_g, n_sims, rng)
+        p_a, p_b, _, _, _ = _pvals_for_radius(adj, np.hstack([obs, nul_a]),
+                                              np.hstack([obs, nul_b]), m, lam, n_g,
+                                              float(m.sum()))
+        for p, which in ((p_a, 'a'), (p_b, 'b')):
+            o = p[:, 0].min()
+            sig = (p[:, 1:].min(axis=0) <= o).mean() < 0.05
+            if which == 'a':
+                hits_a += sig
+            else:
+                hits_b += sig
 
-    unc = 100 * hits[False] / n_kept
-    con = 100 * hits[True] / n_kept
+    rate_a = 100 * hits_a / n_kept
+    rate_b = 100 * hits_b / n_kept
     print(f'      {n_kept} genes kept, mean observed/expected {ratio / n_kept:.2f}; '
-          f'per-gene FWER unconditioned {unc:.1f}%, conditioned {con:.1f}%')
-    check('unconditioned Test A null is inflated by the gene filter', unc > 9.0,
-          f'{unc:.1f}%')
-    check('conditioning on the filter restores calibration', con <= 9.0, f'{con:.1f}%')
+          f'per-gene FWER  Test A {rate_a:.1f}%   Test B {rate_b:.1f}%')
+    check('Test A per-gene FWER is inflated by the gene filter (expected, unfixed)',
+          rate_a > 9.0, f'{rate_a:.1f}% -- do not quote Test A significance on its own')
+    check('Test B stays near nominal under the same filter', rate_b <= 9.0, f'{rate_b:.1f}%')
 
 
 if __name__ == '__main__':
