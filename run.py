@@ -224,6 +224,18 @@ if __name__ == '__main__':
         '''
     )
     parser.add_argument(
+        '--test-direction',
+        type=str,
+        default='enrichment',
+        choices=['enrichment', 'depletion'],
+        help='''
+        Which tail to test. 'enrichment' (default) asks whether a neighborhood holds more
+        variants than the mutation rate predicts; 'depletion' asks whether it holds fewer,
+        which is the direction selection acts in and the relevant one for variant classes
+        that have already been filtered by it.
+        '''
+    )
+    parser.add_argument(
         '--min-mu-coverage',
         type=float,
         default=0.0,
@@ -660,7 +672,7 @@ if __name__ == '__main__':
             df_filter, args.fdr_file, args.pval_file, args.rate_calibration,
             args.rate_calibration_genes, args.min_denovo, args.n_trios, args.seed,
             args.mu_residue_file, args.mu_col is not None, args.min_mu_coverage,
-            args.max_residues, args.simulate_null_from_mu,
+            args.max_residues, args.simulate_null_from_mu, args.test_direction,
         )
         did_nothing = False
 
@@ -696,6 +708,7 @@ if __name__ == '__main__':
             args.min_mu_coverage,
             args.max_residues,
             args.simulate_null_from_mu,
+            args.test_direction,
         )
         did_nothing = False
 
