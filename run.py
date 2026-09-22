@@ -286,7 +286,10 @@ if __name__ == '__main__':
         help='''
         Random seed for the null simulations, making a run reproducible. Applies to both
         the standard and the mutation-rate tests. Each protein is given its own derived
-        stream so results do not depend on how the genes are split across jobs. If not
+        stream, so the null draws stay independent across proteins. The stream is derived
+        from the protein's position in the gene list, so reproducing a run means re-running
+        the same gene set in the same order; splitting the genes across jobs differently
+        changes the draws (the results remain valid, they are just not identical). If not
         given, a seed is generated and logged so that any run can be reproduced after
         the fact.
         '''

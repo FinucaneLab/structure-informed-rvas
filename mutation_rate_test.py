@@ -522,8 +522,10 @@ def _process_proteins_batch_mu(df_rvas, uniprot_id_list, reference_dir, radius, 
         logger.info(f'Processing {uniprot_id} (protein {i+1} out of {n_proteins})')
         try:
             df = df_rvas[df_rvas.uniprot_id == uniprot_id]
-            # Derive a per-protein stream from the seed so results do not depend on
-            # how genes are split across parallel jobs.
+            # Derive a per-protein stream from the seed so the null draws stay
+            # independent across proteins. The stream depends on the protein's index in
+            # this batch, so a different gene split gives a given protein a different
+            # stream; reproducing a run means re-running the same list in the same order.
             protein_seed = None if seed is None else [seed, i]
             df_a, df_b, _, mu_coverage = compute_all_pvals_mu(
                 df, pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id,
