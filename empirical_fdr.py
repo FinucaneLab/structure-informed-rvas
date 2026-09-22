@@ -31,24 +31,35 @@ def _prepare_fdr_filters(df_fdr_filter):
     return uniprot_filter_list, aa_pos_filters
 
 
-def _load_all_pvalues(results_dir, uniprot_filter_list, aa_pos_filters, pval_file):
+def _load_all_pvalues(results_dir, uniprot_filter_list, aa_pos_filters, pval_file,
+                      group=None, mu_mode=False):
     """Load both observed and null p-values from HDF5 file with consistent filtering."""
     to_concat = []
     null_pvals_dict = {}
     n_sims = None
     
     with h5py.File(os.path.join(results_dir, pval_file), 'a') as fid:
-        uniprot_ids = [k for k in fid.keys() if '_' not in k]
+        if group is None and fid.attrs.get('test_type') == 'mutation_rate':
+            raise ValueError(
+                f'{pval_file} holds mutation-rate results, which are stored per test in the '
+                "'poisson' and 'binomial' groups. Re-run with --mu-file or --mu-col so the "
+                'correct test is selected.'
+            )
+        node = fid[group] if group is not None else fid
+        # sorted() keeps the output deterministic: set iteration order varies between
+        # processes under hash randomization, which otherwise reorders tied p-values and
+        # makes the FDR column (computed by sort position) irreproducible run to run.
+        uniprot_ids = sorted(k for k in node.keys() if '_' not in k)
         if uniprot_filter_list is not None:
-            uniprot_ids = list(set(uniprot_ids) & set(uniprot_filter_list))
+            uniprot_ids = sorted(set(uniprot_ids) & set(uniprot_filter_list))
 
         logger.info('Reading observed and null p-values')
         for uniprot_id in uniprot_ids:
             # Load observed p-values
-            df = read_p_values(fid, uniprot_id)
+            df = read_p_values(node, uniprot_id, mu_mode=mu_mode)
             
             # Load null p-values
-            null_pvals_one_uniprot = fid[f'{uniprot_id}_null_pval'][:]
+            null_pvals_one_uniprot = node[f'{uniprot_id}_null_pval'][:]
             
             # Apply same amino acid position filter to both datasets
             if aa_pos_filters is not None and uniprot_id in aa_pos_filters:
@@ -146,7 +157,7 @@ def _compute_fwer(df_pvals, null_pvals_dict, uniprot_ids, n_sims, chunk_size=50)
     return fwer
 
 
-def _apply_corrections(df_pvals, false_discoveries, fwer):
+def _apply_corrections(df_pvals, false_discoveries, fwer, mu_mode=False):
     """Apply FDR and FWER corrections and format results."""
     logger.info('Applying FDR and FWER corrections')
     
@@ -158,6 +169,9 @@ def _apply_corrections(df_pvals, false_discoveries, fwer):
     # Add FWER
     df_pvals['fwer'] = fwer
     
+    if mu_mode:
+        return df_pvals[['uniprot_id', 'aa_pos', 'p_value', 'fdr', 'fwer',
+                         'nbhd_case', 'nbhd_expected', 'obs_exp', 'radius']]
     return df_pvals[['uniprot_id', 'aa_pos', 'p_value', 'fdr', 'fwer', 'nbhd_case', 'nbhd_control', 'ratio', 'radius']]
 
 
@@ -181,7 +195,8 @@ def summarize_results(df_results, fdr_cutoff, fwer_cutoff=0.05):
         logger.info(f'Top FWER-significant hits:\n{top_hits_fwer_sig.to_string()}')
 
 
-def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file, large_p_threshold=0.05):
+def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file,
+                large_p_threshold=0.05, group=None, mu_mode=False):
     """
     Compute False Discovery Rate and Family-Wise Error Rate corrections for scan test results.
     
@@ -206,7 +221,7 @@ def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file
     
     # Load both observed and null p-values
     df_pvals, null_pvals_dict, uniprot_ids, n_sims = _load_all_pvalues(
-        results_dir, uniprot_filter_list, aa_pos_filters, pval_file
+        results_dir, uniprot_filter_list, aa_pos_filters, pval_file, group, mu_mode
     )
     
     # Compute false discoveries from null distributions (for FDR)
@@ -218,7 +233,7 @@ def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file
     fwer = _compute_fwer(df_pvals, null_pvals_dict, uniprot_ids, n_sims)
     
     # Apply both corrections
-    df_results = _apply_corrections(df_pvals, false_discoveries, fwer)
+    df_results = _apply_corrections(df_pvals, false_discoveries, fwer, mu_mode)
     
     # Add gene name
     df_gene = pd.read_csv(f'{reference_dir}/protein_sequence_guide.tsv', sep='\t')

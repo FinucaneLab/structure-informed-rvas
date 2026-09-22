@@ -25,6 +25,8 @@ def map_and_filter_rvas(
         ac_filter,
         dont_remove_common,
         include_lcr,
+        mu_col=None,
+        mu_file=None,
 ):
 
     if pre_mapped_rvas is not None:
@@ -38,14 +40,23 @@ def map_and_filter_rvas(
             ac_control_col,
             reference_dir,
             uniprot_id,
-            genome_build
+            genome_build,
+            mu_col=mu_col,
+            mu_file=mu_file,
         )
     else:
         df_rvas = None
 
 
+    mutation_rate_mode = (mu_col is not None) or (mu_file is not None)
+
     if df_rvas is not None and pre_mapped_rvas is None:
-        df_rvas = df_rvas[df_rvas.ac_case + df_rvas.ac_control < ac_filter]
+        # With a mutation-rate null there is no ac_control, so the max-AC filter
+        # applies to case allele counts alone.
+        if mutation_rate_mode:
+            df_rvas = df_rvas[df_rvas.ac_case < ac_filter]
+        else:
+            df_rvas = df_rvas[df_rvas.ac_case + df_rvas.ac_control < ac_filter]
         if not dont_remove_common:
             logger.info("Removing common variants from RVAS data")
             keys = ['uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt']
@@ -155,6 +166,142 @@ if __name__ == '__main__':
         '--ac-control-col',
         type=str,
         help='name of the column that has allele count in controls',
+    )
+    parser.add_argument(
+        '--mu-file',
+        type=str,
+        nargs='?',
+        const='__reference_default__',
+        default=None,
+        help='''
+        Path to a mutation-rate reference file (parquet) with columns chrom, pos, ref,
+        alt and a rate column, inner-joined to the variant data on chr-pos-ref-alt.
+        Pass the flag with no argument to use
+        <reference-dir>/roulette_missenses_filtered.parquet. Switches on the
+        mutation-rate null. Mutually exclusive with --mu-col.
+        '''
+    )
+    parser.add_argument(
+        '--mu-col',
+        type=str,
+        default=None,
+        help='''
+        Name of a mutation-rate column already present in --rvas-data-to-map, used
+        instead of a rate reference file. Switches on the mutation-rate null.
+        Mutually exclusive with --mu-file.
+        '''
+    )
+    parser.add_argument(
+        '--mu-residue-file',
+        type=str,
+        default=None,
+        help='''
+        Per-residue mutation rate table built by precompute_mu_per_residue.py, giving the
+        summed rate over ALL possible missense variants at each residue. Required with
+        --mu-file; defaults to <reference-dir>/mu_per_residue.parquet. This is what makes
+        the denominator the gene's real mutational opportunity rather than only the
+        variants present in the de novo file.
+        '''
+    )
+    parser.add_argument(
+        '--max-residues',
+        type=int,
+        default=10000,
+        help='''
+        Skip proteins longer than this. The pairwise distance matrix scales as n_res^2,
+        so titin (34,350 residues) alone would need 9.4 GB. Default 10000 skips 2 of the
+        750 ASD analysis genes.
+        '''
+    )
+    parser.add_argument(
+        '--simulate-null-from-mu',
+        action='store_true',
+        default=False,
+        help='''
+        Replace the observed de novo counts with draws from the mutation rate model and
+        run the full pipeline on them, as a null calibration check. P-values should be
+        uniform and FDR should come out at its nominal level.
+        '''
+    )
+    parser.add_argument(
+        '--test-direction',
+        type=str,
+        default='enrichment',
+        choices=['enrichment', 'depletion'],
+        help='''
+        Which tail to test. 'enrichment' (default) asks whether a neighborhood holds more
+        variants than the mutation rate predicts; 'depletion' asks whether it holds fewer,
+        which is the direction selection acts in and the relevant one for variant classes
+        that have already been filtered by it.
+        '''
+    )
+    parser.add_argument(
+        '--min-mu-coverage',
+        type=float,
+        default=0.0,
+        help='''
+        Skip genes where the rate model covers less than this fraction of their possible
+        missense variants. Default 0 (report mu_coverage but exclude nothing): coverage
+        gaps cost power rather than biasing the tests, because a variant's de novo count
+        and its rate are dropped together. Raise it to exclude poorly covered genes.
+        '''
+    )
+    parser.add_argument(
+        '--rate-calibration',
+        type=str,
+        default='global',
+        help='''
+        How to convert relative mutation rates into expected de novo counts for Test A
+        (the absolute test). 'global' (default) estimates lambda_hat = sum(x)/sum(mu)
+        over the calibration set; 'none' uses lambda_hat = 1, appropriate only when the
+        rate column already holds absolute expected counts; 'fixed:<value>' supplies it
+        directly. lambda_hat is always estimated AFTER variant-level filters and BEFORE
+        any gene-level selection.
+        '''
+    )
+    parser.add_argument(
+        '--rate-calibration-genes',
+        type=str,
+        default=None,
+        help='''
+        Optional file (same format as --df-filter) restricting the gene set used to
+        estimate lambda_hat. Defaults to the whole input file after variant-level
+        filters.
+        '''
+    )
+    parser.add_argument(
+        '--min-denovo',
+        type=int,
+        default=5,
+        help='''
+        Minimum case allele count per gene for the mutation-rate test, applied as
+        strictly greater than this value (so the default of 5 requires at least 6),
+        matching the existing 3DNT gene filter.
+        '''
+    )
+    parser.add_argument(
+        '--seed',
+        type=int,
+        default=None,
+        help='''
+        Random seed for the null simulations, making a run reproducible. Applies to both
+        the standard and the mutation-rate tests. Each protein is given its own derived
+        stream, so the null draws stay independent across proteins. The stream is derived
+        from the protein's position in the gene list, so reproducing a run means re-running
+        the same gene set in the same order; splitting the genes across jobs differently
+        changes the draws (the results remain valid, they are just not identical). If not
+        given, a seed is generated and logged so that any run can be reproduced after
+        the fact.
+        '''
+    )
+    parser.add_argument(
+        '--n-trios',
+        type=int,
+        default=None,
+        help='''
+        Optional number of trios, used only to report lambda_hat / (2 * n_trios) as a
+        units sanity check on the mutation rate model.
+        '''
     )
     parser.add_argument(
         '--run-3dnt',
@@ -379,6 +526,14 @@ if __name__ == '__main__':
             base = args.fdr_file
         args.pval_file = base + '.pvals.h5'
 
+    # A seed is always chosen and recorded, so that a run with no --seed is still
+    # reproducible after the fact from the logged value.
+    if args.seed is None:
+        args.seed = int(np.random.SeedSequence().entropy % (2**31 - 1))
+        logger.info(f'No --seed given; using generated seed {args.seed}')
+    else:
+        logger.info(f'Using seed {args.seed}')
+
     # Input validation
     
     if args.genome_build not in ['hg37', 'hg38']:
@@ -415,6 +570,49 @@ if __name__ == '__main__':
     if args.pre_mapped_rvas is not None and args.rvas_data_to_map is not None:
         raise ValueError("--pre-mapped-rvas and --rvas-data-to-map are mutually exclusive")
 
+    if args.mu_col is not None and args.mu_file is not None:
+        raise ValueError("--mu-col and --mu-file are mutually exclusive")
+
+    mutation_rate_mode = (args.mu_col is not None) or (args.mu_file is not None)
+
+    if mutation_rate_mode:
+        if args.ac_control_col is not None:
+            raise ValueError("--mu-col/--mu-file cannot be combined with --ac-control-col")
+        if args.ignore_ac:
+            raise ValueError(
+                "--ignore-ac is not supported with a mutation-rate null: collapsing de novo "
+                "counts to 0/1 discards recurrence, which is signal here."
+            )
+        if args.mu_file == '__reference_default__':
+            if not args.reference_dir:
+                raise ValueError("--mu-file with no argument requires --reference-dir")
+            args.mu_file = os.path.join(args.reference_dir, 'roulette_missenses_filtered.parquet')
+        if args.mu_file is not None and not os.path.exists(args.mu_file):
+            raise FileNotFoundError(f"Mutation rate file not found: {args.mu_file}")
+        if args.rate_calibration not in ('global', 'none') and not args.rate_calibration.startswith('fixed:'):
+            raise ValueError(
+                f"Invalid --rate-calibration: {args.rate_calibration}. "
+                "Must be 'global', 'none', or 'fixed:<value>'."
+            )
+        if args.rate_calibration.startswith('fixed:'):
+            try:
+                float(args.rate_calibration.split(':', 1)[1])
+            except ValueError:
+                raise ValueError(f"Could not parse a number from --rate-calibration {args.rate_calibration}")
+        if args.min_denovo < 0:
+            raise ValueError(f"--min-denovo must be non-negative, got {args.min_denovo}")
+        if args.mu_file is not None:
+            if args.mu_residue_file is None:
+                if not args.reference_dir:
+                    raise ValueError("--mu-file requires --reference-dir or --mu-residue-file")
+                args.mu_residue_file = os.path.join(args.reference_dir, 'mu_per_residue.parquet')
+            if not os.path.exists(args.mu_residue_file):
+                raise FileNotFoundError(
+                    f"Per-residue mutation rate table not found: {args.mu_residue_file}\n"
+                    f"Build it with: python precompute_mu_per_residue.py "
+                    f"--reference-dir {args.reference_dir}"
+                )
+
     df_rvas, df_filter = map_and_filter_rvas(
         args.rvas_data_to_map,
         args.pre_mapped_rvas,
@@ -428,6 +626,8 @@ if __name__ == '__main__':
         args.ac_filter,
         args.dont_remove_common,
         args.include_lcr,
+        args.mu_col,
+        args.mu_file,
     )
 
 
@@ -467,10 +667,52 @@ if __name__ == '__main__':
         df_rvas.to_csv(args.save_df_rvas, sep='\t', index=False)
         did_nothing = False
 
-    if args.fdr_only and not args.run_3dnt:
+    if args.fdr_only and not args.run_3dnt and mutation_rate_mode:
+        from mutation_rate_test import mutation_rate_scan_test
+        mutation_rate_scan_test(
+            df_rvas, args.reference_dir, args.neighborhood_radius, args.pae_cutoff,
+            args.results_dir, args.n_sims, args.no_fdr, True, args.fdr_cutoff,
+            df_filter, args.fdr_file, args.pval_file, args.rate_calibration,
+            args.rate_calibration_genes, args.min_denovo, args.n_trios, args.seed,
+            args.mu_residue_file, args.mu_col is not None, args.min_mu_coverage,
+            args.max_residues, args.simulate_null_from_mu, args.test_direction,
+        )
+        did_nothing = False
+
+    elif args.fdr_only and not args.run_3dnt:
         from empirical_fdr import compute_fdr
         df_results = compute_fdr(args.results_dir, args.fdr_cutoff, df_filter, args.reference_dir, args.pval_file)
         df_results.to_csv(f'{args.results_dir}/{args.fdr_file}', sep='\t', index=False)
+        did_nothing = False
+
+    elif args.run_3dnt and mutation_rate_mode:
+        logger.info("Starting scan test analysis with a mutation-rate null")
+        from mutation_rate_test import mutation_rate_scan_test
+        mutation_rate_scan_test(
+            df_rvas,
+            args.reference_dir,
+            args.neighborhood_radius,
+            args.pae_cutoff,
+            args.results_dir,
+            args.n_sims,
+            args.no_fdr,
+            args.fdr_only,
+            args.fdr_cutoff,
+            df_filter,
+            args.fdr_file,
+            args.pval_file,
+            args.rate_calibration,
+            args.rate_calibration_genes,
+            args.min_denovo,
+            args.n_trios,
+            args.seed,
+            args.mu_residue_file,
+            args.mu_col is not None,
+            args.min_mu_coverage,
+            args.max_residues,
+            args.simulate_null_from_mu,
+            args.test_direction,
+        )
         did_nothing = False
 
     elif args.run_3dnt:
@@ -490,6 +732,7 @@ if __name__ == '__main__':
             args.fdr_file,
             args.pval_file,
             args.remove_nbhd,
+            args.seed,
         )
         did_nothing = False
 
@@ -533,18 +776,39 @@ if __name__ == '__main__':
             pattern = os.path.join(args.results_dir, args.combine_pval_files)
             pval_files_to_combine = glob.glob(pattern)
 
+        def _merge_node(node_in, node_out):
+            """
+            Copy datasets across, recursing into groups. Mutation-rate results are stored
+            per test in the 'poisson' and 'binomial' groups, so those keys collide on
+            every file after the first and must be descended into rather than read as
+            datasets.
+            """
+            for key in node_in.keys():
+                item = node_in[key]
+                if isinstance(item, h5py.Group):
+                    _merge_node(item, node_out.require_group(key))
+                elif key not in node_out:
+                    node_in.copy(key, node_out, name=key)
+                else:
+                    combined = np.concatenate([node_out[key][:], item[:]], axis=0)
+                    del node_out[key]
+                    node_out.create_dataset(key, data=combined)
+
         with h5py.File(os.path.join(args.results_dir, args.pval_file), 'w') as fid_out:
             for file in pval_files_to_combine:
                 with h5py.File(file, 'r') as fid_in:
-                    for key in fid_in.keys():
-                        if key not in fid_out:
-                            fid_in.copy(key, fid_out)
+                    _merge_node(fid_in, fid_out)
+                    for name, value in fid_in.attrs.items():
+                        if name in fid_out.attrs and fid_out.attrs[name] != value:
+                            logger.warning(
+                                f"{os.path.basename(file)}: attribute '{name}' is {value}, "
+                                f"but {fid_out.attrs[name]} was recorded from an earlier "
+                                "file. For a mutation-rate run split across jobs, pass an "
+                                "exome-wide --rate-calibration fixed:<value> so every chunk "
+                                "shares one lambda_hat."
+                            )
                         else:
-                            existing = fid_out[key][:]
-                            new_data = fid_in[key][:]
-                            combined = np.concatenate([existing, new_data], axis=0)
-                            del fid_out[key]
-                            fid_out.create_dataset(key, data=combined)
+                            fid_out.attrs[name] = value
         did_nothing=False
 
     if did_nothing:

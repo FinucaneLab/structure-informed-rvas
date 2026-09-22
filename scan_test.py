@@ -99,19 +99,20 @@ def get_ac_per_residue(df, colname, n_res):
     case_ac_per_residue[ac_by_pos.aa_pos - 1, 0] = ac_by_pos[colname]
     return case_ac_per_residue
 
-def get_random_ac_per_residue(case_ac_per_residue, total_ac_per_residue, n_sim, seed=0):
-    if seed is not None:
-        np.random.seed(seed)
+def get_random_ac_per_residue(case_ac_per_residue, total_ac_per_residue, n_sim, seed=None):
+    # seed is passed straight to default_rng: a previous version called np.random.seed(),
+    # which seeds the legacy global RNG and has no effect on default_rng(), so the seed
+    # was silently ignored and runs were not reproducible.
     n_alleles = int(  case_ac_per_residue.sum()  )
-    gen = np.random.default_rng()
+    gen = np.random.default_rng(seed)
     null_ac_per_residue = gen.multivariate_hypergeometric(total_ac_per_residue.astype(int), n_alleles, n_sim).T
     return null_ac_per_residue
 
-def get_case_control_ac_matrix(df, n_res, n_sim):
+def get_case_control_ac_matrix(df, n_res, n_sim, seed=None):
     case_ac_per_residue = get_ac_per_residue(df, 'ac_case', n_res)
     control_ac_per_residue = get_ac_per_residue(df, 'ac_control', n_res)
     total_ac_per_residue = (case_ac_per_residue + control_ac_per_residue).flatten()
-    null_case_ac_per_residue = get_random_ac_per_residue(case_ac_per_residue, total_ac_per_residue, n_sim)
+    null_case_ac_per_residue = get_random_ac_per_residue(case_ac_per_residue, total_ac_per_residue, n_sim, seed)
     null_control_ac_per_residue = total_ac_per_residue[:, np.newaxis] - null_case_ac_per_residue
     case_ac_matrix = np.hstack([case_ac_per_residue, null_case_ac_per_residue])
     control_ac_matrix = np.hstack([control_ac_per_residue, null_control_ac_per_residue])
@@ -126,6 +127,7 @@ def compute_all_pvals(
         n_sims,
         radius = 15,
         pae_cutoff = 15,
+        seed = None,
 ):
     if radius in ('multiple-small', 'multiple-big'):
         radii = MULTI_RADII_SMALL if radius == 'multiple-small' else MULTI_RADII_BIG
@@ -134,7 +136,7 @@ def compute_all_pvals(
             for r in radii
         }
         n_res = adj_matrices[radii[0]].shape[0]
-        case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(df, n_res, n_sims)
+        case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(df, n_res, n_sims, seed)
         n_case = case_ac_matrix[:,0].sum()
         n_control = control_ac_matrix[:,0].sum()
 
@@ -173,7 +175,7 @@ def compute_all_pvals(
             pae_cutoff,
         )
         n_res = adjacency_matrix.shape[0]
-        case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(df, n_res, n_sims)
+        case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(df, n_res, n_sims, seed)
         n_case = case_ac_matrix[:,0].sum()
         n_control = control_ac_matrix[:,0].sum()
         n_case_nbhd_mat = get_nbhd_counts(adjacency_matrix, case_ac_matrix)
@@ -202,7 +204,7 @@ def write_df_pvals(results_dir, uniprot_id, df_pvals, pval_file):
         write_dataset(fid, f'{uniprot_id}_radius', df_pvals[['radius']])
         write_dataset(fid, f'{uniprot_id}_original', df_pvals[['original_case', 'original_control']])
 
-def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir, uniprot_id, radius, pae_cutoff, n_sims, pval_file):
+def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir, uniprot_id, radius, pae_cutoff, n_sims, pval_file, seed=None):
     df_pvals, adj_mat = compute_all_pvals(
         df,
         pdb_file_pos_guide,
@@ -212,6 +214,7 @@ def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir,
         n_sims,
         radius,
         pae_cutoff,
+        seed,
     )
     write_df_pvals(results_dir, uniprot_id, df_pvals, pval_file)
 
@@ -244,7 +247,7 @@ def _filter_proteins_by_allele_count(df_rvas, df_fdr_filter, min_alleles=5):
     return uniprot_id_list
 
 
-def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, remove_nbhd, pval_file):
+def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, remove_nbhd, pval_file, seed=None):
     """Process each protein individually with scan test."""
     pdb_file_pos_guide = f'{reference_dir}/pdb_pae_file_pos_guide.tsv'
     pdb_dir = f'{reference_dir}/pdb_files/'
@@ -275,10 +278,14 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
                 logger.warning(f'{uniprot_id}: There must be at least 5 case and 5 control alleles. Skipping.')
                 continue
             
+            # Each protein gets its own derived stream. A single shared seed would
+            # correlate the null draws across proteins, which matters because FWER takes
+            # the minimum p-value across proteins within each simulation.
+            protein_seed = None if seed is None else [seed, i]
             scan_test_one_protein(
                 df, pdb_file_pos_guide, pdb_dir, pae_dir, 
                 results_dir, uniprot_id, radius, pae_cutoff, n_sims,
-                pval_file
+                pval_file, protein_seed
             )
         except FileNotFoundError as e:
             logger.error(f'{uniprot_id}: Required file not found - {e}')
@@ -312,6 +319,7 @@ def scan_test(
     fdr_file,
     pval_file,
     remove_nbhd,
+    seed=None,
 ):
     """
     Perform scan test analysis on protein structure data.
@@ -339,8 +347,13 @@ def scan_test(
     _process_proteins_batch(
         df_processed, uniprot_id_list, reference_dir, 
         radius, pae_cutoff, results_dir, n_sims, remove_nbhd,
-        pval_file
+        pval_file, seed
     )
+
+    with h5py.File(os.path.join(results_dir, pval_file), 'a') as fid:
+        fid.attrs['n_sims'] = n_sims
+        if seed is not None:
+            fid.attrs['seed'] = seed
     
     # Compute FDR if requested
     if not no_fdr:
