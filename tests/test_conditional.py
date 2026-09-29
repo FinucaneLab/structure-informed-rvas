@@ -529,6 +529,40 @@ def test_driver_helpers():
                                       'fdr': [np.nan]}), ['A'], 'fdr', 0.05)) == 0)
 
 
+def test_position_filter_survives_the_rounds():
+    """
+    A position-level --df-filter (SCHEMA uses one: AlphaMissense above the 99th
+    percentile) must restrict every round, not just round 0. If a later round dropped
+    the aa_pos column it would correct over every residue in the protein instead of the
+    filtered subset -- a different number of tests and a different null pool, so the
+    rounds would not be comparable and round-1 hits would be judged against the wrong
+    burden.
+    """
+    print('\n10. A position-level --df-filter carries into later rounds')
+    from empirical_fdr import _prepare_fdr_filters
+
+    df_filter = pd.DataFrame({'uniprot_id': ['A', 'A', 'B', 'C'],
+                              'aa_pos': [10, 20, 5, 7]})
+    analysis_genes = ['A', 'B']          # C dropped out of round 0
+
+    # This is the expression conditional_scan builds for the later rounds.
+    round_filter = df_filter[df_filter['uniprot_id'].isin(analysis_genes)]
+    check('the aa_pos column survives', 'aa_pos' in round_filter.columns)
+    check('positions are kept for every analysed gene',
+          sorted(round_filter.aa_pos) == [5, 10, 20])
+    check('genes absent from round 0 are dropped',
+          'C' not in set(round_filter.uniprot_id))
+
+    uniprot_list, aa_pos_filters = _prepare_fdr_filters(round_filter)
+    check('empirical_fdr reads it as a position filter, not a gene filter',
+          aa_pos_filters is not None and aa_pos_filters['A'] == {10, 20})
+
+    # A gene-only filter must still behave as a gene filter.
+    gene_only = pd.DataFrame({'uniprot_id': analysis_genes})
+    _, none_filter = _prepare_fdr_filters(gene_only)
+    check('a gene-only filter stays position-unrestricted', none_filter is None)
+
+
 if __name__ == '__main__':
     test_indexing_contract()
     test_mask_zeroes_the_right_rows()
@@ -539,5 +573,6 @@ if __name__ == '__main__':
     test_best_radius_lookup()
     test_round_carries_the_whole_null_pool()
     test_driver_helpers()
+    test_position_filter_survives_the_rounds()
     print('\n' + ('ALL TESTS PASSED' if not FAILURES else f'FAILURES: {FAILURES}'))
     sys.exit(1 if FAILURES else 0)

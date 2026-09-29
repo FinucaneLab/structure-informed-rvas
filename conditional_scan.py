@@ -134,11 +134,24 @@ def conditional_scan(
             f'{criterion} is not available for this test'
         )
 
-    # Every later round is corrected against this same gene set, so that the rounds are
-    # comparable and a gene does not enter or leave the multiple-testing burden mid-way.
+    # Every later round is corrected against the same set of tests as round 0, so that
+    # the rounds are comparable and no position enters or leaves the multiple-testing
+    # burden mid-way. When --df-filter carries an aa_pos column the filter is
+    # position-level, and it has to be carried through verbatim: dropping it would
+    # silently correct later rounds over every residue in the protein instead of the
+    # filtered subset.
     analysis_genes = sorted(df_results['uniprot_id'].unique())
-    logger.info(f'Round 0 covers {len(analysis_genes)} genes')
-    round_filter = pd.DataFrame({'uniprot_id': analysis_genes})
+    if df_filter is not None:
+        round_filter = df_filter[df_filter['uniprot_id'].isin(analysis_genes)]
+        if 'aa_pos' in df_filter.columns:
+            logger.info(f'Round 0 covers {len(analysis_genes)} genes and '
+                        f'{len(round_filter)} filtered positions; later rounds are '
+                        'corrected over the same positions')
+        else:
+            logger.info(f'Round 0 covers {len(analysis_genes)} genes')
+    else:
+        round_filter = pd.DataFrame({'uniprot_id': analysis_genes})
+        logger.info(f'Round 0 covers {len(analysis_genes)} genes')
 
     conditioning = {}           # uniprot_id -> [(aa_pos, radius), ...]
     accepted_rows = []
