@@ -427,3 +427,123 @@ Combining warns if the chunks disagree on `lambda_hat`.
 - FDR control over the *intersection* of two rejection sets is not guaranteed by the two
   marginal FDRs as a theorem. It is conservative in practice, since an intersection can
   only remove discoveries, and the simulations above measure it directly.
+
+## Conditional analysis
+
+A gene can carry more than one 3D signal, but a single strong neighborhood makes that
+hard to see: every neighborhood overlapping it inherits its variants, so the second,
+third and fourth best hits in a gene are usually the same cluster viewed through
+slightly shifted windows. Conditional analysis answers the question directly. Call the
+best neighborhood, mask it out, and scan what is left.
+
+`--conditional` does this automatically, and works with both nulls -- the standard
+case/control 3DNT and the mutation-rate 3DNT.
+
+```
+python structure-informed-rvas/run.py \
+  --rvas-data-to-map input/SCHEMA_tutorial.tsv.gz \
+  --reference-dir sir-reference-data/ \
+  --results-dir results/ \
+  --run-3dnt \
+  --conditional
+```
+
+Round 0 is the ordinary scan. Then, in each round, every gene whose top hit clears the
+cutoff has that neighborhood masked out and is scanned again. Genes without a hit are
+never re-scanned, so a round costs one scan per gene still carrying signal rather than a
+full exome scan. The loop stops when no gene has a further hit, or at
+`--conditional-max-rounds` (default 5).
+
+### What gets masked
+
+The residues of the called neighborhood are zeroed in place: their case and control
+allele counts, and -- under the mutation-rate null -- their mutational opportunity `m`
+along with them.
+
+Masking `m` is not optional there. Zeroing the counts alone would leave both nulls still
+expecting de novos at residues whose variants had just been removed. Every neighborhood
+overlapping the conditioned region would then look depleted in proportion to how much of
+it was masked, and the neighborhoods immediately beside it -- exactly where a second
+independent signal would sit -- would lose the power to show anything. In simulation,
+observed/expected in the partly-masked neighborhoods falls to the surviving fraction of
+the neighborhood (0.76 against a surviving fraction of 0.73) instead of staying at 1.0,
+and power to recover a real adjacent cluster drops roughly threefold. See
+`tests/test_conditional.py`.
+
+A masked residue is never dropped from the results, only zeroed. Positions are recovered
+from row order throughout the codebase, so the per-protein p-value table always keeps
+one row per residue in residue order.
+
+### Which positions are still tested
+
+After masking, a centre is re-tested only if at least `--conditional-min-retained`
+(default 0.5) of its neighborhood's residues survive. Below that, what remains is a
+sliver of the original neighborhood and a small p-value there reflects a handful of rim
+variants rather than residual structure. Positions failing the rule, and the masked
+residues themselves, get p = 1 in both the observed and the null columns. The rule reads
+only the structure and the mask, never the counts, so observed and null are neutralized
+identically and the empirical null stays calibrated.
+
+Under `--neighborhood-radius multiple-small` / `multiple-big` the rule is applied per
+radius before the harmonic-mean combination, so a centre that keeps enough of its small
+neighborhoods still contributes them even if its large ones are mostly masked.
+
+### Multiple testing
+
+Each round writes a p-value file that is the previous round's file with only the
+re-scanned genes overwritten. The empirical null pool therefore still spans every gene
+in the analysis -- unmasked nulls for the genes that were not touched, freshly drawn
+masked nulls for the genes that were -- so FDR and FWER in round *k* are exome-wide and
+on the same footing as in round 0.
+
+What this does *not* correct for is the sequential testing itself. Each round is
+controlled at the nominal level and the rounds are not jointly corrected, which matches
+the usual convention in conditional association analysis. Read a later round as "there
+is additional signal in this gene" rather than as an independently calibrated discovery.
+
+### Output
+
+```
+all_proteins.fdr.tsv               round 0, identical to a plain run
+all_proteins.pvals.h5
+all_proteins.fdr.round1.tsv        full exome-wide table for each later round
+all_proteins.pvals.round1.h5
+all_proteins.fdr.conditional.tsv   one row per independent signal, all rounds
+```
+
+The conditional table adds `round`, `conditioned_on` (the positions masked before that
+round) and `n_conditioned_nbhds` to the usual result columns. A gene with three rows
+carries three independent 3D signals.
+
+### Other flags
+
+| flag | meaning |
+| --- | --- |
+| `--conditional-max-rounds` | stop after this many rounds beyond round 0 (default 5) |
+| `--conditional-criterion` | `fdr` (default) or `fwer`; with a mutation-rate null these read `fdr_max` / `fwer_max`, which require both tests to pass |
+| `--conditional-cutoff` | threshold for that criterion; defaults to `--fdr-cutoff` |
+| `--conditional-radius` | radius of the removed neighborhood. `best` (default) uses the radius that position's own scan chose, which is the only sensible option under a multi-radius run |
+| `--conditional-min-retained` | fraction of a neighborhood that must survive for its centre to be re-tested (default 0.5) |
+
+### Conditioning by hand: --remove-nbhd
+
+`--remove-nbhd` runs a single conditional round on neighborhoods you name, in one
+protein:
+
+```
+python structure-informed-rvas/run.py \
+  --rvas-data-to-map input/SCHEMA_tutorial.tsv.gz \
+  --reference-dir sir-reference-data/ \
+  --results-dir results/ \
+  --run-3dnt \
+  --uniprot-id P42263 \
+  --remove-nbhd 738
+```
+
+It masks the same way `--conditional` does, and now also works with the mutation-rate
+null. `--uniprot-id` must name exactly one protein: the positions are residue numbers in
+that protein, and applying them to a list of genes would silently remove unrelated
+residues from each of the others. Note that the resulting p-value file holds only that
+protein, so its FDR and FWER are computed against a one-protein null and are not
+comparable to an exome-wide run -- `--conditional` is what keeps the multiple-testing
+correction intact across rounds.

@@ -126,6 +126,40 @@ def map_and_filter_rvas(
     return df_rvas, df_filter
 
 
+def remove_nbhd_conditioning(args):
+    """
+    Turn --remove-nbhd into the per-protein conditioning dict the scan takes.
+
+    The positions are literal residue numbers in one protein, so --uniprot-id has to
+    name exactly one. Previously the same positions were applied to every protein in
+    the run, which silently removed unrelated residues from every other gene.
+    """
+    if args.remove_nbhd is None:
+        return None
+    if args.uniprot_id is None:
+        raise ValueError('--remove-nbhd requires --uniprot-id: the positions are '
+                         'residue numbers in one specific protein')
+    if os.path.exists(args.uniprot_id):
+        uniprot_list = [x.rstrip() for x in open(args.uniprot_id).readlines() if x.strip()]
+    else:
+        uniprot_list = args.uniprot_id.split(',')
+    if len(uniprot_list) != 1:
+        raise ValueError(f'--remove-nbhd applies to a single protein, but --uniprot-id '
+                         f'names {len(uniprot_list)}')
+    radius = (15.0 if args.neighborhood_radius in ('multiple-small', 'multiple-big')
+              else args.neighborhood_radius)
+    if args.conditional_radius != 'best':
+        radius = float(args.conditional_radius)
+    elif args.neighborhood_radius in ('multiple-small', 'multiple-big'):
+        logger.warning(
+            'With a multi-radius scan there is no single neighborhood to remove; '
+            '--remove-nbhd is using radius 15. Set --conditional-radius to choose, or '
+            'use --conditional to let each hit use the radius its own scan picked.'
+        )
+    centers = [(int(p), radius) for p in args.remove_nbhd.split(',')]
+    return {uniprot_list[0]: centers}
+
+
 def _neighborhood_radius_type(value):
     if value in ('multiple-small', 'multiple-big'):
         return value
@@ -410,10 +444,68 @@ if __name__ == '__main__':
         type=str,
         default=None,
         help='''
-        Analogous to a conditional analysis: remove all case and control mutations in 
-        these neighborhood(s) in --uniprot-id. Can be a comma-separated list of positions
-        or a single position. This flag will automatically analyze only the protein 
-        in --uniprot-id.
+        One conditional round, with the neighborhood(s) to condition on given by hand:
+        mask every residue within the neighborhood of these position(s) and scan what is
+        left. Comma-separated list of positions, or a single position, in --uniprot-id,
+        which must name exactly one protein. Masking zeroes the residues in place -- and
+        under a mutation-rate null it zeroes their mutational opportunity too, so the
+        null does not keep expecting variants where they were just removed. Use
+        --conditional to have the positions chosen and iterated automatically.
+        '''
+    )
+    parser.add_argument(
+        '--conditional',
+        action='store_true',
+        default=False,
+        help='''
+        Conditional analysis with --run-3dnt. Run the scan, then repeat it with each
+        significant gene's called neighborhood masked out, until no further signal
+        remains. Per protein: only genes with a hit are re-scanned, and each conditions
+        on its own hits. Writes <fdr-file stem>.conditional.tsv with one row per
+        independent signal, plus the full exome-wide table for each round.
+        '''
+    )
+    parser.add_argument(
+        '--conditional-max-rounds',
+        type=int,
+        default=5,
+        help='maximum number of conditional rounds after the unconditioned scan (default 5)'
+    )
+    parser.add_argument(
+        '--conditional-criterion',
+        type=str,
+        default='fdr',
+        choices=['fdr', 'fwer'],
+        help='''
+        which correction decides whether a neighborhood is called, and so whether it is
+        conditioned out in the next round. With a mutation-rate null this reads
+        fdr_max / fwer_max, which require both tests to pass.
+        '''
+    )
+    parser.add_argument(
+        '--conditional-cutoff',
+        type=float,
+        default=None,
+        help='cutoff for --conditional-criterion. Defaults to --fdr-cutoff.'
+    )
+    parser.add_argument(
+        '--conditional-radius',
+        type=str,
+        default='best',
+        help='''
+        radius in Angstroms of the neighborhood removed around each called position.
+        'best' (default) uses the radius that position's scan actually chose, which is
+        the only sensible option under --neighborhood-radius multiple-small/multiple-big.
+        '''
+    )
+    parser.add_argument(
+        '--conditional-min-retained',
+        type=float,
+        default=0.5,
+        help='''
+        after masking, a position is only re-tested if at least this fraction of its
+        neighborhood's residues survive (default 0.5). Positions mostly inside the
+        conditioned region are re-reporting the same signal through a narrower window.
         '''
     )
     parser.add_argument(
@@ -553,6 +645,33 @@ if __name__ == '__main__':
     
     if not (0 < args.fdr_cutoff < 1):
         raise ValueError(f"FDR cutoff must be between 0 and 1, got {args.fdr_cutoff}")
+
+    if args.conditional:
+        if not args.run_3dnt:
+            raise ValueError("--conditional requires --run-3dnt")
+        if args.fdr_only:
+            raise ValueError("--conditional re-runs the scan each round, so it cannot be "
+                             "combined with --fdr-only")
+        if args.remove_nbhd is not None:
+            raise ValueError("--conditional chooses what to condition on; it cannot be "
+                             "combined with --remove-nbhd")
+        if args.conditional_max_rounds < 1:
+            raise ValueError(f"--conditional-max-rounds must be at least 1, got "
+                             f"{args.conditional_max_rounds}")
+        if args.conditional_cutoff is not None and not (0 < args.conditional_cutoff < 1):
+            raise ValueError(f"--conditional-cutoff must be between 0 and 1, got "
+                             f"{args.conditional_cutoff}")
+        if not (0 <= args.conditional_min_retained <= 1):
+            raise ValueError(f"--conditional-min-retained must be between 0 and 1, got "
+                             f"{args.conditional_min_retained}")
+        if args.conditional_radius != 'best':
+            try:
+                args.conditional_radius = float(args.conditional_radius)
+            except ValueError:
+                raise ValueError(f"--conditional-radius must be 'best' or a number, got "
+                                 f"{args.conditional_radius}")
+            if args.conditional_radius <= 0:
+                raise ValueError("--conditional-radius must be positive")
     
     # Check required directories exist
 
@@ -685,6 +804,46 @@ if __name__ == '__main__':
         df_results.to_csv(f'{args.results_dir}/{args.fdr_file}', sep='\t', index=False)
         did_nothing = False
 
+    elif args.run_3dnt and args.conditional:
+        from conditional_scan import conditional_scan
+        mu_kwargs = None
+        if mutation_rate_mode:
+            mu_kwargs = dict(
+                rate_calibration=args.rate_calibration,
+                rate_calibration_genes=args.rate_calibration_genes,
+                min_denovo=args.min_denovo,
+                n_trios=args.n_trios,
+                seed=args.seed,
+                mu_residue_file=args.mu_residue_file,
+                mu_from_input=args.mu_col is not None,
+                min_mu_coverage=args.min_mu_coverage,
+                max_residues=args.max_residues,
+                simulate_null=args.simulate_null_from_mu,
+                direction=args.test_direction,
+            )
+        conditional_scan(
+            df_rvas,
+            args.reference_dir,
+            args.neighborhood_radius,
+            args.pae_cutoff,
+            args.results_dir,
+            args.n_sims,
+            args.fdr_cutoff,
+            df_filter,
+            args.fdr_file,
+            args.pval_file,
+            args.seed,
+            mutation_rate_mode,
+            mu_kwargs=mu_kwargs,
+            max_rounds=args.conditional_max_rounds,
+            criterion=args.conditional_criterion,
+            cutoff=args.conditional_cutoff,
+            min_retained=args.conditional_min_retained,
+            conditioning_radius=args.conditional_radius,
+            ignore_ac=args.ignore_ac,
+        )
+        did_nothing = False
+
     elif args.run_3dnt and mutation_rate_mode:
         logger.info("Starting scan test analysis with a mutation-rate null")
         from mutation_rate_test import mutation_rate_scan_test
@@ -712,6 +871,8 @@ if __name__ == '__main__':
             args.max_residues,
             args.simulate_null_from_mu,
             args.test_direction,
+            conditioning=remove_nbhd_conditioning(args),
+            min_retained=args.conditional_min_retained,
         )
         did_nothing = False
 
@@ -731,8 +892,9 @@ if __name__ == '__main__':
             args.ignore_ac,
             args.fdr_file,
             args.pval_file,
-            args.remove_nbhd,
+            remove_nbhd_conditioning(args),
             args.seed,
+            args.conditional_min_retained,
         )
         did_nothing = False
 

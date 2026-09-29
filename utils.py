@@ -316,3 +316,125 @@ def get_nbhd_info(df_rvas, uniprot_id, aa_pos, reference_dir, radius, pae_cutoff
     #     'residues': residues
     
     return nbhd, cases, cntrls
+
+
+# ---------------------------------------------------------------------------
+# residue masking for conditional analysis
+#
+# INDEXING CONTRACT. Every per-residue array in this codebase is positional: row i
+# holds residue aa_pos = i + 1. That convention is relied on by get_ac_per_residue,
+# mu_vector_for_protein, sum_per_residue, the adjacency matrices, and -- critically --
+# by read_p_values, which does not store aa_pos at all but rebuilds it as
+# arange(1, n_rows + 1), and by empirical_fdr._load_all_pvalues, which filters
+# positions with `x + 1 in aa_pos_keep for x in range(len(df))`.
+#
+# So masking a residue must NEVER drop a row. A masked residue keeps its slot and is
+# zeroed out; the p-value table written to HDF5 always has exactly n_res rows in
+# residue order. check_keep_mask() is the guard that a mask built against one
+# structure is not silently applied to an array of a different length.
+#
+# Masks use "keep" polarity: keep[i] is True when residue i + 1 still participates.
+# ---------------------------------------------------------------------------
+
+def check_keep_mask(keep, n_res, uniprot_id=''):
+    """Validate a residue keep-mask against n_res. Returns a bool array, or None."""
+    if keep is None:
+        return None
+    keep = np.asarray(keep).ravel().astype(bool)
+    if keep.shape[0] != n_res:
+        raise ValueError(
+            f'{uniprot_id}: residue keep-mask has length {keep.shape[0]} but the '
+            f'structure has {n_res} residues. The mask is positional -- entry i is '
+            f'residue i+1 -- so a length mismatch would silently shift every residue.'
+        )
+    return keep
+
+
+def residues_in_nbhd_idx(adjacency_matrix, center_aa_pos):
+    """
+    Zero-based row indices of the residues in the neighborhood centered on the
+    one-based residue `center_aa_pos`. Add 1 to get aa_pos values back.
+    """
+    n_res = adjacency_matrix.shape[0]
+    i = int(center_aa_pos) - 1
+    if not 0 <= i < n_res:
+        raise ValueError(
+            f'neighborhood center aa_pos {center_aa_pos} is outside the structure '
+            f'(1..{n_res})'
+        )
+    return np.flatnonzero(adjacency_matrix[i] == 1)
+
+
+def conditioning_keep_mask(pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id,
+                           centers, pae_cutoff):
+    """
+    Build the keep-mask that conditions out one or more neighborhoods.
+
+    `centers` is an iterable of (aa_pos, radius) pairs, both referring to this protein;
+    aa_pos is one-based. Every residue within `radius` of any center is dropped from the
+    mask. Adjacency matrices are built once per distinct radius.
+
+    Returns (keep, n_res, removed_by_center) where removed_by_center maps each center's
+    aa_pos to the number of residues it took out.
+    """
+    centers = list(centers)
+    if not centers:
+        raise ValueError('conditioning_keep_mask called with no centers')
+
+    adj_cache = {}
+    keep = None
+    removed_by_center = {}
+    for aa_pos, radius in centers:
+        if radius not in adj_cache:
+            adj = get_adjacency_matrix(pdb_file_pos_guide, pdb_dir, pae_dir,
+                                       uniprot_id, radius, pae_cutoff)
+            if adj is None:
+                raise FileNotFoundError(f'No structure available for {uniprot_id}')
+            adj_cache[radius] = adj
+        adj = adj_cache[radius]
+        if keep is None:
+            keep = np.ones(adj.shape[0], dtype=bool)
+        elif adj.shape[0] != keep.shape[0]:
+            raise ValueError(
+                f'{uniprot_id}: adjacency matrices disagree on residue count '
+                f'({adj.shape[0]} vs {keep.shape[0]})'
+            )
+        idx = residues_in_nbhd_idx(adj, aa_pos)
+        removed_by_center[int(aa_pos)] = int(keep[idx].sum())
+        keep[idx] = False
+
+    return keep, keep.shape[0], removed_by_center
+
+
+def neighborhood_retention(adjacency_matrix, keep):
+    """
+    Fraction of each neighborhood's residues that survive `keep`, as an (n_res,) float
+    array aligned to the same positional convention. Neighborhoods of size zero -- a
+    residue with no adjacency at all, which the PAE filter can produce -- get 0.0.
+    """
+    sizes = adjacency_matrix.sum(axis=1).astype(float).ravel()
+    retained = (adjacency_matrix @ keep.astype(float)).ravel()
+    out = np.zeros_like(sizes)
+    np.divide(retained, sizes, out=out, where=sizes > 0)
+    return out
+
+
+def best_radius_for_hit(df_fdr, uniprot_id, aa_pos, default=15.0,
+                        radius_cols=('radius',)):
+    """
+    Look up the radius a scan actually chose for one (protein, position).
+
+    Under --neighborhood-radius multiple-small/multiple-big each position picks its own
+    best radius, which the results record; a single-radius run records that radius. The
+    first column in `radius_cols` that is present and non-null wins, else `default`.
+    """
+    if df_fdr is None:
+        return float(default)
+    rows = df_fdr[(df_fdr['uniprot_id'] == uniprot_id) & (df_fdr['aa_pos'] == aa_pos)]
+    if len(rows) == 0:
+        return float(default)
+    row = rows.iloc[0]
+    for col in radius_cols:
+        if col in df_fdr.columns and not pd.isna(row[col]):
+            return float(row[col])
+    return float(default)
