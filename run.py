@@ -177,7 +177,7 @@ if __name__ == '__main__':
         Path to a mutation-rate reference file (parquet) with columns chrom, pos, ref,
         alt and a rate column, inner-joined to the variant data on chr-pos-ref-alt.
         Pass the flag with no argument to use
-        <reference-dir>/roulette_missenses_filtered.parquet. Switches on the
+        <reference-dir>/gnomad_mu_snp_by_variant.parquet. Switches on the
         mutation-rate null. Mutually exclusive with --mu-col.
         '''
     )
@@ -198,8 +198,8 @@ if __name__ == '__main__':
         help='''
         Per-residue mutation rate table built by precompute_mu_per_residue.py, giving the
         summed rate over ALL possible missense variants at each residue. Required with
-        --mu-file; defaults to <reference-dir>/mu_per_residue.parquet. This is what makes
-        the denominator the gene's real mutational opportunity rather than only the
+        --mu-file; defaults to <reference-dir>/mu_per_residue_gnomad.parquet. This is what
+        makes the denominator the gene's real mutational opportunity rather than only the
         variants present in the de novo file.
         '''
     )
@@ -586,7 +586,7 @@ if __name__ == '__main__':
         if args.mu_file == '__reference_default__':
             if not args.reference_dir:
                 raise ValueError("--mu-file with no argument requires --reference-dir")
-            args.mu_file = os.path.join(args.reference_dir, 'roulette_missenses_filtered.parquet')
+            args.mu_file = os.path.join(args.reference_dir, 'gnomad_mu_snp_by_variant.parquet')
         if args.mu_file is not None and not os.path.exists(args.mu_file):
             raise FileNotFoundError(f"Mutation rate file not found: {args.mu_file}")
         if args.rate_calibration not in ('global', 'none') and not args.rate_calibration.startswith('fixed:'):
@@ -605,7 +605,7 @@ if __name__ == '__main__':
             if args.mu_residue_file is None:
                 if not args.reference_dir:
                     raise ValueError("--mu-file requires --reference-dir or --mu-residue-file")
-                args.mu_residue_file = os.path.join(args.reference_dir, 'mu_per_residue.parquet')
+                args.mu_residue_file = os.path.join(args.reference_dir, 'mu_per_residue_gnomad.parquet')
             if not os.path.exists(args.mu_residue_file):
                 raise FileNotFoundError(
                     f"Per-residue mutation rate table not found: {args.mu_residue_file}\n"

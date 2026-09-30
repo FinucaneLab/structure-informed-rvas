@@ -46,7 +46,7 @@ def load_ref_for_chrom(path, chrom, pos_filter):
 def load_mu_for_chrom(mu_path, chrom, pos_filter):
     """
     Load per-variant mutation rates for one chromosome from a rate reference file
-    (e.g. roulette_missenses_filtered.parquet), restricted to the positions present
+    (e.g. gnomad_mu_snp_by_variant.parquet), restricted to the positions present
     in the RVAS data.
 
     Returns a dataframe indexed by chr-pos-ref-alt with column mu (and mu_adjusted
@@ -66,7 +66,8 @@ def load_mu_for_chrom(mu_path, chrom, pos_filter):
     if 'roulette_rate' in schema_names:
         rate_col = 'roulette_rate'
     else:
-        candidates = [c for c in schema_names if 'rate' in c.lower() or c.lower() in ('mu', 'u')]
+        candidates = [c for c in schema_names if 'rate' in c.lower() or c.lower() in ('mu', 'u')
+                      or c.lower().startswith('mu_')]
         if len(candidates) != 1:
             raise ValueError(
                 f'Could not identify a mutation rate column in {mu_path}. '

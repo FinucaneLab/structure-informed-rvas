@@ -318,7 +318,8 @@ python structure-informed-rvas/precompute_mu_per_residue.py \
   --reference-dir sir-reference-data/
 ```
 
-This writes `sir-reference-data/mu_per_residue.parquet` (11.1M residues, 19,576 genes).
+This writes `sir-reference-data/mu_per_residue_gnomad.parquet` (11.1M residues, 19,576 genes,
+chrX included).
 
 ### Running it
 
@@ -334,7 +335,7 @@ python structure-informed-rvas/run.py \
   --fdr-file ASD_mutation_rate.fdr.tsv
 ```
 
-`--mu-file` with no argument uses `<reference-dir>/roulette_missenses_filtered.parquet`.
+`--mu-file` with no argument uses `<reference-dir>/gnomad_mu_snp_by_variant.parquet`.
 The input file supplies only the observed de novo counts, in `ac_case` (or via
 `--ac-case-col`); no control column is needed.
 
