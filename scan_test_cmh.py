@@ -1,16 +1,3 @@
-"""Stratified 3D neighborhood test using exact CMH inference.
-
-This module intentionally mirrors the repository's existing Fisher 3DNT:
-  * it reuses the same structure/PAE adjacency matrices;
-  * it writes the same core HDF5 datasets expected by empirical_fdr.py;
-  * it uses the same empirical FDR/FWER code;
-  * it changes only the conditioning model and null resampling.
-
-For every protein x stratum, the null preserves the protein-wide case count and
-all residue-wise total allele counts.  Cases are redistributed across residues
-within the stratum by a multivariate hypergeometric draw.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -29,19 +16,16 @@ from utils import get_adjacency_matrix, write_dataset
 
 logger = get_logger(__name__)
 
-# Matches the existing Fisher code's lenient first-pass threshold (~p < 0.10).
 DEFAULT_SCREEN_CHI2 = 2.706
 
 
 def _protein_seed(base_seed, uniprot_id):
-    """Stable protein-specific seed, independent of Python hash randomization."""
     payload = f"{int(base_seed)}:{uniprot_id}".encode("utf-8")
     digest = hashlib.sha256(payload).digest()
     return int.from_bytes(digest[:8], byteorder="little", signed=False)
 
 
 def _per_residue_counts(df_s, n_res):
-    """Dense case/control count vectors for one protein-stratum."""
     case = np.zeros(n_res, dtype=np.int64)
     control = np.zeros(n_res, dtype=np.int64)
 
@@ -63,7 +47,6 @@ def _per_residue_counts(df_s, n_res):
 
 
 def _draw_stratified_null_cases(total_per_residue, n_case, n_sims, rng):
-    """Draw null case counts conditional on one protein-stratum's margins."""
     total_per_residue = np.asarray(total_per_residue, dtype=np.int64)
     n_total = int(total_per_residue.sum())
     n_case = int(n_case)
@@ -90,7 +73,6 @@ def _draw_stratified_null_cases(total_per_residue, n_case, n_sims, rng):
 
 
 def _build_cmh_inputs(df, adjacency_matrix, n_sims, stratum_col, seed):
-    """Construct observed/null sufficient statistics and exact CMH margins."""
     if stratum_col not in df.columns:
         raise KeyError(f"Missing stratum column '{stratum_col}'")
     if df[stratum_col].isna().any():
@@ -187,7 +169,6 @@ def _build_cmh_inputs(df, adjacency_matrix, n_sims, stratum_col, seed):
 
 
 def _screen_and_exact_pvalues(cmh, screen_chi2=DEFAULT_SCREEN_CHI2):
-    """Screen with CMH chi-square, then assign exact CMH p-values."""
     s = cmh["s_case_inside"]
     e = cmh["expected_sum"]
     v = cmh["variance_sum"]
@@ -246,7 +227,6 @@ def compute_all_cmh_pvals(
     screen_chi2=DEFAULT_SCREEN_CHI2,
     seed=1,
 ):
-    """Compute observed and null exact CMH p-values for one protein."""
     if isinstance(radius, str):
         raise NotImplementedError(
             "CMH currently supports one numeric neighborhood radius. "
@@ -299,7 +279,6 @@ def compute_all_cmh_pvals(
 
 
 def write_cmh_pvals(results_dir, uniprot_id, df_pvals, pval_file):
-    """Write the existing 3DNT HDF5 schema plus optional CMH QC datasets."""
     path = os.path.join(results_dir, pval_file)
     with h5py.File(path, "a") as fid:
         null_cols = [c for c in df_pvals.columns if c.startswith("null_pval_")]
@@ -321,7 +300,6 @@ def write_cmh_pvals(results_dir, uniprot_id, df_pvals, pval_file):
 
 
 def _filter_proteins(df_rvas, df_fdr_filter=None, min_alleles=5):
-    """Mirror the Fisher scan's protein-level allele-count filter."""
     grouped = df_rvas.groupby("uniprot_id")[["ac_case", "ac_control"]].sum()
     keep = grouped[
         (grouped["ac_case"] > min_alleles)
@@ -337,7 +315,6 @@ def _filter_proteins(df_rvas, df_fdr_filter=None, min_alleles=5):
 
 
 def _remove_neighborhood(df, adjacency_matrix, positions, uniprot_id):
-    """Remove all observations in one or more neighborhoods."""
     out = df.copy()
     for center in map(int, positions.split(",")):
         if center < 1 or center > adjacency_matrix.shape[0]:
@@ -369,7 +346,6 @@ def scan_test_cmh(
     screen_chi2=DEFAULT_SCREEN_CHI2,
     seed=1,
 ):
-    """Top-level stratified CMH 3DNT scan."""
     if fdr_only:
         df_results = compute_fdr(
             results_dir,
