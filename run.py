@@ -25,6 +25,7 @@ def map_and_filter_rvas(
         ac_filter,
         dont_remove_common,
         include_lcr,
+        stratum_col,
         mu_col=None,
         mu_file=None,
 ):
@@ -41,6 +42,7 @@ def map_and_filter_rvas(
             reference_dir,
             uniprot_id,
             genome_build,
+            stratum_col=stratum_col,
             mu_col=mu_col,
             mu_file=mu_file,
         )
@@ -57,6 +59,11 @@ def map_and_filter_rvas(
             df_rvas = df_rvas[df_rvas.ac_case < ac_filter]
         else:
             df_rvas = df_rvas[df_rvas.ac_case + df_rvas.ac_control < ac_filter]
+        df_rvas = filter_by_total_av(
+                df_rvas,
+                ac_filter,
+                stratum_col=stratum_col,
+        )
         if not dont_remove_common:
             logger.info("Removing common variants from RVAS data")
             keys = ['uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt']
@@ -310,6 +317,30 @@ if __name__ == '__main__':
         help = 'perform the 3D neighborhood test',
     )
     parser.add_argument(
+        '--test-method',
+        choices=['fisher','cmh'],
+        default='fisher',
+        help = 'association test used by 3DNT. Default: fisher',
+    )
+    parser.add_argument(
+        '--stratum-col',
+        type=str,
+        default=None,
+        help = 'categorical stratum column used by CMH',
+    )
+    parser.add_argument(
+        '--cmh-screen-threshold',
+        type=float,
+        default=DEFAULT_SCREEN_CHI2,
+        help = 'CMH chi-square threshold for cursory screening',
+    )
+    parser.add_argument(
+        '--seed',
+        type=int,
+        default=1,
+        help = 'base random seed for CMH null simulations.',
+    )
+    parser.add_argument(
         '--neighborhood-radius',
         type=_neighborhood_radius_type,
         default=15.0,
@@ -551,9 +582,25 @@ if __name__ == '__main__':
     if args.ac_filter <= 0:
         raise ValueError(f"AC filter must be positive, got {args.ac_filter}")
     
+    if args.cmh_screen_threshold < 0:
+        raise ValueError(f"CMH screen threshold must be non-negative, got {args.cmh_screen_threshold}")
+            
     if not (0 < args.fdr_cutoff < 1):
         raise ValueError(f"FDR cutoff must be between 0 and 1, got {args.fdr_cutoff}")
-    
+
+    if args.run_3dnt and args.test_method == 'cmh' and not args.fdr_only:
+        if args.stratum_col is None:
+            raise ValueError("--test-method cmh requires --stratum-col")
+        if args.neighborhood_radius in ('multiple-small', 'multiple-big'):
+            raise ValueError(
+                "--test-method cmh currently supports one numeric "
+                "--neighborhood-radius"
+            )
+        if args.ignore_ac:
+            raise ValueError(
+                "--ignore-ac is not currently supported with --test-method cmh"
+            )
+
     # Check required directories exist
 
     if args.reference_dir and not os.path.exists(args.reference_dir):
@@ -626,11 +673,26 @@ if __name__ == '__main__':
         args.ac_filter,
         args.dont_remove_common,
         args.include_lcr,
+        args.stratum_col,
         args.mu_col,
         args.mu_file,
     )
 
-
+    if (
+        args.run_3dnt
+        and args.test_method == 'cmh'
+        and not args.fdr_only
+        and df_rvas is not None
+    ):
+        if args.stratum_col not in df_rvas.columns:
+            raise KeyError(
+                f"Mapped RVAS data do not contain stratum column '{args.stratum_col}'"
+            )
+        if df_rvas[args.stratum_col].isna().any():
+            raise ValueError(
+                f"Mapped RVAS data contain missing values in '{args.stratum_col}'"
+            )
+                
     did_nothing = True
 
     if args.save_df_rvas is not None:
