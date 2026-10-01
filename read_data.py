@@ -107,6 +107,7 @@ def map_to_protein(
     which_proteins = 'all',
     genome_build = None,
     delimiter=None,
+    stratum_col=None,
     mu_col=None,
     mu_file=None,
 ):
@@ -134,6 +135,12 @@ def map_to_protein(
         ac_control_col: 'ac_control',
         mu_col: 'mu',
     })
+
+    if stratum_col is not None and stratum_col not in rvas_data.columns:
+        raise KeyError(
+            f"Stratum column '{stratum_col}' was requested but is not present "
+            "in RVAS data"
+        )
 
     if 'Variant ID' in rvas_data:
         rvas_data['Variant ID'] = [x.replace(':', '-') for x in rvas_data['Variant ID']]
@@ -210,6 +217,8 @@ def map_to_protein(
 
         cols = ['Variant ID', 'uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt',
                 'pdb_filename', 'aa_pos_file', 'ac_case']
+        if stratum_col is not None:
+            cols.append(stratum_col)
         if mutation_rate_mode:
             cols.append('mu')
             if 'mu_adjusted' in joined.columns:
@@ -233,3 +242,46 @@ def map_to_protein(
 
     result = pd.concat(result)
     return result
+
+
+def filter_by_total_ac(df_rvas, ac_filter, stratum_col=None):
+    """
+    Applying the total-AC threshold.
+
+    For stratified long-form input, the rare-variant threshold must be applied to the
+    variant's total AC across all strata.
+
+    Exact copies are collapsed before computing the variant-wide total and conflicting counts are filtered.
+    """
+    if stratum_col is None:
+        return df_rvas[
+            df_rvas.ac_case + df_rvas.ac_control < ac_filter
+        ].copy()
+
+    required = {'Variant ID', stratum_col, 'ac_case', 'ac_control'}
+    missing = required.difference(df_rvas.columns)
+    if missing:
+        raise KeyError(
+            f"Cannot apply stratified AC filter; missing columns: {sorted(missing)}"
+        )
+
+    cells = df_rvas[
+        ['Variant ID', stratum_col, 'ac_case', 'ac_control']
+    ].drop_duplicates()
+
+    n_rows_per_cell = cells.groupby(['Variant ID', stratum_col]).size()
+    if (n_rows_per_cell > 1).any():
+        bad_variant, bad_stratum = n_rows_per_cell[n_rows_per_cell > 1].index[0]
+        raise ValueError(
+            "Stratified input must contain one count vector per Variant ID x "
+            f"stratum; found conflicting rows for {bad_variant!r}, "
+            f"{bad_stratum!r}"
+        )
+
+    totals = (
+        cells.groupby('Variant ID')[['ac_case', 'ac_control']]
+        .sum()
+        .sum(axis=1)
+    )
+    keep = totals[totals < ac_filter].index
+    return df_rvas[df_rvas['Variant ID'].isin(keep)].copy()
