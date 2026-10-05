@@ -262,7 +262,7 @@ def summarize_results_hmp(df_results, fdr_cutoff, fwer_cutoff=0.05):
 
 
 def q_compute_fdr_hmp(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file,
-                       stat_method='hill', batch_size=50):
+                       stat_method='hillp', batch_size=50):
     """
     Compute FDR and FWER corrections over the HMP master h5.
 

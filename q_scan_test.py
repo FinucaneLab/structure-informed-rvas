@@ -13,6 +13,10 @@ from q_empirical_fdr import q_compute_fdr
 
 logger = get_logger(__name__)
 
+MULTI_RADII_SMALL = [6, 9, 12, 15, 18, 21]
+MULTI_RADII_BIG = [10, 15, 20, 30, 40]
+P_FLOOR = np.finfo(float).tiny
+
 
 # def get_random_ac_per_residue(case_ac_per_residue, total_ac_per_residue, n_sim, seed=0):
 #     if seed is not None:
@@ -250,51 +254,14 @@ def get_nbhd_stats(adjacency_matrix, n_per_residue, sum_betahat_matrix, sum_beta
     return n_betahat_nbhd, sum_betahat_nbhd, sum_betahat_sq_nbhd
 
 
-def compute_all_n_a_tstats(
-        df,
-        pdb_file_pos_guide,
-        pdb_dir,
-        pae_dir,
-        uniprot_id,
-        n_sims,
-        min_variants = 10,
-        radius = 15,
-        pae_cutoff = 15,
-        method = 'tstat',
-        large_threshold = -2.0,
+def _compute_stat_matrix_for_radius(
+        adjacency_matrix, n_per_residue, sum_betahat_matrix, sum_betahat_sq_matrix,
+        total_n_betahat, total_sum_betahat, total_sum_betahat_squared,
+        min_variants, method, large_threshold,
 ):
-    adjacency_matrix = get_adjacency_matrix(
-        pdb_file_pos_guide,
-        pdb_dir,
-        pae_dir,
-        uniprot_id,
-        radius,
-        pae_cutoff,
+    n_betahat, sum_betahat, sum_betahat_squared = get_nbhd_stats(
+        adjacency_matrix, n_per_residue, sum_betahat_matrix, sum_betahat_sq_matrix
     )
-    n_res = adjacency_matrix.shape[0]
-
-    # Compute permutations (null distribution) once for the whole protein, 
-    # then we can reuse for each neighborhood by multiplying with the adjacency matrix
-    base, base_sq, nulls, nulls_sq, n_per_residue = get_betahats_per_residue(df, n_res, n_sims)
-
-    # 2. Consolidate into matrices for neighborhood summation
-    # We stack the 'actual' result with the 'null' results
-    # Shape: (n_res, n_sims + 1)
-    sum_betahat_matrix = np.column_stack([base, nulls])
-    sum_betahat_sq_matrix = np.column_stack([base_sq, nulls_sq])
-    
-    # nbhd_size: L x 1
-    # sum_beta: L x (n_sims+1)
-    # sum_beta_squared: L x (n_sims+1)
-    n_betahat, sum_betahat, sum_betahat_squared = get_nbhd_stats(adjacency_matrix, n_per_residue, sum_betahat_matrix, sum_betahat_sq_matrix)
-
-    # get the totals for the whole protein
-    total_n_betahat = df.shape[0]
-    total_sum_betahat = df['betahat'].sum()
-    total_sum_betahat_squared = (df['betahat'] ** 2).sum()
-
-    if method not in ('tstat', 'pval', 'hill', 'hillp'):
-        raise ValueError(f"Unknown method '{method}'. Choose from: 'tstat', 'pval', 'hill', 'hillp'")
 
     # Step 1: always compute the t-statistic first.
     # Returns -|t| for valid neighborhoods, 0 otherwise.
@@ -311,7 +278,7 @@ def compute_all_n_a_tstats(
     # Step 3: convert passing entries; apply method-specific neutral to non-passing ones.
     if method == 'tstat':
         # -|t| already computed; just zero out sub-threshold entries.
-        neg_abs_tstat_matrix = np.where(pass_mask, neg_abs_tstat_matrix, 0)
+        stat_matrix = np.where(pass_mask, neg_abs_tstat_matrix, 0)
     elif method == 'pval':
         # p-value (two-tailed, Satterthwaite df) for passing entries; 1.0 elsewhere.
         p_matrix = get_stat_matrix_pval(
@@ -319,7 +286,7 @@ def compute_all_n_a_tstats(
             total_n_betahat, total_sum_betahat, total_sum_betahat_squared,
             min_variants,
         )
-        neg_abs_tstat_matrix = np.where(pass_mask, p_matrix, 1.0)
+        stat_matrix = np.where(pass_mask, p_matrix, 1.0)
     elif method == 'hill':
         # -|z| (Hill approximation, Satterthwaite df) for passing entries; 0.0 elsewhere.
         z_matrix = get_stat_matrix_hill(
@@ -327,7 +294,7 @@ def compute_all_n_a_tstats(
             total_n_betahat, total_sum_betahat, total_sum_betahat_squared,
             min_variants,
         )
-        neg_abs_tstat_matrix = np.where(pass_mask, z_matrix, 0.0)
+        stat_matrix = np.where(pass_mask, z_matrix, 0.0)
     else:  # 'hillp'
         # Two-tailed p-value via Hill normal approximation; 1.0 elsewhere.
         p_matrix = get_stat_matrix_hillp(
@@ -335,16 +302,111 @@ def compute_all_n_a_tstats(
             total_n_betahat, total_sum_betahat, total_sum_betahat_squared,
             min_variants,
         )
-        neg_abs_tstat_matrix = np.where(pass_mask, p_matrix, 1.0)
+        stat_matrix = np.where(pass_mask, p_matrix, 1.0)
+
+    return stat_matrix, n_betahat, sum_betahat
+
+
+def compute_all_n_a_tstats(
+        df,
+        pdb_file_pos_guide,
+        pdb_dir,
+        pae_dir,
+        uniprot_id,
+        n_sims,
+        min_variants = 10,
+        radius = 15,
+        pae_cutoff = 15,
+        method = 'tstat',
+        large_threshold = -2.0,
+):
+    if method not in ('tstat', 'pval', 'hill', 'hillp'):
+        raise ValueError(f"Unknown method '{method}'. Choose from: 'tstat', 'pval', 'hill', 'hillp'")
+
+    is_multi_radius = radius in ('multiple-small', 'multiple-big')
+    if is_multi_radius and method not in ('pval', 'hillp'):
+        raise ValueError(
+            f"--neighborhood-radius='{radius}' combines statistics across radii via harmonic "
+            f"mean, which is only valid for p-value methods ('pval', 'hillp'); got method='{method}'."
+        )
+
+    if is_multi_radius:
+        radii = MULTI_RADII_SMALL if radius == 'multiple-small' else MULTI_RADII_BIG
+        adj_matrices = {
+            r: get_adjacency_matrix(pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id, r, pae_cutoff)
+            for r in radii
+        }
+        n_res = adj_matrices[radii[0]].shape[0]
+    else:
+        adjacency_matrix = get_adjacency_matrix(
+            pdb_file_pos_guide,
+            pdb_dir,
+            pae_dir,
+            uniprot_id,
+            radius,
+            pae_cutoff,
+        )
+        n_res = adjacency_matrix.shape[0]
+
+    # Compute permutations (null distribution) once for the whole protein,
+    # then we can reuse for each neighborhood by multiplying with the adjacency matrix
+    base, base_sq, nulls, nulls_sq, n_per_residue = get_betahats_per_residue(df, n_res, n_sims)
+
+    # 2. Consolidate into matrices for neighborhood summation
+    # We stack the 'actual' result with the 'null' results
+    # Shape: (n_res, n_sims + 1)
+    sum_betahat_matrix = np.column_stack([base, nulls])
+    sum_betahat_sq_matrix = np.column_stack([base_sq, nulls_sq])
+
+    # get the totals for the whole protein
+    total_n_betahat = df.shape[0]
+    total_sum_betahat = df['betahat'].sum()
+    total_sum_betahat_squared = (df['betahat'] ** 2).sum()
+
+    if is_multi_radius:
+        stat_mats = []
+        n_betahat_by_radius = []
+        sum_betahat_by_radius = []
+        for r in radii:
+            stat_mat, n_betahat_r, sum_betahat_r = _compute_stat_matrix_for_radius(
+                adj_matrices[r], n_per_residue, sum_betahat_matrix, sum_betahat_sq_matrix,
+                total_n_betahat, total_sum_betahat, total_sum_betahat_squared,
+                min_variants, method, large_threshold,
+            )
+            stat_mats.append(stat_mat)
+            n_betahat_by_radius.append(n_betahat_r)
+            sum_betahat_by_radius.append(sum_betahat_r)
+
+        stacked = np.stack(stat_mats, axis=0)  # (n_radii, n_res, n_sims+1)
+        stacked = np.maximum(stacked, P_FLOOR)
+        neg_abs_tstat_matrix = len(radii) / np.sum(1.0 / stacked, axis=0)
+
+        # Per-position best radius: the radius with the smallest observed statistic
+        best_radius_idx = np.argmin(stacked[:, :, 0], axis=0)
+        radius_col = np.array([radii[i] for i in best_radius_idx], dtype=float)
+
+        n_betahat_stack = np.stack(n_betahat_by_radius, axis=0)  # (n_radii, n_res)
+        sum_betahat_stack = np.stack([s[:, 0] for s in sum_betahat_by_radius], axis=0)  # (n_radii, n_res)
+        _pos_idx = np.arange(n_res)
+        n_betahat = n_betahat_stack[best_radius_idx, _pos_idx]
+        sum_betahat_obs = sum_betahat_stack[best_radius_idx, _pos_idx]
+    else:
+        neg_abs_tstat_matrix, n_betahat, sum_betahat = _compute_stat_matrix_for_radius(
+            adjacency_matrix, n_per_residue, sum_betahat_matrix, sum_betahat_sq_matrix,
+            total_n_betahat, total_sum_betahat, total_sum_betahat_squared,
+            min_variants, method, large_threshold,
+        )
+        radius_col = float(radius)
+        sum_betahat_obs = sum_betahat[:, 0]
 
     # Create a mask to avoid division by zero
     valid_n = n_betahat > 0
     # Safely calculate mean_betahat
     # If n_betahat is 0, result will be 0.0
     mean_betahat = np.divide(
-        sum_betahat[:, 0], 
-        n_betahat, 
-        out=np.zeros_like(n_betahat, dtype=float), 
+        sum_betahat_obs,
+        n_betahat,
+        out=np.zeros_like(n_betahat, dtype=float),
         where=valid_n
     )
 
@@ -354,7 +416,8 @@ def compute_all_n_a_tstats(
     #other stuff it's convenient to see in the output
     df_n_a_tstats['mean_betahat'] = mean_betahat
     df_n_a_tstats['n_betahat'] = n_betahat
-    df_n_a_tstats = df_n_a_tstats[['mean_betahat', 'n_betahat'] + n_a_tstat_columns]
+    df_n_a_tstats['radius'] = radius_col
+    df_n_a_tstats = df_n_a_tstats[['mean_betahat', 'n_betahat', 'radius'] + n_a_tstat_columns]
     return df_n_a_tstats
 
 def write_df_n_a_tstats(results_dir, uniprot_id, df_n_a_tstats, n_a_tstat_file):
@@ -366,6 +429,7 @@ def write_df_n_a_tstats(results_dir, uniprot_id, df_n_a_tstats, n_a_tstat_file):
         write_dataset(fid, f'{uniprot_id}', df_n_a_tstats[['n_a_tstat']])
         write_dataset(fid, f'{uniprot_id}_null_n_a_tstat', df_n_a_tstats[null_n_a_tstat_cols])
         write_dataset(fid, f'{uniprot_id}_mean_beta', df_n_a_tstats[['mean_betahat', 'n_betahat']])
+        write_dataset(fid, f'{uniprot_id}_radius', df_n_a_tstats[['radius']])
 
 def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir, uniprot_id, radius, pae_cutoff, n_sims, min_variants, large_threshold, n_a_tstat_file, method='tstat', select_nbhds=None):
     df_n_a_tstats = compute_all_n_a_tstats(
@@ -470,12 +534,13 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
         try:
             df = df_rvas[df_rvas.uniprot_id == uniprot_id]
             if remove_nbhd is not None:
+                    adj_radius = 15 if radius in ('multiple-small', 'multiple-big') else radius
                     adjacency_matrix = get_adjacency_matrix(
                         pdb_file_pos_guide,
                         pdb_dir,
                         pae_dir,
                         uniprot_id,
-                        radius,
+                        adj_radius,
                         pae_cutoff,
                     )
                     for to_remove in map(int, remove_nbhd.split(',')):

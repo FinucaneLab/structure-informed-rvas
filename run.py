@@ -175,6 +175,16 @@ def map_and_filter_rvas_q(
     return df_rvas, df_filter
 
 
+def _neighborhood_radius_type(value):
+    if value in ('multiple-small', 'multiple-big'):
+        return value
+    try:
+        return float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"Invalid neighborhood radius: '{value}'. Must be a number, 'multiple-small', or 'multiple-big'."
+        )
+
 if __name__ == '__main__':
     start_time = time.time()
     parser=argparse.ArgumentParser()
@@ -228,9 +238,9 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--neighborhood-radius',
-        type=float,
+        type=_neighborhood_radius_type,
         default=15.0,
-        help='neighborhood radius (in Angstroms)',
+        help="neighborhood radius in Angstroms, 'multiple-small' to test radii 6,9,12,15,18,21, or 'multiple-big' to test radii 10,15,20,30,40; both combine p-values with harmonic mean",
     )
     parser.add_argument(
         '--pae-cutoff',
@@ -470,7 +480,7 @@ if __name__ == '__main__':
     if args.genome_build not in ['hg37', 'hg38']:
         raise ValueError(f"Invalid genome build: {args.genome_build}. Must be 'hg37' or 'hg38'")
     
-    if args.neighborhood_radius < 0:
+    if args.neighborhood_radius not in ('multiple-small', 'multiple-big') and args.neighborhood_radius < 0:
         raise ValueError(f"Neighborhood radius must be non-negative, got {args.neighborhood_radius}")
     
     if args.pae_cutoff < 0:
@@ -641,7 +651,22 @@ if __name__ == '__main__':
     elif args.get_nbhd:
         if not (args.uniprot_id and args.reference_dir and args.aa_pos):
             raise ValueError("For neighborhood residue lists, you must provide --uniprot_id, --reference_dir and --aa_pos")
-        nbhd, cases, cntrls = get_nbhd_info(df_rvas, args.uniprot_id, args.aa_pos, args.reference_dir, args.neighborhood_radius, args.pae_cutoff)
+        if args.neighborhood_radius in ('multiple-small', 'multiple-big'):
+            # Look up the per-position best radius recorded in the FDR file
+            fdr_path = os.path.join(args.results_dir, args.fdr_file)
+            nbhd_radius = 15.0  # fallback
+            if os.path.exists(fdr_path):
+                df_fdr_lookup = pd.read_csv(fdr_path, sep='\t')
+                if 'radius' in df_fdr_lookup.columns:
+                    row_match = df_fdr_lookup[
+                        (df_fdr_lookup['uniprot_id'] == args.uniprot_id) &
+                        (df_fdr_lookup['aa_pos'] == args.aa_pos)
+                    ]
+                    if len(row_match) > 0 and not pd.isna(row_match.iloc[0]['radius']):
+                        nbhd_radius = float(row_match.iloc[0]['radius'])
+        else:
+            nbhd_radius = args.neighborhood_radius
+        nbhd, cases, cntrls = get_nbhd_info(df_rvas, args.uniprot_id, args.aa_pos, args.reference_dir, nbhd_radius, args.pae_cutoff)
         print('Residues in neighborhood:')
         print(nbhd)
         print('Case Variants in neighborhood:')

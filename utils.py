@@ -248,17 +248,27 @@ def read_stats(fid, uniprot_id):
     """
     stat_data = fid[uniprot_id][:]
     beta_info = fid[f'{uniprot_id}_mean_beta'][:]
-    
+
+    # Read amino acid positions if available, otherwise generate sequentially
+    if f'{uniprot_id}_aa_pos' in fid:
+        aa_pos = fid[f'{uniprot_id}_aa_pos'][:].flatten()
+    else:
+        aa_pos = np.arange(1, stat_data.shape[0]+1)
+
     # Calculate ratio on-the-fly
     mean_beta = beta_info[:, 0]
     n_betahat = beta_info[:, 1]
     #ratio = (nbhd_case + 2) / (nbhd_control + 2 * n_control_total / n_case_total)
-    
+
     df = pd.DataFrame({'uniprot_id': uniprot_id,
-                       'aa_pos': np.arange(1, stat_data.shape[0]+1),
+                       'aa_pos': aa_pos,
                        'n_a_tstat': stat_data[:, 0],
                        'mean_betahat': mean_beta,
                        'n_betahat': n_betahat})
+
+    if f'{uniprot_id}_radius' in fid:
+        df['radius'] = fid[f'{uniprot_id}_radius'][:].flatten()
+
     return df
 
 def read_original_mutation_data(fid, uniprot_id):
