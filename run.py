@@ -5,7 +5,8 @@ import os
 import h5py
 import glob
 from scan_test import scan_test
-from read_data import map_to_protein
+from scan_test_cmh import scan_test_cmh, DEFAULT_SCREEN_CHI2
+from read_data import map_to_protein, filter_by_total_ac
 from pymol_code import make_movie_from_pse
 from logger_config import get_logger
 from utils import get_nbhd_info
@@ -58,12 +59,11 @@ def map_and_filter_rvas(
         if mutation_rate_mode:
             df_rvas = df_rvas[df_rvas.ac_case < ac_filter]
         else:
-            df_rvas = df_rvas[df_rvas.ac_case + df_rvas.ac_control < ac_filter]
-        df_rvas = filter_by_total_av(
+            df_rvas = filter_by_total_ac(
                 df_rvas,
                 ac_filter,
                 stratum_col=stratum_col,
-        )
+            )
         if not dont_remove_common:
             logger.info("Removing common variants from RVAS data")
             keys = ['uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt']
@@ -291,8 +291,8 @@ if __name__ == '__main__':
         type=int,
         default=None,
         help='''
-        Random seed for the null simulations, making a run reproducible. Applies to both
-        the standard and the mutation-rate tests. Each protein is given its own derived
+        Random seed for the null simulations, making a run reproducible. Applies to the
+        standard, mutation-rate, and CMH tests. Each protein is given its own derived
         stream, so the null draws stay independent across proteins. The stream is derived
         from the protein's position in the gene list, so reproducing a run means re-running
         the same gene set in the same order; splitting the genes across jobs differently
@@ -333,12 +333,6 @@ if __name__ == '__main__':
         type=float,
         default=DEFAULT_SCREEN_CHI2,
         help = 'CMH chi-square threshold for cursory screening',
-    )
-    parser.add_argument(
-        '--seed',
-        type=int,
-        default=1,
-        help = 'base random seed for CMH null simulations.',
     )
     parser.add_argument(
         '--neighborhood-radius',
@@ -600,6 +594,10 @@ if __name__ == '__main__':
             raise ValueError(
                 "--ignore-ac is not currently supported with --test-method cmh"
             )
+        if args.mu_col is not None or args.mu_file is not None:
+            raise ValueError(
+                "--test-method cmh cannot be combined with --mu-col/--mu-file"
+            )
 
     # Check required directories exist
 
@@ -774,6 +772,29 @@ if __name__ == '__main__':
             args.max_residues,
             args.simulate_null_from_mu,
             args.test_direction,
+        )
+        did_nothing = False
+
+    elif args.run_3dnt and args.test_method == 'cmh':
+        logger.info("Starting scan test analysis with CMH")
+        scan_test_cmh(
+            df_rvas,
+            args.reference_dir,
+            args.neighborhood_radius,
+            args.pae_cutoff,
+            args.results_dir,
+            args.n_sims,
+            args.no_fdr,
+            args.fdr_only,
+            args.fdr_cutoff,
+            df_filter,
+            args.ignore_ac,
+            args.fdr_file,
+            args.pval_file,
+            args.remove_nbhd,
+            args.stratum_col,
+            args.cmh_screen_threshold,
+            args.seed,
         )
         did_nothing = False
 

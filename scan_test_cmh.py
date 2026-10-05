@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix
 
-from cmh import exact_cmh_minlike_lookup
+from cmh import cmh_chisq_stat, cmh_expected_variance, exact_cmh_minlike_lookup
 from empirical_fdr import compute_fdr
 from logger_config import get_logger
 from utils import get_adjacency_matrix, write_dataset
@@ -93,8 +93,6 @@ def _build_cmh_inputs(df, adjacency_matrix, n_sims, stratum_col, seed):
 
     k = len(strata)
     s_case_inside = np.zeros((n_res, n_sims + 1), dtype=np.int32)
-    expected_sum = np.zeros(n_res, dtype=np.float64)
-    variance_sum = np.zeros(n_res, dtype=np.float64)
 
     inside_totals_by_stratum = np.zeros((n_res, k), dtype=np.int32)
     case_totals = np.zeros(k, dtype=np.int64)
@@ -127,16 +125,6 @@ def _build_cmh_inputs(df, adjacency_matrix, n_sims, stratum_col, seed):
         total_inside_all += inside_total
         s_case_inside[:, 0] += inside_case_obs.astype(np.int32)
 
-        expected_sum += inside_total * (n_case / n_total)
-        if n_total > 1:
-            variance_sum += (
-                inside_total
-                * (n_total - inside_total)
-                * n_case
-                * (n_total - n_case)
-                / (float(n_total) ** 2 * (n_total - 1.0))
-            )
-
         null_case_per_residue = _draw_stratified_null_cases(
             total,
             n_case,
@@ -152,6 +140,12 @@ def _build_cmh_inputs(df, adjacency_matrix, n_sims, stratum_col, seed):
 
     observed_nbhd_case = s_case_inside[:, 0].astype(np.int64)
     observed_nbhd_control = total_inside_all - observed_nbhd_case
+
+    expected_sum, variance_sum = cmh_expected_variance(
+        inside_totals_by_stratum,
+        case_totals,
+        stratum_totals,
+    )
 
     return {
         "strata": strata,
@@ -173,12 +167,8 @@ def _screen_and_exact_pvalues(cmh, screen_chi2=DEFAULT_SCREEN_CHI2):
     e = cmh["expected_sum"]
     v = cmh["variance_sum"]
 
-    stat = np.zeros_like(s, dtype=np.float64)
+    stat = cmh_chisq_stat(s, e, v)
     informative = v > 0
-    stat[informative, :] = (
-        (s[informative, :] - e[informative, None]) ** 2
-        / v[informative, None]
-    )
 
     candidate = (stat > float(screen_chi2)) & informative[:, None]
     pvals = np.ones_like(stat, dtype=np.float64)

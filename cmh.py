@@ -8,11 +8,18 @@ REL_ERR = 1.0 + 1e-7
 
 
 def cmh_expected_variance(inside_totals, case_totals, stratum_totals):
+    """
+    Expected value and variance, under the CMH null, of the sum over strata of
+    the "inside & case" counts. case_totals/stratum_totals are the per-stratum
+    margins (shape (k,)); inside_totals is reduced over its last axis against
+    them, so it may carry a leading axis (e.g. one row per candidate
+    neighborhood) that is broadcast across the k strata.
+    """
     m = np.asarray(inside_totals, dtype=np.float64)
     a = np.asarray(case_totals, dtype=np.float64)
     n = np.asarray(stratum_totals, dtype=np.float64)
 
-    if not (m.shape == a.shape == n.shape):
+    if a.shape != n.shape or m.shape[-1:] != a.shape[-1:]:
         raise ValueError(
             "shape mismatch"
         )
@@ -21,17 +28,17 @@ def cmh_expected_variance(inside_totals, case_totals, stratum_totals):
     if np.any(m > n) or np.any(a > n):
         raise ValueError("total count mismatch")
 
-    expected_k = np.zeros_like(n, dtype=np.float64)
-    variance_k = np.zeros_like(n, dtype=np.float64)
+    expected_k = np.zeros_like(m, dtype=np.float64)
+    variance_k = np.zeros_like(m, dtype=np.float64)
 
     nonempty = n > 0
-    expected_k[nonempty] = m[nonempty] * a[nonempty] / n[nonempty]
+    expected_k[..., nonempty] = m[..., nonempty] * a[nonempty] / n[nonempty]
 
     informative = n > 1
     ni = n[informative]
-    mi = m[informative]
+    mi = m[..., informative]
     ai = a[informative]
-    variance_k[informative] = (
+    variance_k[..., informative] = (
         mi
         * (ni - mi)
         * ai
@@ -39,14 +46,34 @@ def cmh_expected_variance(inside_totals, case_totals, stratum_totals):
         / (ni * ni * (ni - 1.0))
     )
 
-    return float(expected_k.sum()), float(variance_k.sum())
+    expected = expected_k.sum(axis=-1)
+    variance = variance_k.sum(axis=-1)
+    if expected.ndim == 0:
+        return float(expected), float(variance)
+    return expected, variance
 
 
 def cmh_chisq_stat(case_inside_sum, expected, variance):
+    """
+    (x - expected)^2 / variance, zeroed out wherever variance is non-positive
+    (the degenerate case where the null outcome is deterministic). expected
+    and variance may carry fewer trailing axes than case_inside_sum (e.g. one
+    value per residue against null draws per residue per simulation); they are
+    broadcast against its leading axes.
+    """
     x = np.asarray(case_inside_sum, dtype=np.float64)
-    if variance <= 0:
-        return np.zeros_like(x, dtype=np.float64)
-    return (x - expected) ** 2 / variance
+    e = np.asarray(expected, dtype=np.float64)
+    v = np.asarray(variance, dtype=np.float64)
+
+    extra_dims = x.ndim - e.ndim
+    if extra_dims < 0 or e.shape != v.shape:
+        raise ValueError("shape mismatch")
+    e = e.reshape(e.shape + (1,) * extra_dims)
+    v = v.reshape(v.shape + (1,) * extra_dims)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        stat = np.where(v > 0, (x - e) ** 2 / np.where(v > 0, v, 1.0), 0.0)
+    return stat
 
 
 def exact_cmh_distribution(inside_totals, case_totals, stratum_totals):
