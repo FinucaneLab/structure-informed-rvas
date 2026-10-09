@@ -221,6 +221,8 @@ This produces three PSE files under `results_schema/pymol_visualizations/`:
 - `GRIA3_P42263_mut.pse`: structure with mutations shown as spheres (blue = control-only, red = case-only, purple = both)
 - `GRIA3_P42263_ratio.pse`: structure colored by case/control neighborhood ratio (green = low, red = high)
 
+For a mutation-rate run the last two differ; see Visualizing mutation-rate results.
+
 Note: proteins whose structure spans multiple AlphaFold fragment files are skipped with a message.
 
 ### Functional Site Annotation
@@ -264,6 +266,69 @@ python structure-informed-rvas/visualize_and_interpret.py run_all \
 ```
 
 For each significant protein this produces the PSE files described above, plus `_nbhd.tsv` and `_nbhd_features.tsv` files in `results_schema/neighborhoods/`. Use `--significance-column fwer` to filter by FWER instead of FDR. Use `--skip-visualization` to run only annotation and neighborhood steps without PyMOL.
+
+### Visualizing mutation-rate results
+
+Every subcommand above also accepts a mutation-rate p-value file and FDR table, and
+adapts to them automatically -- the layouts are detected from the files themselves, so
+no extra flag is needed to switch modes:
+
+```
+python structure-informed-rvas/visualize_and_interpret.py run_all \
+  --fdr-file results_asd/asd.fdr.tsv \
+  --pval-file results_asd/asd.pvals.h5 \
+  --results-dir results_asd/ \
+  --reference-dir sir-reference-data/
+```
+
+Four things differ from the case/control output.
+
+**Which test.** A mutation-rate run holds two sets of results, one per null. `--test`
+chooses which one drives the output, and defaults to `binomial` (Test B, the within-gene
+comparison and the test of interest). `--test poisson` draws Test A instead; its
+standalone significance is not calibrated (see Limitations), so use it as a
+direction-of-effect check rather than as a second opinion on which hits are real.
+
+**Significance column.** `--significance-column` defaults to `fdr_max` here rather than
+`fdr`, so a neighborhood is only shown if it passed *both* tests. Hits are ranked by the
+selected test's p-value.
+
+**No control class.** There is no control cohort, so `_mut.pse` shows de novo positions
+in one colour (darker where a residue carries more than one) rather than the
+blue/red/purple case/control scheme, and `_ratio.pse` is coloured by observed/expected
+against the selected null on a diverging scale: white at obs/exp = 1, red above, blue
+below, clipped at four-fold so one extreme neighborhood cannot flatten the rest.
+
+**Feature tables.** `_nbhd.tsv` carries `mu` (the residue's mutational opportunity)
+instead of `ac_control`, and `_nbhd_features.tsv` replaces `prop_case_only_in_feature`
+with two columns:
+
+| column | meaning |
+| --- | --- |
+| `prop_denovo_in_feature` | share of the neighborhood's de novos inside the feature |
+| `prop_mu_in_feature` | share of the neighborhood's mutational opportunity inside the feature |
+
+The second is the null for the first. A feature that simply covers more of the
+neighborhood, or covers a mutational hotspot, scores highly on `prop_denovo_in_feature`
+on its own; it is the gap between the two columns that says whether de novos are
+concentrated there beyond what the rate predicts.
+
+To visualize every independent signal from a `--conditional` run rather than one
+neighborhood per gene, point `--fdr-file` at the `.conditional.tsv` and pass
+`--all-signals`:
+
+```
+python structure-informed-rvas/visualize_and_interpret.py run_all \
+  --fdr-file results_asd/asd.fdr.conditional.tsv \
+  --pval-file results_asd/asd.pvals.h5 \
+  --results-dir results_asd/ \
+  --reference-dir sir-reference-data/ \
+  --all-signals
+```
+
+Under `--neighborhood-radius multiple-small`/`multiple-big` each hit records the radius
+the scan selected for it, and that radius is used when rebuilding the neighborhood;
+`--radius` is only the fallback for results that record none.
 
 ## 3DNT with a mutation-rate null
 

@@ -22,11 +22,25 @@ import re
 import sys
 import json
 import time
-import requests
 import numpy as np
 import pandas as pd
 from collections import defaultdict
 from Bio.Align import PairwiseAligner
+
+try:
+    import requests
+except ImportError:
+    # Only the UniProt annotation paths need network access. Visualization, the
+    # neighborhood residue tables and the feature cross-reference all work offline, so
+    # a missing `requests` must not stop them being imported.
+    class _RequestsUnavailable:
+        def __getattr__(self, name):
+            raise ImportError(
+                'The annotation steps need the `requests` package (pip install requests). '
+                'Visualization and neighborhood feature tables do not.'
+            )
+
+    requests = _RequestsUnavailable()
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +455,42 @@ def _load_gene_map(reference_dir):
         return {}
 
 
+def _load_mut_data(pval_path, uniprot_id, test='binomial'):
+    """
+    Read one protein's per-residue mutation data, from either flavour of p-value file.
+    Returns (df_mut, mu_mode); in mutation-rate mode df_mut carries `mu` rather than
+    `ac_control`.
+    """
+    import h5py
+    import hdf5plugin  # noqa: F401
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from utils import read_original_mutation_data, resolve_pval_node
+
+    with h5py.File(pval_path, 'r') as fid:
+        node, mu_mode = resolve_pval_node(fid, test)
+        return read_original_mutation_data(node, uniprot_id, mu_mode=mu_mode), mu_mode
+
+
+# Column layouts of the two kinds of FDR table. The mutation-rate run corrects each test
+# separately and reports the max, so it has no plain `fdr` / `p_value` column at all.
+MU_FDR_SCHEMA = {
+    'significance_column': 'fdr_max',
+    'p_column': {'binomial': 'p_binomial', 'poisson': 'p_poisson'},
+    'radius_columns': {'binomial': ('radius_binomial', 'radius_poisson'),
+                       'poisson': ('radius_poisson', 'radius_binomial')},
+}
+STD_FDR_SCHEMA = {
+    'significance_column': 'fdr',
+    'p_column': {'binomial': 'p_value', 'poisson': 'p_value'},
+    'radius_columns': {'binomial': ('radius',), 'poisson': ('radius',)},
+}
+
+
+def _fdr_schema(df_fdr):
+    """Pick the column layout for an FDR table by looking at what it actually contains."""
+    return MU_FDR_SCHEMA if 'fdr_max' in df_fdr.columns else STD_FDR_SCHEMA
+
+
 def _compute_nbhd(uniprot_id, center, reference_dir, radius, pae_cutoff):
     """Return set of residue positions in the neighborhood centered at `center`."""
     import numpy as np
@@ -455,45 +505,72 @@ def _compute_nbhd(uniprot_id, center, reference_dir, radius, pae_cutoff):
     return set(int(x) for x in np.where(adj_mat[int(center) - 1, :] == 1)[0] + 1)
 
 
-def _nbhd_features_table(nbhd, df_mut, features_df):
+def _nbhd_features_table(nbhd, df_mut, features_df, mu_mode=False):
     """
     Cross-reference `nbhd` (set of residue positions) with `features_df`
-    (output of generate_simple_feature_table). `df_mut` must have columns
-    aa_pos, ac_case, ac_control with per-residue mutation counts.
+    (output of generate_simple_feature_table).
+
+    `df_mut` must have columns aa_pos, ac_case, and either ac_control (standard 3DNT)
+    or mu (mutation-rate mode).
 
     For each feature that overlaps the neighborhood, computes:
       - prop_nbhd_in_feature: fraction of neighborhood residues in the feature
       - prop_feature_in_nbhd: fraction of feature residues in the neighborhood
+
+    and then, in standard mode:
       - prop_case_only_in_feature: fraction of case-only alleles (in the nbhd)
         that fall inside the feature
       - case_only_positions: comma-separated list of case-only-mutated positions
-        inside the feature
 
-    Returns a DataFrame sorted descending by prop_case_only_in_feature.
+    or, in mutation-rate mode, where there is no control cohort to define "case-only":
+      - prop_denovo_in_feature: fraction of the neighborhood's de novos inside the feature
+      - prop_mu_in_feature: fraction of the neighborhood's mutational opportunity inside
+        the feature -- the null for the line above. A feature that simply covers more of
+        the neighborhood, or covers a mutational hotspot, carries a high
+        prop_denovo_in_feature on its own; the comparison between the two columns is what
+        says whether the de novos are concentrated there beyond the rate.
+      - denovo_positions: comma-separated list of de novo positions inside the feature
+
+    Returns a DataFrame sorted descending by the relevant proportion column.
     """
     df_nbhd = df_mut[df_mut['aa_pos'].isin(nbhd)]
-    df_case_only = df_nbhd[(df_nbhd['ac_case'] > 0) & (df_nbhd['ac_control'] == 0)]
-    n_case_only_nbhd = int(df_case_only['ac_case'].sum())
+    if mu_mode:
+        df_hit = df_nbhd[df_nbhd['ac_case'] > 0]
+        mu_nbhd = float(df_nbhd['mu'].sum())
+    else:
+        df_hit = df_nbhd[(df_nbhd['ac_case'] > 0) & (df_nbhd['ac_control'] == 0)]
+    n_hit_nbhd = int(df_hit['ac_case'].sum())
+
     rows = []
     for _, row in features_df.iterrows():
         feature_pos = parse_pymol_positions(row['residues_pymol'])
         overlap = nbhd & feature_pos
         if not overlap:
             continue
-        df_case_in_feature = df_case_only[df_case_only['aa_pos'].isin(overlap)]
-        n_case_in_feature = int(df_case_in_feature['ac_case'].sum())
-        case_positions = sorted(df_case_in_feature['aa_pos'].tolist())
-        rows.append({
+        df_hit_in_feature = df_hit[df_hit['aa_pos'].isin(overlap)]
+        n_hit_in_feature = int(df_hit_in_feature['ac_case'].sum())
+        hit_positions = sorted(df_hit_in_feature['aa_pos'].tolist())
+        prop_hit = round(n_hit_in_feature / n_hit_nbhd, 3) if n_hit_nbhd > 0 else None
+        out = {
             'feature_name': row['feature_name'],
             'functional_site_category': row['functional_site_category'],
             'prop_nbhd_in_feature': round(len(overlap) / len(nbhd), 3),
             'prop_feature_in_nbhd': round(len(overlap) / row['num_positions'], 3),
-            'prop_case_only_in_feature': round(n_case_in_feature / n_case_only_nbhd, 3) if n_case_only_nbhd > 0 else None,
-            'case_only_positions': ','.join(str(p) for p in case_positions) if case_positions else '',
-        })
+        }
+        if mu_mode:
+            mu_in_feature = float(df_nbhd[df_nbhd['aa_pos'].isin(overlap)]['mu'].sum())
+            out['prop_denovo_in_feature'] = prop_hit
+            out['prop_mu_in_feature'] = round(mu_in_feature / mu_nbhd, 3) if mu_nbhd > 0 else None
+            out['denovo_positions'] = ','.join(str(p) for p in hit_positions) if hit_positions else ''
+        else:
+            out['prop_case_only_in_feature'] = prop_hit
+            out['case_only_positions'] = ','.join(str(p) for p in hit_positions) if hit_positions else ''
+        rows.append(out)
+
     result_df = pd.DataFrame(rows)
     if len(result_df) > 0:
-        result_df = result_df.sort_values('prop_case_only_in_feature', ascending=False)
+        sort_col = 'prop_denovo_in_feature' if mu_mode else 'prop_case_only_in_feature'
+        result_df = result_df.sort_values(sort_col, ascending=False)
     return result_df
 
 
@@ -856,11 +933,6 @@ def cmd_nbhd_features(args):
       - {gene}_{uniprot}_{center}_nbhd_features.tsv: overlap of each feature with the
         neighborhood, sorted by fraction of case-only mutations in feature
     """
-    import h5py
-    import hdf5plugin
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from utils import read_original_mutation_data
-
     features_df = pd.read_csv(args.features, sep='\t')
 
     gene_name = _load_gene_map(args.reference_dir).get(args.uniprot, args.uniprot)
@@ -869,21 +941,22 @@ def cmd_nbhd_features(args):
     nbhd = _compute_nbhd(args.uniprot, center, args.reference_dir, args.radius, args.pae_cutoff)
     print(f"Neighborhood centered at {gene_name} ({args.uniprot}) aa {center}: {len(nbhd)} residues")
 
-    pval_file = args.pval_file
-    with h5py.File(pval_file, 'r') as fid:
-        df_mut = read_original_mutation_data(fid, args.uniprot)
+    df_mut, mu_mode = _load_mut_data(args.pval_file, args.uniprot, args.test)
+    if mu_mode:
+        print(f"Mutation-rate results; using the {args.test} null.")
 
     nbhd_dir = os.path.join(args.results_dir, 'neighborhoods')
     os.makedirs(nbhd_dir, exist_ok=True)
 
     # Save neighborhood residue file
+    second_col = 'mu' if mu_mode else 'ac_control'
     nbhd_path = os.path.join(nbhd_dir, f'{gene_name}_{args.uniprot}_{center}_nbhd.tsv')
-    df_mut[df_mut['aa_pos'].isin(nbhd)][['aa_pos', 'ac_case', 'ac_control']].to_csv(
+    df_mut[df_mut['aa_pos'].isin(nbhd)][['aa_pos', 'ac_case', second_col]].to_csv(
         nbhd_path, sep='\t', index=False
     )
     print(f"Saved neighborhood residues to {nbhd_path}")
 
-    result_df = _nbhd_features_table(nbhd, df_mut, features_df)
+    result_df = _nbhd_features_table(nbhd, df_mut, features_df, mu_mode=mu_mode)
 
     if len(result_df) == 0:
         print("No features overlap with this neighborhood.")
@@ -904,15 +977,15 @@ def cmd_nbhd_features(args):
 # Subcommand: color
 # ---------------------------------------------------------------------------
 
-def _make_mut_pse(pymol_cmd, input_cif, chain, uniprot_id, pval_file, output_pse):
-    """Create a _mut-style PSE: grey cartoon with case/control mutation spheres on one chain."""
-    import h5py
-    import hdf5plugin
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from utils import read_original_mutation_data
+def _make_mut_pse(pymol_cmd, input_cif, chain, uniprot_id, pval_file, output_pse,
+                  test='binomial'):
+    """
+    Create a _mut-style PSE: grey cartoon with mutation spheres on one chain.
 
-    with h5py.File(pval_file, 'r') as fid:
-        df_mut = read_original_mutation_data(fid, uniprot_id)
+    Standard 3DNT shows the case/control classes; a mutation-rate run has no controls and
+    shows de novo positions instead, darkened where a residue carries more than one.
+    """
+    df_mut, mu_mode = _load_mut_data(pval_file, uniprot_id, test)
 
     pymol_cmd.reinitialize()
     pymol_cmd.load(input_cif, "complex")
@@ -933,10 +1006,6 @@ def _make_mut_pse(pymol_cmd, input_cif, chain, uniprot_id, pval_file, output_pse
     pymol_cmd.set("ray_trace_mode", 1)
     pymol_cmd.set("ray_trace_gain", 0.15)
 
-    control_mask = (df_mut['ac_control'] >= 1) & (df_mut['ac_case'] == 0)
-    case_mask    = (df_mut['ac_case']    >= 1) & (df_mut['ac_control'] == 0)
-    both_mask    = (df_mut['ac_case']    >= 1) & (df_mut['ac_control'] >= 1)
-
     def _select_show(name, positions, color):
         if not positions:
             return
@@ -945,9 +1014,17 @@ def _make_mut_pse(pymol_cmd, input_cif, chain, uniprot_id, pval_file, output_pse
         pymol_cmd.show("spheres", name)
         pymol_cmd.color(color, name)
 
-    _select_show("control_only",     df_mut[control_mask]['aa_pos'].tolist(), "blue")
-    _select_show("case_only",        df_mut[case_mask]['aa_pos'].tolist(),    "red")
-    _select_show("case_and_control", df_mut[both_mask]['aa_pos'].tolist(),    "purple")
+    if mu_mode:
+        _select_show("denovo",           df_mut[df_mut['ac_case'] == 1]['aa_pos'].tolist(), "salmon")
+        _select_show("denovo_recurrent", df_mut[df_mut['ac_case'] >= 2]['aa_pos'].tolist(), "firebrick")
+    else:
+        control_mask = (df_mut['ac_control'] >= 1) & (df_mut['ac_case'] == 0)
+        case_mask    = (df_mut['ac_case']    >= 1) & (df_mut['ac_control'] == 0)
+        both_mask    = (df_mut['ac_case']    >= 1) & (df_mut['ac_control'] >= 1)
+
+        _select_show("control_only",     df_mut[control_mask]['aa_pos'].tolist(), "blue")
+        _select_show("case_only",        df_mut[case_mask]['aa_pos'].tolist(),    "red")
+        _select_show("case_and_control", df_mut[both_mask]['aa_pos'].tolist(),    "purple")
 
     pymol_cmd.save(output_pse)
     print(f"[OK] Saved mutations session to {output_pse}")
@@ -980,20 +1057,22 @@ def cmd_color(args):
     pymol_cmd.set("cartoon_transparency", 0.0, "target_chain")
 
     residue_ratios = {}
+    mu_mode = False
 
     if args.pval_file:
         import h5py
-        import hdf5plugin
+        import hdf5plugin  # noqa: F401
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from utils import read_p_values, resolve_pval_node
         pval_file = args.pval_file
         with h5py.File(pval_file, 'r') as fid:
-            case_control = fid[f'{args.uniprot}_nbhd'][:]
-        nbhd_case = case_control[:, 0]
-        nbhd_control = case_control[:, 1]
-        n_case_total = nbhd_case.sum()
-        n_control_total = nbhd_control.sum()
-        ratio = (nbhd_case + 2) / (nbhd_control + 2 * n_control_total / n_case_total)
-        for pos_idx, r in enumerate(ratio):
-            residue_ratios[pos_idx + 1] = float(r)
+            node, mu_mode = resolve_pval_node(fid, args.test)
+            df_eff = read_p_values(node, args.uniprot, mu_mode=mu_mode)
+        # obs/exp against the chosen null in mutation-rate mode; the regularized
+        # case/control ratio otherwise.
+        effect = df_eff['obs_exp'] if mu_mode else df_eff['ratio']
+        residue_ratios = {int(pos): float(v)
+                          for pos, v in zip(df_eff['aa_pos'], effect)}
     else:
         with open(args.tsv, newline="") as f:
             reader = csv.DictReader(f, delimiter="\t")
@@ -1007,14 +1086,24 @@ def cmd_color(args):
     if not residue_ratios:
         raise RuntimeError(f"No ratio data found for UniProt ID {args.uniprot}")
 
-    max_ratio = max(residue_ratios.values()) or 1.0
-    for resi, ratio in residue_ratios.items():
-        pymol_cmd.alter(f"target_chain and resi {resi}", f"b={(ratio / max_ratio)**2}")
+    if mu_mode:
+        from pymol_code import _obs_exp_to_b
+        b_values = {resi: float(_obs_exp_to_b(v)) for resi, v in residue_ratios.items()}
+        palette = "ratio_blue white ratio_red"
+        spectrum_range = {'minimum': 0.0, 'maximum': 1.0}
+    else:
+        max_ratio = max(residue_ratios.values()) or 1.0
+        b_values = {resi: (v / max_ratio) ** 2 for resi, v in residue_ratios.items()}
+        palette = "ratio_blue ratio_red"
+        spectrum_range = {}
+
+    for resi, b in b_values.items():
+        pymol_cmd.alter(f"target_chain and resi {resi}", f"b={b}")
 
     pymol_cmd.rebuild()
     pymol_cmd.set_color("ratio_blue", [0.45, 0.78, 1.0])
     pymol_cmd.set_color("ratio_red",  [1.0, 0.55, 0.55])
-    pymol_cmd.spectrum("b", "ratio_blue ratio_red", "target_chain", byres=1)
+    pymol_cmd.spectrum("b", palette, "target_chain", byres=1, **spectrum_range)
     pymol_cmd.set("specular", 0.0)
     pymol_cmd.set("ambient", 0.4)
     pymol_cmd.set("ray_trace_mode", 1)
@@ -1026,7 +1115,8 @@ def cmd_color(args):
     if args.pval_file:
         stem = args.output_pse[:-len("_ratio.pse")] if args.output_pse.endswith("_ratio.pse") else args.output_pse[:-4]
         mut_pse = stem + "_mut.pse"
-        _make_mut_pse(pymol_cmd, args.input_cif, args.chain, args.uniprot, pval_file, mut_pse)
+        _make_mut_pse(pymol_cmd, args.input_cif, args.chain, args.uniprot, pval_file, mut_pse,
+                      test=args.test)
 
     return 0
 
@@ -1039,7 +1129,8 @@ def cmd_visualize(args):
     """CLI handler for `visualize`. Delegates to pymol_code.run_all for one protein."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from pymol_code import run_all
-    run_all(args.uniprot, args.results_dir, args.reference_dir, pval_file=args.pval_file)
+    run_all(args.uniprot, args.results_dir, args.reference_dir, pval_file=args.pval_file,
+            test=args.test)
     return 0
 
 
@@ -1055,32 +1146,41 @@ def cmd_analyze(args):
       3. Top-neighborhood residue table (_nbhd.tsv)
       4. Neighborhood × features table (_nbhd_features.tsv)
     """
-    import h5py
-    import hdf5plugin
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from utils import read_original_mutation_data
+    from utils import best_radius_for_hit
     from pymol_code import run_all
 
-    # Load FDR file and filter to significant proteins
+    # Load FDR file and work out which layout it has. A mutation-rate run corrects each
+    # test separately and reports the max, so it has no plain `fdr` or `p_value` column.
     df_fdr = pd.read_csv(args.fdr_file, sep='\t')
-    sig_col = args.significance_column
-    if sig_col not in df_fdr.columns:
-        raise ValueError(
-            f"Column '{sig_col}' not found in {args.fdr_file}. "
-            f"Available: {list(df_fdr.columns)}"
-        )
+    schema = _fdr_schema(df_fdr)
+    sig_col = args.significance_column or schema['significance_column']
+    p_col = schema['p_column'][args.test]
+    radius_cols = schema['radius_columns'][args.test]
+    if schema is MU_FDR_SCHEMA:
+        print(f"Mutation-rate results detected; ranking by {p_col}, "
+              f"significance from {sig_col}.")
+
+    for col in (sig_col, p_col):
+        if col not in df_fdr.columns:
+            raise ValueError(
+                f"Column '{col}' not found in {args.fdr_file}. "
+                f"Available: {list(df_fdr.columns)}"
+            )
 
     df_sig = df_fdr[df_fdr[sig_col] < args.significance_cutoff].copy()
     if len(df_sig) == 0:
         print(f"No proteins with {sig_col} < {args.significance_cutoff} in {args.fdr_file}")
         return 0
 
-    # For each protein, pick the neighborhood with the lowest p_value
-    top_per_protein = (
-        df_sig.sort_values('p_value')
-              .groupby('uniprot_id', as_index=False)
-              .first()
-    )
+    if args.all_signals:
+        # One row per independent signal, as written by --conditional. Collapsing to the
+        # best per protein would throw away exactly what that analysis found.
+        hits = df_sig.sort_values(p_col).reset_index(drop=True)
+    else:
+        hits = (df_sig.sort_values(p_col)
+                      .groupby('uniprot_id', as_index=False)
+                      .first())
 
     gene_map = _load_gene_map(args.reference_dir)
     annotations_dir = args.annotations_dir or os.path.join(args.results_dir, 'annotations')
@@ -1092,25 +1192,33 @@ def cmd_analyze(args):
     nbhd_dir = os.path.join(args.results_dir, 'neighborhoods')
     os.makedirs(nbhd_dir, exist_ok=True)
 
-    n = len(top_per_protein)
-    for i, row in enumerate(top_per_protein.itertuples(), 1):
+    n = len(hits)
+    visualized = set()
+    for i, row in enumerate(hits.itertuples(), 1):
         uniprot_id = row.uniprot_id
         center = int(row.aa_pos)
         gene_name = gene_map.get(uniprot_id, uniprot_id)
+        # The scan records which radius it chose for this position under
+        # --neighborhood-radius multiple-*; re-deriving the neighborhood at a fixed 15 A
+        # would annotate a different neighborhood from the one that was tested.
+        radius = best_radius_for_hit(df_fdr, uniprot_id, center,
+                                     default=args.radius, radius_cols=radius_cols)
 
         print(f"\n{'='*60}")
-        print(f"[{i}/{n}] {gene_name} ({uniprot_id})  top neighborhood center: {center}")
-        print(f"  {sig_col}={getattr(row, sig_col):.4g}  p={row.p_value:.4g}")
+        print(f"[{i}/{n}] {gene_name} ({uniprot_id})  neighborhood center: {center}")
+        print(f"  {sig_col}={getattr(row, sig_col):.4g}  {p_col}={getattr(row, p_col):.4g}")
         print('='*60)
 
-        # 1. Visualization
-        if not args.skip_visualization:
+        # 1. Visualization (per protein, not per signal -- the PSEs cover the whole chain)
+        if not args.skip_visualization and uniprot_id not in visualized:
             print("  Running visualization...")
             try:
-                run_all(uniprot_id, args.results_dir, args.reference_dir, pval_file=pval_path)
+                run_all(uniprot_id, args.results_dir, args.reference_dir, pval_file=pval_path,
+                        test=args.test)
                 print("  Visualization done.")
             except Exception as e:
                 print(f"  Warning: visualization failed: {e}")
+            visualized.add(uniprot_id)
 
         # 2. Annotation
         features_path = os.path.join(
@@ -1127,11 +1235,11 @@ def cmd_analyze(args):
             features_df = pd.DataFrame()
 
         # 3. Compute neighborhood
-        print(f"  Computing neighborhood (center={center}, radius={args.radius}, pae={args.pae_cutoff})...")
+        print(f"  Computing neighborhood (center={center}, radius={radius}, pae={args.pae_cutoff})...")
         try:
             nbhd = _compute_nbhd(
                 uniprot_id, center, args.reference_dir,
-                args.radius, args.pae_cutoff
+                radius, args.pae_cutoff
             )
             print(f"  Neighborhood has {len(nbhd)} residues")
         except Exception as e:
@@ -1140,15 +1248,15 @@ def cmd_analyze(args):
 
         # 4. Load per-residue mutation data
         try:
-            with h5py.File(pval_path, 'r') as fid:
-                df_mut = read_original_mutation_data(fid, uniprot_id)
+            df_mut, mu_mode = _load_mut_data(pval_path, uniprot_id, args.test)
         except Exception as e:
             print(f"  Warning: could not read mutation data: {e}")
             continue
 
         # 5. Save _nbhd.tsv
+        second_col = 'mu' if mu_mode else 'ac_control'
         nbhd_path = os.path.join(nbhd_dir, f'{gene_name}_{uniprot_id}_{center}_nbhd.tsv')
-        df_mut[df_mut['aa_pos'].isin(nbhd)][['aa_pos', 'ac_case', 'ac_control']].to_csv(
+        df_mut[df_mut['aa_pos'].isin(nbhd)][['aa_pos', 'ac_case', second_col]].to_csv(
             nbhd_path, sep='\t', index=False
         )
         print(f"  Saved neighborhood residues to {nbhd_path}")
@@ -1158,12 +1266,13 @@ def cmd_analyze(args):
             print("  No features available; skipping nbhd-features table.")
             continue
 
-        result_df = _nbhd_features_table(nbhd, df_mut, features_df)
+        result_df = _nbhd_features_table(nbhd, df_mut, features_df, mu_mode=mu_mode)
         nbhd_feat_path = os.path.join(nbhd_dir, f'{gene_name}_{uniprot_id}_{center}_nbhd_features.tsv')
         result_df.to_csv(nbhd_feat_path, sep='\t', index=False)
         print(f"  Saved {len(result_df)} overlapping features to {nbhd_feat_path}")
 
-    print(f"\nDone. Processed {n} proteins.")
+    label = 'signals' if args.all_signals else 'proteins'
+    print(f"\nDone. Processed {n} {label}.")
     return 0
 
 
@@ -1262,6 +1371,15 @@ def main():
     )
     subparsers = parser.add_subparsers(dest='command', required=True)
 
+    def add_test_arg(p):
+        """--test selects the null for a mutation-rate p-value file; ignored otherwise."""
+        p.add_argument('--test', choices=['binomial', 'poisson'], default='binomial',
+                       help='For mutation-rate results, which null drives the output: '
+                            'binomial = Test B, the within-gene comparison and the test '
+                            'of interest (default); poisson = Test A, the regional-'
+                            'constraint guard, whose standalone significance is not '
+                            'calibrated. Ignored for standard 3DNT results.')
+
     # -- annotate subcommand --
     p_annotate = subparsers.add_parser(
         'annotate',
@@ -1299,6 +1417,7 @@ def main():
                         help='Neighborhood radius in Angstroms (default: 15.0)')
     p_nbhd.add_argument('--pae-cutoff', type=float, default=15.0,
                         help='Maximum PAE value (default: 15.0)')
+    add_test_arg(p_nbhd)
 
     # -- visualize subcommand --
     p_vis = subparsers.add_parser(
@@ -1309,6 +1428,7 @@ def main():
     p_vis.add_argument('--results-dir', required=True, help='Results directory')
     p_vis.add_argument('--reference-dir', required=True, help='Reference directory')
     p_vis.add_argument('--pval-file', required=True, help='Full path to p_values.h5 HDF5 file')
+    add_test_arg(p_vis)
 
     # -- run_all subcommand --
     p_analyze = subparsers.add_parser(
@@ -1318,13 +1438,22 @@ def main():
                     'residue table, and neighborhood × features table.',
     )
     p_analyze.add_argument('--fdr-file', required=True,
-                           help='FDR results TSV (output of run.py --run-3dnt)')
+                           help='FDR results TSV (output of run.py --run-3dnt), or the '
+                                '.conditional.tsv from a --conditional run')
     p_analyze.add_argument('--results-dir', required=True,
                            help='Results directory (must contain p_values.h5)')
     p_analyze.add_argument('--reference-dir', required=True,
                            help='Reference directory')
-    p_analyze.add_argument('--significance-column', default='fdr',
-                           help='Column to use for significance cutoff (default: fdr)')
+    p_analyze.add_argument('--significance-column', default=None,
+                           help='Column to use for significance cutoff. Default depends '
+                                'on the file: "fdr" for standard 3DNT results, "fdr_max" '
+                                'for mutation-rate results (a neighborhood passes only '
+                                'if it passes both tests)')
+    p_analyze.add_argument('--all-signals', action='store_true', default=False,
+                           help='Process every significant row rather than only the best '
+                                'neighborhood per protein. Use with the .conditional.tsv '
+                                'from a --conditional run, which lists one row per '
+                                'independent signal')
     p_analyze.add_argument('--significance-cutoff', type=float, default=0.05,
                            help='Significance cutoff (default: 0.05)')
     p_analyze.add_argument('--annotations-dir', default=None,
@@ -1334,13 +1463,16 @@ def main():
     p_analyze.add_argument('--pval-file', required=True,
                            help='Full path to p_values.h5 HDF5 file')
     p_analyze.add_argument('--radius', type=float, default=15.0,
-                           help='Neighborhood radius in Angstroms (default: 15.0)')
+                           help='Fallback neighborhood radius in Angstroms (default: 15.0). '
+                                'The radius the scan recorded for each hit is used when '
+                                'the results file has one')
     p_analyze.add_argument('--pae-cutoff', type=float, default=15.0,
                            help='Maximum PAE value (default: 15.0)')
     p_analyze.add_argument('--confidence-threshold', type=float, default=0.8,
                            help='Alignment confidence threshold for annotation (default: 0.8)')
     p_analyze.add_argument('--skip-visualization', action='store_true', default=False,
                            help='Skip PyMOL visualization step')
+    add_test_arg(p_analyze)
 
     # -- color subcommand --
     p_color = subparsers.add_parser(
@@ -1357,6 +1489,7 @@ def main():
     p_color.add_argument('--output-pse', required=True, help='Output PyMOL session (.pse)')
     p_color.add_argument('--chain', required=True, help='Target chain ID (e.g. A)')
     p_color.add_argument('--uniprot', required=True, help='Target UniProt ID')
+    add_test_arg(p_color)
 
     # -- pse to png --
     p_pse_to_png = subparsers.add_parser(

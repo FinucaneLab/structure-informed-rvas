@@ -210,6 +210,33 @@ def write_dataset(fid, name, data, clevel=5):
     )
 
 
+MU_TEST_GROUPS = ('poisson', 'binomial')
+
+
+def resolve_pval_node(fid, test='binomial'):
+    """
+    Resolve where one file keeps its per-protein datasets, and say which kind it is.
+
+    The standard 3DNT writes `{uniprot_id}`, `_nbhd`, `_radius` and `_original` at the
+    root. The mutation-rate 3DNT runs two tests against the same observed data and writes
+    one such set per test, under the 'poisson' and 'binomial' groups. Readers that index
+    the root therefore raise KeyError on a mutation-rate file, so every consumer should
+    come through here rather than reaching into `fid` directly.
+
+    Returns (node, mu_mode). `test` selects the group and is ignored for standard files.
+    """
+    if fid.attrs.get('test_type') != 'mutation_rate':
+        return fid, False
+    if test not in MU_TEST_GROUPS:
+        raise ValueError(f"test must be one of {MU_TEST_GROUPS}, got {test!r}")
+    if test not in fid:
+        raise KeyError(
+            f"'{test}' group missing from a mutation-rate p-value file "
+            f"(groups present: {sorted(k for k in fid.keys())})"
+        )
+    return fid[test], True
+
+
 def read_p_values(fid, uniprot_id, mu_mode=False):
     """
     Reads the p values for one uniprot_id from an HDF5 results file,
@@ -251,28 +278,49 @@ def read_p_values(fid, uniprot_id, mu_mode=False):
                  'radius': radius_vals})
     return pd.DataFrame(base)
 
-def read_original_mutation_data(fid, uniprot_id):
+def read_original_mutation_data(fid, uniprot_id, mu_mode=False):
     """
     Reads the original per-residue mutation counts for one uniprot_id from an HDF5 results file.
+
+    In mutation-rate mode the second column of `_original` is the residue's mutational
+    opportunity, not a control allele count, and the second column of `_nbhd` is the
+    expected de novo count under that test's null. The returned frame then carries `mu`
+    and `obs_exp` instead of `ac_control` and `ratio`.
+
+    The columns are deliberately NOT aliased onto the case/control names. Roulette rates
+    are far below 1, so a caller testing `ac_control >= 1` would silently find no controls
+    and one testing `ac_control == 0` would silently find no case-only residues -- both
+    produce a plausible-looking answer from a column that means something else entirely.
     """
     pvalue_data = fid[uniprot_id][:]
     original_data = fid[f'{uniprot_id}_original'][:]
     case_control = fid[f'{uniprot_id}_nbhd'][:]
-    
-    # Calculate ratio on-the-fly using neighborhood data
+
     nbhd_case = case_control[:, 0]
-    nbhd_control = case_control[:, 1]
+    second = case_control[:, 1]
+
+    base = {'uniprot_id': uniprot_id,
+            'aa_pos': np.arange(1, pvalue_data.shape[0]+1),
+            'p_value': pvalue_data[:, 0]}
+
+    if mu_mode:
+        # Same regularized effect size read_p_values reports, so the colouring and the
+        # results table agree.
+        base.update({'obs_exp': (nbhd_case + 1) / (second + 1),
+                     'ac_case': original_data[:, 0],
+                     'mu': original_data[:, 1]})
+        return pd.DataFrame(base)
+
+    # Calculate ratio on-the-fly using neighborhood data
+    nbhd_control = second
     n_case_total = nbhd_case.sum()
     n_control_total = nbhd_control.sum()
     ratio = (nbhd_case + 2) / (nbhd_control + 2 * n_control_total / n_case_total)
-    
-    df = pd.DataFrame({'uniprot_id': uniprot_id,
-                       'aa_pos': np.arange(1, pvalue_data.shape[0]+1),
-                       'p_value': pvalue_data[:, 0],
-                       'ratio': ratio,
-                       'ac_case': original_data[:, 0],
-                       'ac_control': original_data[:, 1]})
-    return df
+
+    base.update({'ratio': ratio,
+                 'ac_case': original_data[:, 0],
+                 'ac_control': original_data[:, 1]})
+    return pd.DataFrame(base)
 
 def get_nbhd_info(df_rvas, uniprot_id, aa_pos, reference_dir, radius, pae_cutoff):
     """
