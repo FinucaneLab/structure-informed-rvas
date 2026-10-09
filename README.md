@@ -609,6 +609,17 @@ mutated residue means the two windows are reporting the same variants, which is 
 makes them the same finding. Membership is transitive, so a run of windows walking along
 one cluster of de novos is one component.
 
+**Enriched neighborhoods only.** The standard case/control scan is two-sided, so its
+significant set mixes neighborhoods carrying more case variants than expected with ones
+carrying fewer. A component is a cluster of case variants, so depleted neighborhoods are
+excluded -- from the gene gate as well as from membership, since otherwise a gene could
+qualify on a depleted neighborhood and then be conditioned on a cluster it had nothing to
+do with. The count excluded is logged. On the ClinVar results this matters a lot:
+clustering everything gave 1,440 "components" of which 81% were lone neighborhoods
+holding no case variant at all, against 211 real ones. Clustering depletion would need a
+rule based on the controls rather than the cases, which is not implemented. The
+mutation-rate scan is one-sided by default, so the filter is a no-op there.
+
 Two different gates:
 
 | gate | flag | default | what it decides |

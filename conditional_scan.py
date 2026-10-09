@@ -89,10 +89,23 @@ def _gene_gate_column(criterion, mutation_rate_mode):
     return 'fwer' if criterion == 'fwer' else 'fdr'
 
 
-def _genes_passing_gate(df_results, active_genes, gate_col, gate_cutoff):
-    """Genes with at least one neighborhood clearing the gene gate."""
+def _effect_column(mutation_rate_mode, test='binomial'):
+    """The observed-vs-expected column, used to keep reporting to enriched hits."""
+    return f'obs_exp_{test}' if mutation_rate_mode else 'ratio'
+
+
+def _genes_passing_gate(df_results, active_genes, gate_col, gate_cutoff, effect_col=None):
+    """
+    Genes with at least one ENRICHED neighborhood clearing the gene gate.
+
+    The standard scan is two-sided, so without the effect filter a gene could qualify on
+    a strongly depleted neighborhood and then be conditioned on a cluster of case
+    variants it had nothing to do with.
+    """
     df = df_results[df_results['uniprot_id'].isin(active_genes)]
     df = df[df[gate_col].notna() & (df[gate_col] < gate_cutoff)]
+    if effect_col and effect_col in df.columns:
+        df = df[df[effect_col] > 1]
     return sorted(df['uniprot_id'].unique())
 
 
@@ -156,6 +169,7 @@ def conditional_scan(
     crit_col = _criterion_column(criterion, mutation_rate_mode)
     gate_col = _gene_gate_column(gene_criterion, mutation_rate_mode)
     gate_cutoff = gene_cutoff
+    effect_col = _effect_column(mutation_rate_mode)
     p_col = 'p_binomial' if mutation_rate_mode else 'p_value'
     radius_cols = _radius_columns(mutation_rate_mode)
 
@@ -228,12 +242,14 @@ def conditional_scan(
             results, genes, reference_dir, pae_cutoff, read_mut,
             p_col, crit_col, gate_col, radius_cols, cutoff, mutation_rate_mode,
             round_idx=round_idx, default_radius=default_radius,
+            effect_col=effect_col,
         )
 
     # The gene gate is FWER by default and the members are the FDR-significant
     # neighborhoods, so a gene qualifies on strong evidence but conditions on everything
     # that evidence is spread across.
-    gated = _genes_passing_gate(df_results, analysis_genes, gate_col, gate_cutoff)
+    gated = _genes_passing_gate(df_results, analysis_genes, gate_col, gate_cutoff,
+                                effect_col)
     logger.info(f'Round 0: {len(gated)} genes pass the gene gate '
                 f'({gate_col} < {gate_cutoff})')
     comps = _components(df_results, gated, 0)
@@ -329,7 +345,8 @@ def conditional_scan(
 
         # Re-apply the gene gate each round: a gene continues only on fresh
         # FWER-strength evidence, not on an FDR-level remnant of what was masked.
-        gated = _genes_passing_gate(df_results, active, gate_col, gate_cutoff)
+        gated = _genes_passing_gate(df_results, active, gate_col, gate_cutoff,
+                                    effect_col)
         comps = _components(df_results, gated, round_idx)
 
         # A gene whose re-scan failed keeps the previous round's datasets in the copied

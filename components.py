@@ -19,6 +19,15 @@ run of overlapping windows walking along one cluster of de novos is one signal -
 is also the direction in which this can over-merge, so component_table reports
 seq_span_aa and the caller can see how far a component reaches.
 
+Only ENRICHED neighborhoods are clustered. The standard case/control scan is
+two-sided, so its significant set mixes neighborhoods carrying more case variants than
+expected with ones carrying fewer. A component is a cluster of case variants, so a
+depleted neighborhood does not belong in one: on the ClinVar results, clustering
+everything produced 1,440 "components" of which 81% were lone neighborhoods holding no
+case variant at all, and most of the rest with one or two were depletion calls. They are
+counted and reported, not silently dropped -- clustering depletion would need a rule
+based on the controls rather than the cases.
+
 Gene gate and member gate are different by design. A gene qualifies on having an
 FWER-significant neighborhood; the components are then built from all of its
 FDR-significant neighborhoods. FWER significance implies FDR significance at the same
@@ -127,8 +136,16 @@ def component_table(
 
     by_pos = df_results.set_index('aa_pos')
     rows = []
+    n_caseless = 0
     for comp in sorted(set(labels.tolist())):
         idx = [i for i in range(len(centers)) if labels[i] == comp]
+        # A neighborhood holding no case variant cannot share one, so it can never join
+        # anything and arrives here as a component of one with nothing in it. That is not
+        # a finding: under a two-sided scan these are the depletion calls, and on the
+        # ClinVar results they were 81% of the raw output. Count them and move on.
+        if not any(shared[i] for i in idx):
+            n_caseless += len(idx)
+            continue
         member_centers = sorted(int(centers[i][0]) for i in idx)
         residues = set().union(*[nbhd[i] for i in idx])
         in_comp = df_mut[df_mut.aa_pos.isin(residues)]
@@ -176,7 +193,11 @@ def component_table(
             rec['control_pymol'] = positions_to_pymol_notation(ctrl.aa_pos.astype(int))
         rows.append(rec)
 
-    return pd.DataFrame(rows).sort_values('lead_p').reset_index(drop=True)
+    out = pd.DataFrame(rows)
+    if len(out):
+        out = out.sort_values('lead_p').reset_index(drop=True)
+    out.attrs['n_caseless'] = n_caseless
+    return out
 
 
 def components_for_genes(
@@ -193,6 +214,7 @@ def components_for_genes(
     mu_mode,
     round_idx=0,
     default_radius=15.0,
+    effect_col=None,
 ):
     """
     Build the component table for every gene in `genes`.
@@ -210,11 +232,29 @@ def components_for_genes(
     pae_dir = f'{reference_dir}/pae_files/'
 
     tables = []
+    n_caseless = 0
+    n_depleted = 0
     for uniprot_id in sorted(genes):
         g = df_results[(df_results.uniprot_id == uniprot_id) &
                        (df_results[fdr_col] < member_cutoff)]
+        # Enriched only. A two-sided scan calls depleted neighborhoods too, and a
+        # cluster of case variants is not what those are.
+        if effect_col and effect_col in g.columns:
+            n_all = len(g)
+            g = g[g[effect_col] > 1]
+            n_depleted += n_all - len(g)
         if len(g) == 0:
             continue
+        # One row per position. Results tables written before the gene_name merge was
+        # collapsed carry a row per paralogous gene name, which would otherwise put the
+        # same centre in the component twice and make the lead lookup ambiguous.
+        n_before = len(g)
+        g = g.drop_duplicates(subset='aa_pos')
+        if len(g) < n_before:
+            logger.warning(
+                f'{uniprot_id}: {n_before - len(g)} duplicate rows per position in the '
+                'results table (several gene names share this accession); using one each'
+            )
         gene_name = g.gene_name.iloc[0] if 'gene_name' in g.columns else uniprot_id
 
         centers = []
@@ -238,11 +278,27 @@ def components_for_genes(
             logger.warning(f'{uniprot_id}: could not build components - {e}')
             continue
 
-        tables.append(component_table(
+        t = component_table(
             g, uniprot_id, gene_name, centers, adj_by_radius, df_mut,
             p_col, fdr_col, fwer_col, mu_mode, round_idx,
-        ))
+        )
+        n_caseless += t.attrs.get('n_caseless', 0)
+        if len(t):
+            tables.append(t)
 
+    if n_depleted:
+        logger.info(
+            f'Round {round_idx}: {n_depleted} significant neighborhoods are depleted '
+            f'({effect_col} <= 1) and were not clustered; components describe enriched '
+            'signal only.'
+        )
+    if n_caseless:
+        logger.info(
+            f'Round {round_idx}: {n_caseless} significant neighborhoods contain no case '
+            'variant and were not clustered. Under a two-sided scan these are the '
+            'depletion calls; clustering them would need a rule based on the controls, '
+            'not the cases.'
+        )
     if not tables:
         return pd.DataFrame()
     out = pd.concat(tables, ignore_index=True)

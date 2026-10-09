@@ -320,6 +320,65 @@ def test_sphere_thinning():
           f'{len(kept3)} kept')
 
 
+# ---------------------------------------------------------------------------
+def test_enriched_only():
+    """
+    Only enriched neighborhoods are clustered, and case-free ones never become
+    components.
+
+    The standard case/control scan is two-sided. Clustering its full significant set
+    produced, on ClinVar, 1440 "components" of which 81% were lone neighborhoods holding
+    no case variant -- depletion calls, which a cluster of case variants is not.
+    """
+    print('\n8. Enriched-only clustering')
+    from components import components_for_genes
+
+    n_res = 60
+    adj = banded_adjacency(n_res, 5)
+
+    import components as comp_mod
+    real_adj = comp_mod.get_adjacency_matrix
+    comp_mod.get_adjacency_matrix = lambda *a, **k: adj
+    try:
+        df_mut = pd.DataFrame({'aa_pos': np.arange(1, n_res + 1), 'ac_case': 0,
+                               'ac_control': 0})
+        df_mut.loc[df_mut.aa_pos == 20, 'ac_case'] = 3      # enriched site
+        df_mut.loc[df_mut.aa_pos == 50, 'ac_control'] = 9   # depleted site, no cases
+
+        df_results = pd.DataFrame({
+            'uniprot_id': 'P1', 'gene_name': 'G1',
+            'aa_pos': [20, 50],
+            'p_value': [1e-9, 1e-8],
+            'fdr': [0.001, 0.002], 'fwer': [0.01, 0.02],
+            'ratio': [8.0, 0.1],            # one enriched, one depleted
+        })
+        kw = dict(reference_dir='x', pae_cutoff=15.0, read_mut=lambda u: df_mut,
+                  p_col='p_value', fdr_col='fdr', fwer_col='fwer',
+                  radius_cols=('radius',), member_cutoff=0.05, mu_mode=False,
+                  default_radius=15.0)
+
+        both = components_for_genes(df_results, {'P1'}, **kw)
+        check('without an effect column both are kept but the case-free one is dropped',
+              len(both) == 1 and both.iloc[0].lead_aa_pos == 20,
+              f'{len(both)} components')
+
+        enriched = components_for_genes(df_results, {'P1'}, effect_col='ratio', **kw)
+        check('with the effect column only the enriched neighborhood clusters',
+              len(enriched) == 1 and enriched.iloc[0].lead_aa_pos == 20,
+              f'{len(enriched)} components')
+        check('the surviving component carries its case variants',
+              enriched.iloc[0].n_case_alleles == 3,
+              str(enriched.iloc[0].n_case_alleles))
+
+        # A gene whose ONLY significant neighborhood is depleted yields nothing at all.
+        only_dep = df_results[df_results.aa_pos == 50]
+        none = components_for_genes(only_dep, {'P1'}, effect_col='ratio', **kw)
+        check('a gene with only depleted hits produces no component', len(none) == 0,
+              f'{len(none)} components')
+    finally:
+        comp_mod.get_adjacency_matrix = real_adj
+
+
 if __name__ == '__main__':
     test_shared_mutation_connects()
     test_overlap_without_mutation_does_not_connect()
@@ -328,5 +387,6 @@ if __name__ == '__main__':
     test_masking_can_exhaust_a_gene()
     test_units_from_components()
     test_sphere_thinning()
+    test_enriched_only()
     print('\n' + ('ALL TESTS PASSED' if not FAILURES else f'FAILURES: {FAILURES}'))
     sys.exit(1 if FAILURES else 0)
