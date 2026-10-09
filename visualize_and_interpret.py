@@ -1151,6 +1151,7 @@ def _units_from_components(components_file, gene_map):
     """
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from utils import parse_pymol_positions
+    from components import parse_centers_detail
 
     df = pd.read_csv(components_file, sep='\t')
     required = {'uniprot_id', 'component_id', 'residues_pymol', 'lead_aa_pos'}
@@ -1177,6 +1178,9 @@ def _units_from_components(components_file, gene_map):
             'gene_name': gene_name,
             'center': lead,
             'residues': residues,
+            # member centres with their own radii, so PyMOL can redraw the component as
+            # the union of spheres it actually is
+            'centers': parse_centers_detail(row),
             'label': f'c{int(row.component_id)}_{lead}',
             'kind': 'component',
             'info': info,
@@ -1280,6 +1284,14 @@ def cmd_analyze(args):
     nbhd_dir = os.path.join(args.results_dir, 'neighborhoods')
     os.makedirs(nbhd_dir, exist_ok=True)
 
+    # The _mut PSE is per protein but a protein can carry several components, so they
+    # are collected up front and all drawn into it as separate toggleable objects.
+    components_by_protein = defaultdict(list)
+    for unit in units:
+        if unit['kind'] == 'component' and unit.get('centers'):
+            components_by_protein[unit['uniprot_id']].append(
+                {'label': unit['label'], 'centers': unit['centers']})
+
     n = len(units)
     visualized = set()
     annotated = {}
@@ -1302,7 +1314,8 @@ def cmd_analyze(args):
                 try:
                     from pymol_code import run_all
                     run_all(uniprot_id, args.results_dir, args.reference_dir,
-                            pval_file=pval_path, test=args.test)
+                            pval_file=pval_path, test=args.test,
+                            components=components_by_protein.get(uniprot_id))
                     print("  Visualization done.")
                 except Exception as e:
                     print(f"  Warning: visualization failed: {e}")
@@ -1312,7 +1325,8 @@ def cmd_analyze(args):
                     from pymol_code import pymol_component
                     pymol_component(uniprot_id, args.reference_dir, args.results_dir,
                                     pval_path, unit['residues'], unit['label'],
-                                    gene_name=gene_name, test=args.test)
+                                    gene_name=gene_name, test=args.test,
+                                    centers=unit.get('centers'))
                 except Exception as e:
                     print(f"  Warning: component visualization failed: {e}")
 

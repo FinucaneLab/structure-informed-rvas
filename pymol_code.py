@@ -1,4 +1,5 @@
 from pymol import cmd
+from pymol.cgo import COLOR, ALPHA, SPHERE
 import pandas as pd
 import os
 import ast
@@ -45,18 +46,119 @@ def get_pdb_filename(annot_df, info_df):
     return annot_df
 
 
+# Transparent orange, matching the ball people draw by hand around a neighborhood.
+COMPONENT_SPHERE_COLOR = (1.0, 0.7, 0.0)
+COMPONENT_SPHERE_ALPHA = 0.20
+# Thin the drawn centres to this fraction of a radius apart. Measured on the ASD
+# components, 0.5 keeps 13-27 spheres out of 45-104 and covers 91-100% of the component;
+# 1.0 drops to 4-8 spheres but only 74-97% coverage, and 0.25 is exact but puts every
+# centre back and renders opaque.
+COMPONENT_SPHERE_SEPARATION = 0.5
+
+
+def _thin_centers(placed, separation_factor=COMPONENT_SPHERE_SEPARATION,
+                  min_separation=None):
+    """
+    Greedily drop centres that sit close to one already kept.
+
+    `placed` is [(xyz, radius), ...] in input order, and order decides who survives --
+    the caller passes centres in position order, so the result is reproducible. Split out
+    from _component_cgo so the geometry can be tested without PyMOL or a structure.
+    """
+    kept = []
+    for xyz, radius in placed:
+        sep = (radius * separation_factor if min_separation is None
+               else float(min_separation))
+        if all(np.linalg.norm(np.asarray(xyz) - np.asarray(k_xyz)) >= sep
+               for k_xyz, _ in kept):
+            kept.append((xyz, radius))
+    return kept
+
+
+def _component_cgo(centers, color=COMPONENT_SPHERE_COLOR, alpha=COMPONENT_SPHERE_ALPHA,
+                   separation_factor=COMPONENT_SPHERE_SEPARATION, min_separation=None):
+    """
+    A CGO object drawing a component as the union of its neighborhood spheres.
+
+    `centers` is [(aa_pos, radius), ...]. One sphere per member centre is what the
+    component literally is, but transparency accumulates where spheres overlap, and a
+    component with 100 members renders as a solid blob hiding the structure inside it.
+    So the centres are thinned greedily in 3D: a centre is drawn only if it is at least
+    `separation_factor` of its radius from every centre already drawn.
+
+    The result is an APPROXIMATE envelope, not an exact one. A dropped centre lies within
+    that separation of a kept centre, so its own sphere is not fully inside the kept one,
+    and the drawn union falls a little short of the component at the edges -- 91-100% of
+    residues on the ASD components at the default. The authoritative residue set is
+    residues_pymol in the components file, and the component PSE colours exactly those
+    residues; this object is for seeing roughly where the signal sits.
+
+    Returns (cgo, n_drawn, n_centers).
+    """
+    placed = []
+    for aa_pos, radius in centers:
+        try:
+            xyz = cmd.get_atom_coords(f'name CA and resi {int(aa_pos)}')
+        except Exception:
+            # A centre with no CA in the loaded structure -- skip it rather than abort
+            # the whole object.
+            continue
+        placed.append((np.asarray(xyz, dtype=float), float(radius)))
+
+    kept = _thin_centers(placed, separation_factor, min_separation)
+
+    cgo = [COLOR, float(color[0]), float(color[1]), float(color[2]), ALPHA, float(alpha)]
+    for xyz, radius in kept:
+        cgo += [SPHERE, float(xyz[0]), float(xyz[1]), float(xyz[2]), radius]
+    return cgo, len(kept), len(placed)
+
+
+def _add_component_spheres(components, prefix='component'):
+    """
+    Load one toggleable CGO object per component into the current session.
+
+    Each becomes its own object so it can be shown or hidden independently of the
+    mutations and of the other components.
+
+    The camera is restored afterwards: a CGO enlarges the scene's bounding box, which
+    otherwise re-frames the session on the sphere and crops the rest of the protein out
+    of the saved view.
+    """
+    if not components:
+        return
+    view = cmd.get_view()
+    for comp in components or []:
+        centers = comp.get('centers') or []
+        if not centers:
+            continue
+        cgo, n_drawn, n_centers = _component_cgo(centers)
+        if n_drawn == 0:
+            continue
+        name = f"{prefix}_{comp.get('label', 'c')}"
+        cmd.load_cgo(cgo, name)
+        note = ('' if n_drawn == n_centers
+                else f' (thinned from {n_centers}; approximate envelope)')
+        print(f"  Added component object '{name}': {n_drawn} spheres{note}")
+    cmd.set_view(view)
+
+
 def pymol_rvas(uniprot_id, reference_directory, results_directory, pval_file, gene_name=None,
-               test='binomial'):
+               test='binomial', components=None):
     """Create PyMOL visualizations for RVAS results.
 
     Produces two PSE files per protein:
     - {gene}_{uniprot}_gray.pse: plain grey cartoon structure
-    - {gene}_{uniprot}_mut.pse: structure with mutations colored
+    - {gene}_{uniprot}_mut.pse: structure with mutations colored, plus one toggleable
+      CGO object per component when `components` is given
 
     The standard 3DNT colors by case/control class (blue = control-only, red = case-only,
     purple = both). A mutation-rate run has no control cohort at all -- the comparison is
     against the modelled rate -- so it instead shows de novo positions in one colour,
     darkened where a residue carries more than one.
+
+    `components` is [{'label': str, 'centers': [(aa_pos, radius), ...]}, ...]. Each is
+    drawn as a transparent sphere union in its own object, so it can be shown or hidden
+    without disturbing the mutations.
     """
     try:
         if gene_name is None:
@@ -150,6 +252,9 @@ def pymol_rvas(uniprot_id, reference_directory, results_directory, pval_file, ge
                 _select_show("case_only",        final_case,    "red")
                 _select_show("case_and_control", final_both,    "purple")
 
+            _add_component_spheres(components)
+
+            cmd.deselect()
             pse_pdb_p = os.path.join(pymol_dir, f"{pse_base}_mut.pse")
             cmd.save(pse_pdb_p)
             print(f"  Saved mutations PSE: {pse_pdb_p}")
@@ -284,7 +389,7 @@ def pymol_neighborhood(uniprot_id, results_directory, reference_directory, pval_
 
 
 def pymol_component(uniprot_id, reference_directory, results_directory, pval_file,
-                    residues, label, gene_name=None, test='binomial'):
+                    residues, label, gene_name=None, test='binomial', centers=None):
     """
     Render one component: its residues highlighted on the grey chain, its mutations
     shown as spheres.
@@ -361,6 +466,9 @@ def pymol_component(uniprot_id, reference_directory, results_directory, pval_fil
             _spheres("case_only", case_only['aa_pos'], "red")
             _spheres("case_and_control", both['aa_pos'], "purple")
 
+        if centers:
+            _add_component_spheres([{'label': label, 'centers': centers}])
+
         cmd.set("specular", 0.0)
         cmd.set("ambient", 0.4)
         cmd.set("ray_trace_mode", 1)
@@ -398,7 +506,8 @@ def make_movie_from_pse(result_directory, pse_name):
         print(f"[ERROR] Failed to create movie from PSE: {e}")
 
 
-def run_all(uniprot_id, results_directory, reference_directory, pval_file, test='binomial'):
+def run_all(uniprot_id, results_directory, reference_directory, pval_file, test='binomial',
+            components=None):
     """
     Run the full PyMOL visualization pipeline for a single protein.
 
@@ -407,7 +516,7 @@ def run_all(uniprot_id, results_directory, reference_directory, pval_file, test=
     """
     gene_name = _load_gene_name(uniprot_id, reference_directory)
     pymol_rvas(uniprot_id, reference_directory, results_directory, pval_file,
-               gene_name=gene_name, test=test)
+               gene_name=gene_name, test=test, components=components)
     pymol_scan_test(uniprot_id, reference_directory, results_directory, pval_file,
                     gene_name=gene_name, test=test)
     pymol_neighborhood(uniprot_id, results_directory, reference_directory, pval_file,

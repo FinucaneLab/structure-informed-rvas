@@ -301,6 +301,20 @@ and in `pymol_visualizations/`, `{gene}_{uniprot}_c{id}_{lead}_component.pse` --
 component highlighted on the greyed-out chain with its mutations as spheres. The
 whole-chain PSEs are still written once per protein.
 
+Both the `_mut.pse` and the `_component.pse` also get a **toggleable component object**
+drawn as a transparent orange sphere union, named `component_c{id}_{lead}`. Hide it with
+`disable component_c1_842` and bring it back with `enable`; a protein with several
+components gets one object each, so they can be shown independently. The camera is
+unchanged by it, so `_mut.pse` still opens framed on the whole protein.
+
+That envelope is **approximate**. One sphere per member centre is what a component
+literally is, but 100 overlapping transparent spheres render as an opaque blob, so the
+centres are thinned to roughly half a radius apart -- typically 13-27 spheres out of
+45-104, covering 91-100% of the component's residues. The authoritative residue set is
+`residues_pymol`, and the `_component.pse` colours exactly those residues; the spheres
+are for seeing at a glance where the signal sits. `COMPONENT_SPHERE_SEPARATION`,
+`_ALPHA` and `_COLOR` in `pymol_code.py` tune it.
+
 **The proportions are relative to the region.** `prop_denovo_in_feature` and
 `prop_mu_in_feature` are shares of the region being annotated, so the same feature scores
 differently against a component than against one neighborhood, and the two are not
@@ -687,7 +701,10 @@ all_proteins.fdr.conditional.tsv   one row per independent signal, all rounds
 ```
 
 `components.tsv` carries, per component: `residues_pymol` (the union of its member
-neighborhoods, in PyMOL selection notation), `centers_pymol`, `case_pymol` and
+neighborhoods, in PyMOL selection notation), `centers_pymol`, `centers_detail`
+(`pos:radius` per member, so a viewer can redraw the component as the union of spheres
+it actually is, correct even under `multiple-*` where each centre picks its own radius),
+`case_pymol` and
 `case_detail` (`pos:count`, so recurrence survives), counts of case residues and alleles,
 the lead neighborhood and its statistics, and `seq_span_aa`. Case/control runs add
 `control_pymol` and control counts; mutation-rate runs add `mu_component` instead, since

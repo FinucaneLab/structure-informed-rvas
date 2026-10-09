@@ -32,7 +32,8 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 
 from logger_config import get_logger
-from utils import get_adjacency_matrix, positions_to_pymol_notation
+from utils import (get_adjacency_matrix, positions_to_pymol_notation,
+                   parse_pymol_positions)
 
 logger = get_logger(__name__)
 
@@ -153,6 +154,13 @@ def component_table(
             'seq_span_aa': _seq_span(centers, labels, comp),
             'residues_pymol': positions_to_pymol_notation(residues),
             'centers_pymol': positions_to_pymol_notation(member_centers),
+            # pos:radius per member, because under --neighborhood-radius multiple-* each
+            # centre picks its own and the single `radius` column only records the lead's.
+            # This is what lets a viewer redraw the component as its actual union of
+            # spheres rather than one radius applied to every centre.
+            'centers_detail': ','.join(
+                f'{int(centers[i][0])}:{float(centers[i][1]):g}' for i in sorted(
+                    idx, key=lambda j: int(centers[j][0]))),
             'n_case_residues': int(len(case_rows)),
             'n_case_alleles': int(case_rows.ac_case.sum()),
             'case_pymol': positions_to_pymol_notation(case_rows.aa_pos.astype(int)),
@@ -243,6 +251,37 @@ def components_for_genes(
         f'genes from {int(out.n_centers.sum())} significant neighborhoods'
     )
     return out
+
+
+def parse_centers_detail(row, default_radius=15.0):
+    """
+    Member centres of a component as [(aa_pos, radius), ...].
+
+    Prefers the centers_detail column, which carries each centre's own radius. Falls
+    back to centers_pymol plus the component's single `radius` for files written before
+    centers_detail existed -- exact for a single-radius run, approximate under
+    multiple-*. Falls back again to the lead centre alone if neither column is present,
+    so a hand-written components file with only the required columns still draws
+    something rather than raising.
+    """
+    detail = getattr(row, 'centers_detail', None)
+    if isinstance(detail, str) and detail.strip():
+        out = []
+        for part in detail.split(','):
+            pos, _, rad = part.partition(':')
+            out.append((int(pos), float(rad) if rad else default_radius))
+        return out
+
+    radius = getattr(row, 'radius', None)
+    radius = (float(radius) if radius is not None and not pd.isna(radius)
+              else default_radius)
+
+    centers_pymol = getattr(row, 'centers_pymol', None)
+    if isinstance(centers_pymol, str) and centers_pymol.strip():
+        return [(p, radius) for p in sorted(parse_pymol_positions(centers_pymol))]
+
+    lead = getattr(row, 'lead_aa_pos', None)
+    return [(int(lead), radius)] if lead is not None and not pd.isna(lead) else []
 
 
 def top_component(df_components, uniprot_id):

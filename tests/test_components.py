@@ -230,10 +230,11 @@ def test_units_from_components():
         pd.DataFrame([
             {'uniprot_id': 'P1', 'gene_name': 'G1', 'component_id': 1, 'round': 0,
              'n_centers': 3, 'lead_aa_pos': 20, 'lead_p': 1e-9,
-             'residues_pymol': '15-25+40', 'n_case_alleles': 4},
+             'residues_pymol': '15-25+40', 'n_case_alleles': 4,
+             'centers_detail': '18:15,20:15,22:12', 'radius': 15.0},
             {'uniprot_id': 'P1', 'gene_name': 'G1', 'component_id': 2, 'round': 1,
              'n_centers': 1, 'lead_aa_pos': 70, 'lead_p': 1e-6,
-             'residues_pymol': '65-75', 'n_case_alleles': 2},
+             'residues_pymol': '65-75', 'n_case_alleles': 2, 'radius': 15.0},
         ]).to_csv(path, sep='\t', index=False)
 
         units = _units_from_components(path, {})
@@ -250,6 +251,10 @@ def test_units_from_components():
           u['gene_name'] == 'G1')
     check('the later round is carried through',
           units[1]['info'].startswith('component 2 (round 1)'), units[1]['info'])
+    check('centers_detail gives each centre its own radius',
+          u['centers'] == [(18, 15.0), (20, 15.0), (22, 12.0)], str(u['centers']))
+    check('a component with no centre columns falls back to its lead',
+          units[1]['centers'] == [(70, 15.0)], str(units[1]['centers']))
 
     # A file without the component columns must fail loudly, not half-work.
     with tempfile.TemporaryDirectory() as tmp:
@@ -262,6 +267,59 @@ def test_units_from_components():
             check('a non-components file is rejected', True)
 
 
+# ---------------------------------------------------------------------------
+def test_sphere_thinning():
+    """
+    The component envelope thins overlapping spheres, and the result is approximate.
+
+    One sphere per member centre is what a component literally is, but 100 overlapping
+    transparent spheres render opaque. The thinning must drop near-duplicates and keep
+    spread-out centres -- and the docstring must not claim the drawn union still covers
+    the component, because it does not.
+    """
+    print('\n7. Component sphere thinning')
+    from pymol_code import _thin_centers
+
+    r = 15.0
+    # Three centres 2 A apart, then one far away.
+    placed = [((0.0, 0.0, 0.0), r), ((2.0, 0.0, 0.0), r), ((4.0, 0.0, 0.0), r),
+              ((40.0, 0.0, 0.0), r)]
+    kept = _thin_centers(placed, separation_factor=0.5)
+    check('near-duplicate centres collapse to one',
+          len(kept) == 2, f'{len(kept)} kept from {len(placed)}')
+    check('the distant centre is kept',
+          any(abs(k[0][0] - 40.0) < 1e-9 for k in kept))
+    check('the first centre wins ties (input order decides)',
+          abs(kept[0][0][0]) < 1e-9, str(kept[0][0]))
+
+    # A larger separation keeps fewer; a smaller one keeps more.
+    spread = [((float(i) * 5.0, 0.0, 0.0), r) for i in range(10)]
+    counts = {f: len(_thin_centers(spread, separation_factor=f))
+              for f in (1.0, 0.5, 0.25)}
+    check('fewer spheres at larger separation',
+          counts[1.0] <= counts[0.5] <= counts[0.25], str(counts))
+    check('separation 0.25r keeps every centre 5 A apart',
+          counts[0.25] == len(spread), str(counts))
+
+    # The honest part: a dropped centre's own sphere is NOT inside the kept sphere, so
+    # the drawn union falls short of the component at its edges. At separation 0.5r a
+    # centre 5 A away is dropped (5 < 7.5), but its neighborhood reaches 5 + r = 20 A
+    # from the kept centre, well outside the kept sphere of radius r.
+    dropped_at = 5.0
+    kept2 = _thin_centers([((0.0, 0.0, 0.0), r), ((dropped_at, 0.0, 0.0), r)],
+                          separation_factor=0.5)
+    check('a centre inside the separation is dropped', len(kept2) == 1,
+          f'{len(kept2)} kept')
+    far_edge = dropped_at + r          # furthest residue the dropped centre covered
+    check('the dropped centre reached beyond the kept sphere, so the envelope '
+          'under-covers', far_edge > r, f'{far_edge} A vs radius {r} A')
+    # and a centre exactly at the separation is kept, so the rule is >= not >
+    kept3 = _thin_centers([((0.0, 0.0, 0.0), r), ((r * 0.5, 0.0, 0.0), r)],
+                          separation_factor=0.5)
+    check('a centre exactly at the separation is kept', len(kept3) == 2,
+          f'{len(kept3)} kept')
+
+
 if __name__ == '__main__':
     test_shared_mutation_connects()
     test_overlap_without_mutation_does_not_connect()
@@ -269,5 +327,6 @@ if __name__ == '__main__':
     test_residue_conditioning_mask()
     test_masking_can_exhaust_a_gene()
     test_units_from_components()
+    test_sphere_thinning()
     print('\n' + ('ALL TESTS PASSED' if not FAILURES else f'FAILURES: {FAILURES}'))
     sys.exit(1 if FAILURES else 0)
