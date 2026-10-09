@@ -387,6 +387,31 @@ Under `--neighborhood-radius multiple-small`/`multiple-big` each hit records the
 the scan selected for it, and that radius is used when rebuilding the neighborhood;
 `--radius` is only the fallback for results that record none.
 
+### Direction: enrichment only
+
+The tool looks for clusters of **case** variants. A neighborhood carrying fewer case
+variants than expected gets `p = 1` and is never called.
+
+For the standard case/control 3DNT this is applied where Fisher's exact p-values are
+built: the p-value lookup is a grid indexed by (cases in neighborhood, controls in
+neighborhood), and cells with odds ratio < 1 keep `p = 1` without `fisher_exact` ever
+being called for them. Putting it there matters for more than speed -- that same grid is
+indexed into by the observed data and by every `--n-sims` null column, so the empirical
+null is transformed identically and FDR/FWER stay calibrated for free. Applied anywhere
+downstream it would have to be applied to the nulls too, and forgetting would leave the
+null pool full of small depleted p-values the observed data can no longer produce: an
+anti-conservative FDR, and a silent one.
+
+`--include-depletion` restores the two-sided test. The mutation-rate null is already
+one-sided, so the flag has no effect there; use `--test-direction depletion` to test
+that direction explicitly, and the two cannot be combined.
+
+**This changes results.** Dropping a direction halves the multiple-testing burden, so
+re-running existing analyses gives more power, not the same answer. On a four-gene
+ClinVar run, FDR < 0.05 went from 1,315 neighborhoods to 793 and FWER < 0.05 from 526 to
+481 -- but every one of the 481 is enriched, against 454 of the 526. P-values for
+enriched neighborhoods are bit-for-bit unchanged; only the correction moves.
+
 ## 3DNT with a mutation-rate null
 
 The basic 3DNT compares case to control variants within a neighborhood. For de novo
@@ -609,7 +634,16 @@ mutated residue means the two windows are reporting the same variants, which is 
 makes them the same finding. Membership is transitive, so a run of windows walking along
 one cluster of de novos is one component.
 
-**Enriched neighborhoods only.** The standard case/control scan is two-sided, so its
+**Enriched neighborhoods only.** Components describe clusters of case variants, so
+neighborhoods carrying fewer case variants than expected are excluded and the count is
+logged. Since the scan is one-sided by default (see Direction below) this is a no-op on
+fresh runs; it matters when reading results files produced with `--include-depletion` or
+before that default existed. Enrichment is judged the way the test judges it -- observed
+against expected at fixed margins, i.e. odds ratio >= 1 -- not by the reported `ratio`
+column, which is regularized with pseudocounts and a global case/control scaling and so
+disagrees near 1.
+
+**Historic note.** The standard case/control scan is two-sided, so its
 significant set mixes neighborhoods carrying more case variants than expected with ones
 carrying fewer. A component is a cluster of case variants, so depleted neighborhoods are
 excluded -- from the gene gate as well as from membership, since otherwise a gene could

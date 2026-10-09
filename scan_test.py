@@ -53,7 +53,33 @@ def _neutralize(pval_matrix, dead):
     out[dead, :] = 1.0
     return out
 
-def get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_ctrl):
+def get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_ctrl,
+                                 include_depletion=False):
+    """
+    Fisher p-value for every (cases in neighborhood, controls in neighborhood) pair.
+
+    One-sided by default: a neighborhood with fewer case variants than expected gets
+    p = 1 and is never called. The tool is for finding clusters of case variants, and
+    spending multiple-testing burden on the opposite direction costs power -- on the
+    ClinVar results 56% of significant neighborhoods were depleted. Pass
+    include_depletion=True for the old two-sided behaviour.
+
+    The one-sided rule is applied HERE, to the lookup grid, for two reasons.
+
+    It is where the null gets it for free. This grid is indexed into by the observed
+    column and by all --n-sims null columns alike, so transforming it transforms the
+    empirical null identically and FDR/FWER stay calibrated. Applied anywhere downstream
+    it would have to be applied to the nulls too, and forgetting that would leave the
+    null pool full of small depleted p-values the observed data could no longer produce
+    -- an anti-conservative FDR, and a silent one.
+
+    And it is a skip rather than a computation. Depleted cells fail the pre-filter below
+    and keep the default 1.0, so fisher_exact is never called for them: roughly half the
+    exact calls disappear.
+
+    For a 2x2 table with fixed margins, OR < 1 is exactly a < expected_a, which the
+    chi-square block already computes.
+    """
     max_n_case_nbhd = np.max(n_case_nbhd_mat)
     max_n_control_nbhd = np.max(n_control_nbhd_mat)
     
@@ -107,6 +133,10 @@ def get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_
     # For df=1, chi2 value of 2.706 corresponds to p=0.1
     chi2_threshold = 2.706
     potential_significant = (chi2 > chi2_threshold) & valid_mask
+    if not include_depletion:
+        # chi2 is direction-blind, so without this the depleted half of the grid is
+        # computed and then reported. a >= expected_a is OR >= 1 at fixed margins.
+        potential_significant = potential_significant & (a >= expected_a)
     
     # Second pass: Calculate exact p-values only for potentially significant cells
     indices = np.where(potential_significant)
@@ -117,10 +147,12 @@ def get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_
     
     return pvals
 
-def _compute_pval_matrix_for_radius(adjacency_matrix, case_ac_matrix, control_ac_matrix, n_case, n_control):
+def _compute_pval_matrix_for_radius(adjacency_matrix, case_ac_matrix, control_ac_matrix, n_case, n_control,
+                                    include_depletion=False):
     n_case_nbhd = get_nbhd_counts(adjacency_matrix, case_ac_matrix)
     n_control_nbhd = get_nbhd_counts(adjacency_matrix, control_ac_matrix)
-    pval_lookup = get_pval_lookup_case_control(n_case_nbhd, n_control_nbhd, n_case, n_control)
+    pval_lookup = get_pval_lookup_case_control(n_case_nbhd, n_control_nbhd, n_case, n_control,
+                                               include_depletion)
     return pval_lookup[n_case_nbhd, n_control_nbhd], n_case_nbhd, n_control_nbhd
 
 def get_nbhd_counts(adjacency_matrix, ac_per_residue):
@@ -173,6 +205,7 @@ def compute_all_pvals(
         seed = None,
         keep_residues = None,
         min_retained = DEFAULT_MIN_RETAINED,
+        include_depletion = False,
 ):
     if radius in ('multiple-small', 'multiple-big'):
         radii = MULTI_RADII_SMALL if radius == 'multiple-small' else MULTI_RADII_BIG
@@ -191,7 +224,8 @@ def compute_all_pvals(
         dead_any = np.zeros(n_res, dtype=bool) if keep is not None else None
         for r in radii:
             pval_mat, n_case_nbhd, n_ctrl_nbhd = _compute_pval_matrix_for_radius(
-                adj_matrices[r], case_ac_matrix, control_ac_matrix, n_case, n_control
+                adj_matrices[r], case_ac_matrix, control_ac_matrix, n_case, n_control,
+                include_depletion
             )
             # Neutralize per radius, before combining: a centre can keep enough of its
             # small neighborhoods while its large ones are mostly masked, and the
@@ -235,7 +269,8 @@ def compute_all_pvals(
         n_control = control_ac_matrix[:,0].sum()
         n_case_nbhd_mat = get_nbhd_counts(adjacency_matrix, case_ac_matrix)
         n_control_nbhd_mat = get_nbhd_counts(adjacency_matrix, control_ac_matrix)
-        pval_lookup = get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_control)
+        pval_lookup = get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_control,
+                                                   include_depletion)
         pval_matrix = pval_lookup[n_case_nbhd_mat, n_control_nbhd_mat]
         dead_any = neutralized_positions(adjacency_matrix, keep, min_retained)
         pval_matrix = _neutralize(pval_matrix, dead_any)
@@ -267,7 +302,8 @@ def write_df_pvals(results_dir, uniprot_id, df_pvals, pval_file):
         write_dataset(fid, f'{uniprot_id}_original', df_pvals[['original_case', 'original_control']])
 
 def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir, uniprot_id, radius, pae_cutoff, n_sims, pval_file, seed=None,
-                          keep_residues=None, min_retained=DEFAULT_MIN_RETAINED):
+                          keep_residues=None, min_retained=DEFAULT_MIN_RETAINED,
+                          include_depletion=False):
     df_pvals, adj_mat = compute_all_pvals(
         df,
         pdb_file_pos_guide,
@@ -280,6 +316,7 @@ def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir,
         seed,
         keep_residues,
         min_retained,
+        include_depletion,
     )
     write_df_pvals(results_dir, uniprot_id, df_pvals, pval_file)
 
@@ -313,7 +350,8 @@ def _filter_proteins_by_allele_count(df_rvas, df_fdr_filter, min_alleles=5):
 
 
 def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, conditioning, pval_file, seed=None,
-                            min_retained=DEFAULT_MIN_RETAINED, seed_salt=None):
+                            min_retained=DEFAULT_MIN_RETAINED, seed_salt=None,
+                            include_depletion=False):
     """
     Process each protein individually with scan test.
 
@@ -360,7 +398,8 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
             scan_test_one_protein(
                 df, pdb_file_pos_guide, pdb_dir, pae_dir, 
                 results_dir, uniprot_id, radius, pae_cutoff, n_sims,
-                pval_file, protein_seed, keep_residues, min_retained
+                pval_file, protein_seed, keep_residues, min_retained,
+                include_depletion
             )
         except FileNotFoundError as e:
             logger.error(f'{uniprot_id}: Required file not found - {e}')
@@ -398,6 +437,7 @@ def scan_test(
     min_retained=DEFAULT_MIN_RETAINED,
     seed_salt=None,
     uniprot_id_list=None,
+    include_depletion=False,
 ):
     """
     Perform scan test analysis on protein structure data.
@@ -427,7 +467,7 @@ def scan_test(
     _process_proteins_batch(
         df_processed, uniprot_id_list, reference_dir, 
         radius, pae_cutoff, results_dir, n_sims, conditioning,
-        pval_file, seed, min_retained, seed_salt
+        pval_file, seed, min_retained, seed_salt, include_depletion
     )
 
     with h5py.File(os.path.join(results_dir, pval_file), 'a') as fid:

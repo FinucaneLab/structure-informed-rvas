@@ -111,6 +111,36 @@ def _seq_span(centers, labels, comp):
     return (max(members) - min(members)) if members else 0
 
 
+def enriched_mask(g, df_mut, mu_mode):
+    """
+    Which of a gene's neighborhoods carry MORE case variants than expected.
+
+    Judged the way the test judges it, not by the reported `ratio` column. `ratio` is
+    regularized -- pseudocounts plus a global case/control scaling -- so in a gene where
+    controls outnumber cases it sits below 1 for neighborhoods the Fisher test considers
+    enriched. On a four-gene ClinVar run 26 of 4,128 neighborhoods differed, all of them
+    genuinely enriched (25 cases against 16.8 expected) and all of them wrongly dropped
+    by a ratio > 1 filter.
+
+    Mutation-rate mode compares the observed count to the modelled expectation directly.
+    Case/control compares it to its expectation at fixed margins, which is the same
+    condition as odds ratio >= 1. Returns None when neither is available, meaning the
+    caller cannot tell and should keep everything.
+    """
+    if mu_mode:
+        exp_col = next((c for c in ('exp_binomial', 'nbhd_expected', 'exp_poisson')
+                        if c in g.columns), None)
+        return g['nbhd_case'] > g[exp_col] if exp_col else None
+    if {'nbhd_case', 'nbhd_control'} <= set(g.columns):
+        n_case = float(df_mut['ac_case'].sum())
+        n_ctrl = float(df_mut['ac_control'].sum())
+        if n_case + n_ctrl <= 0:
+            return None
+        expected = (g['nbhd_case'] + g['nbhd_control']) * n_case / (n_case + n_ctrl)
+        return g['nbhd_case'] >= expected
+    return None
+
+
 def component_table(
     df_results,
     uniprot_id,
@@ -214,7 +244,7 @@ def components_for_genes(
     mu_mode,
     round_idx=0,
     default_radius=15.0,
-    effect_col=None,
+    enriched_only=True,
 ):
     """
     Build the component table for every gene in `genes`.
@@ -237,14 +267,6 @@ def components_for_genes(
     for uniprot_id in sorted(genes):
         g = df_results[(df_results.uniprot_id == uniprot_id) &
                        (df_results[fdr_col] < member_cutoff)]
-        # Enriched only. A two-sided scan calls depleted neighborhoods too, and a
-        # cluster of case variants is not what those are.
-        if effect_col and effect_col in g.columns:
-            n_all = len(g)
-            g = g[g[effect_col] > 1]
-            n_depleted += n_all - len(g)
-        if len(g) == 0:
-            continue
         # One row per position. Results tables written before the gene_name merge was
         # collapsed carry a row per paralogous gene name, which would otherwise put the
         # same centre in the component twice and make the lead lookup ambiguous.
@@ -256,6 +278,24 @@ def components_for_genes(
                 'results table (several gene names share this accession); using one each'
             )
         gene_name = g.gene_name.iloc[0] if 'gene_name' in g.columns else uniprot_id
+
+        try:
+            df_mut = read_mut(uniprot_id)
+        except Exception as e:
+            logger.warning(f'{uniprot_id}: could not read mutation data - {e}')
+            continue
+
+        # Enriched only. A two-sided scan calls depleted neighborhoods too, and a
+        # cluster of case variants is not what those are. Runs made with the one-sided
+        # default never produce them, so this matters for older results files.
+        if enriched_only:
+            mask = enriched_mask(g, df_mut, mu_mode)
+            if mask is not None:
+                n_all = len(g)
+                g = g[mask]
+                n_depleted += n_all - len(g)
+                if len(g) == 0:
+                    continue
 
         centers = []
         for row in g.itertuples():
@@ -273,7 +313,6 @@ def components_for_genes(
                                                    uniprot_id, r, pae_cutoff))
                 for r in sorted({r for _, r in centers})
             }
-            df_mut = read_mut(uniprot_id)
         except Exception as e:
             logger.warning(f'{uniprot_id}: could not build components - {e}')
             continue
@@ -288,9 +327,9 @@ def components_for_genes(
 
     if n_depleted:
         logger.info(
-            f'Round {round_idx}: {n_depleted} significant neighborhoods are depleted '
-            f'({effect_col} <= 1) and were not clustered; components describe enriched '
-            'signal only.'
+            f'Round {round_idx}: {n_depleted} significant neighborhoods carry fewer '
+            'case variants than expected and were not clustered; components describe '
+            'enriched signal only.'
         )
     if n_caseless:
         logger.info(

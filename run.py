@@ -455,6 +455,20 @@ if __name__ == '__main__':
         '''
     )
     parser.add_argument(
+        '--include-depletion',
+        action='store_true',
+        default=False,
+        help='''
+        Test both directions with the standard case/control 3DNT. By default a
+        neighborhood with fewer case variants than expected gets p = 1 and is never
+        called: the tool looks for clusters of case variants, and spending
+        multiple-testing burden on the opposite direction costs power. Setting this
+        restores the two-sided Fisher test, and with it the old behaviour. Has no effect
+        on the mutation-rate null, which is already one-sided -- use --test-direction
+        there.
+        '''
+    )
+    parser.add_argument(
         '--conditional',
         action=argparse.BooleanOptionalAction,
         default=None,   # None = auto: on unless an incompatible flag is present
@@ -668,6 +682,13 @@ if __name__ == '__main__':
     if not (0 < args.fdr_cutoff < 1):
         raise ValueError(f"FDR cutoff must be between 0 and 1, got {args.fdr_cutoff}")
 
+    if args.include_depletion and args.test_direction == 'depletion':
+        raise ValueError(
+            "--include-depletion makes the case/control test two-sided; "
+            "--test-direction depletion makes the mutation-rate test one-sided in the "
+            "other direction. Pick one."
+        )
+
     # Conditional analysis is on by default, so an incompatible flag must switch it off
     # quietly rather than fail: a command that was valid before this became the default
     # must stay valid. An EXPLICIT --conditional still errors, because then the user has
@@ -879,6 +900,7 @@ if __name__ == '__main__':
             min_retained=args.conditional_min_retained,
             conditioning_radius=args.conditional_radius,
             ignore_ac=args.ignore_ac,
+            include_depletion=args.include_depletion,
             gene_criterion=args.conditional_gene_criterion,
             gene_cutoff=args.conditional_gene_cutoff,
             min_denovo=args.min_denovo,
@@ -938,6 +960,7 @@ if __name__ == '__main__':
             remove_nbhd_conditioning(args),
             args.seed,
             args.conditional_min_retained,
+            include_depletion=args.include_depletion,
         )
         did_nothing = False
 

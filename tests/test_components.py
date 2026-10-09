@@ -350,19 +350,20 @@ def test_enriched_only():
             'aa_pos': [20, 50],
             'p_value': [1e-9, 1e-8],
             'fdr': [0.001, 0.002], 'fwer': [0.01, 0.02],
-            'ratio': [8.0, 0.1],            # one enriched, one depleted
+            'nbhd_case': [12, 0], 'nbhd_control': [1, 9],   # enriched / depleted
+            'ratio': [8.0, 0.1],
         })
         kw = dict(reference_dir='x', pae_cutoff=15.0, read_mut=lambda u: df_mut,
                   p_col='p_value', fdr_col='fdr', fwer_col='fwer',
                   radius_cols=('radius',), member_cutoff=0.05, mu_mode=False,
                   default_radius=15.0)
 
-        both = components_for_genes(df_results, {'P1'}, **kw)
-        check('without an effect column both are kept but the case-free one is dropped',
+        both = components_for_genes(df_results, {'P1'}, enriched_only=False, **kw)
+        check('without the filter the case-free depleted one is still dropped',
               len(both) == 1 and both.iloc[0].lead_aa_pos == 20,
               f'{len(both)} components')
 
-        enriched = components_for_genes(df_results, {'P1'}, effect_col='ratio', **kw)
+        enriched = components_for_genes(df_results, {'P1'}, **kw)
         check('with the effect column only the enriched neighborhood clusters',
               len(enriched) == 1 and enriched.iloc[0].lead_aa_pos == 20,
               f'{len(enriched)} components')
@@ -372,11 +373,63 @@ def test_enriched_only():
 
         # A gene whose ONLY significant neighborhood is depleted yields nothing at all.
         only_dep = df_results[df_results.aa_pos == 50]
-        none = components_for_genes(only_dep, {'P1'}, effect_col='ratio', **kw)
+        none = components_for_genes(only_dep, {'P1'}, **kw)
         check('a gene with only depleted hits produces no component', len(none) == 0,
               f'{len(none)} components')
     finally:
         comp_mod.get_adjacency_matrix = real_adj
+
+
+# ---------------------------------------------------------------------------
+def test_one_sided_lookup():
+    """
+    The case/control Fisher lookup is one-sided by default.
+
+    Depleted cells must come back p = 1 and enriched cells must be untouched, because
+    the same grid serves the observed column and every null column -- so this is also
+    what keeps the empirical FDR calibrated once depletion is dropped.
+    """
+    print('\n9. One-sided Fisher lookup')
+    from scan_test import get_pval_lookup_case_control
+    from scipy.stats import fisher_exact
+
+    n_case, n_ctrl = 100, 100
+    cases = np.array([[30, 5]])      # a=30 in nbhd vs b=5: enriched
+    ctrls = np.array([[5, 30]])      # and the mirror: depleted
+    one = get_pval_lookup_case_control(cases, ctrls, n_case, n_ctrl)
+    two = get_pval_lookup_case_control(cases, ctrls, n_case, n_ctrl,
+                                       include_depletion=True)
+
+    enriched_p = two[30, 5]
+    depleted_p = two[5, 30]
+    check('two-sided mode calls both directions',
+          enriched_p < 0.05 and depleted_p < 0.05,
+          f'enriched {enriched_p:.2e}, depleted {depleted_p:.2e}')
+    check('one-sided mode sets the depleted cell to exactly 1',
+          one[5, 30] == 1.0, str(one[5, 30]))
+    check('one-sided mode leaves the enriched cell unchanged',
+          one[30, 5] == enriched_p, f'{one[30, 5]:.3e} vs {enriched_p:.3e}')
+    check('the enriched value is the real two-sided Fisher p',
+          abs(one[30, 5] - fisher_exact([[30, 5], [70, 95]])[1]) < 1e-12)
+
+    # The OR = 1 boundary is deliberately inclusive (a >= expected_a), but it cannot be
+    # observed through this function: a cell sitting exactly at its expectation has
+    # chi2 = 0, so the pre-filter discards it either way and it keeps p = 1 regardless.
+    # Asserting on it would be a test that cannot fail.
+
+    # Everything that is not enriched must be 1 across the whole grid.
+    big_c = np.array([[0, 40]]); big_t = np.array([[0, 40]])
+    g = get_pval_lookup_case_control(big_c, big_t, n_case, n_ctrl)
+    a = np.arange(g.shape[0])[:, None]
+    b = np.arange(g.shape[1])[None, :]
+    # expected cases in nbhd, at fixed margins
+    exp_a = (a + b) * n_case / (n_case + n_ctrl)
+    depleted = a < exp_a
+    check('no depleted cell anywhere in the grid has p < 1',
+          bool((g[depleted] == 1.0).all()),
+          f'{int((g[depleted] < 1.0).sum())} depleted cells below 1')
+    check('some enriched cell does have p < 1 (the grid is not all ones)',
+          bool((g[~depleted] < 1.0).any()))
 
 
 if __name__ == '__main__':
@@ -388,5 +441,6 @@ if __name__ == '__main__':
     test_units_from_components()
     test_sphere_thinning()
     test_enriched_only()
+    test_one_sided_lookup()
     print('\n' + ('ALL TESTS PASSED' if not FAILURES else f'FAILURES: {FAILURES}'))
     sys.exit(1 if FAILURES else 0)
