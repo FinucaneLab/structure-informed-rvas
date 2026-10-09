@@ -1,12 +1,9 @@
 import os
 import pandas as pd
 import numpy as np
-import glob
-import bisect
 import h5py
-from scipy.stats import fisher_exact, binom
-from scipy import special
-from utils import (get_adjacency_matrix, valid_for_fisher, write_dataset, read_p_values,
+from scipy.stats import fisher_exact
+from utils import (get_adjacency_matrix, write_dataset,
                    check_keep_mask, neighborhood_retention, build_conditioning_mask)
 from logger_config import get_logger
 from empirical_fdr import compute_fdr
@@ -22,6 +19,10 @@ P_FLOOR = np.finfo(float).tiny
 # the original neighborhood, so a small p-value there is driven by a handful of variants
 # at the rim rather than by residual structure. Overridable per run.
 DEFAULT_MIN_RETAINED = 0.5
+
+# Gene-level filter for the case/control scan, as strictly-greater-than, so 5
+# requires at least 6. Mirrors --min-denovo in the mutation-rate path.
+DEFAULT_MIN_ALLELES = 5
 
 
 def neutralized_positions(adjacency_matrix, keep, min_retained):
@@ -162,11 +163,27 @@ def get_nbhd_counts(adjacency_matrix, ac_per_residue):
     nbhd_counts = nbhd_counts.astype(int)
     return nbhd_counts
 
-def get_ac_per_residue(df, colname, n_res):
-    case_ac_per_residue = np.zeros((n_res, 1))
+def get_ac_per_residue(df, colname, n_res, uniprot_id=''):
+    """
+    Sum a per-variant allele count onto residues, as an (n_res, 1) column.
+
+    Positions outside the solved structure are dropped with a warning rather than
+    indexed blindly: aa_pos > n_res would raise and lose the whole protein, and
+    aa_pos < 1 would index from the end and silently credit the wrong residue. The
+    mutation-rate path does the same thing in restrict_to_structure.
+    """
+    ac_per_residue = np.zeros((n_res, 1))
     ac_by_pos = df.groupby('aa_pos')[colname].sum().reset_index()
-    case_ac_per_residue[ac_by_pos.aa_pos - 1, 0] = ac_by_pos[colname]
-    return case_ac_per_residue
+    in_range = (ac_by_pos.aa_pos >= 1) & (ac_by_pos.aa_pos <= n_res)
+    n_out = int((~in_range).sum())
+    if n_out:
+        logger.warning(
+            f'{uniprot_id}: dropping {n_out} {colname} positions outside the structure '
+            f'(n_res = {n_res})'
+        )
+        ac_by_pos = ac_by_pos[in_range]
+    ac_per_residue[ac_by_pos.aa_pos.astype(int) - 1, 0] = ac_by_pos[colname]
+    return ac_per_residue
 
 def get_random_ac_per_residue(case_ac_per_residue, total_ac_per_residue, n_sim, seed=None):
     # seed is passed straight to default_rng: a previous version called np.random.seed(),
@@ -177,9 +194,9 @@ def get_random_ac_per_residue(case_ac_per_residue, total_ac_per_residue, n_sim, 
     null_ac_per_residue = gen.multivariate_hypergeometric(total_ac_per_residue.astype(int), n_alleles, n_sim).T
     return null_ac_per_residue
 
-def get_case_control_ac_matrix(df, n_res, n_sim, seed=None, keep=None):
-    case_ac_per_residue = get_ac_per_residue(df, 'ac_case', n_res)
-    control_ac_per_residue = get_ac_per_residue(df, 'ac_control', n_res)
+def get_case_control_ac_matrix(df, n_res, n_sim, seed=None, keep=None, uniprot_id=''):
+    case_ac_per_residue = get_ac_per_residue(df, 'ac_case', n_res, uniprot_id)
+    control_ac_per_residue = get_ac_per_residue(df, 'ac_control', n_res, uniprot_id)
     if keep is not None:
         # Zero before the totals and before the null draw, so n_case / n_control and the
         # multivariate hypergeometric both see only the residues still in play. Zeroing
@@ -215,7 +232,7 @@ def compute_all_pvals(
         }
         n_res = adj_matrices[radii[0]].shape[0]
         keep = check_keep_mask(keep_residues, n_res, uniprot_id)
-        case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(df, n_res, n_sims, seed, keep)
+        case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(df, n_res, n_sims, seed, keep, uniprot_id)
         n_case = case_ac_matrix[:,0].sum()
         n_control = control_ac_matrix[:,0].sum()
 
@@ -252,7 +269,6 @@ def compute_all_pvals(
         n_case_nbhd_mat    = case_nbhd_by_radius[best_radius_idx, _pos_idx].reshape(-1, 1)
         n_control_nbhd_mat = ctrl_nbhd_by_radius[best_radius_idx, _pos_idx].reshape(-1, 1)
 
-        adjacency_matrix = adj_matrices.get(15, adj_matrices[radii[0]])
     else:
         adjacency_matrix = get_adjacency_matrix(
             pdb_file_pos_guide,
@@ -264,7 +280,7 @@ def compute_all_pvals(
         )
         n_res = adjacency_matrix.shape[0]
         keep = check_keep_mask(keep_residues, n_res, uniprot_id)
-        case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(df, n_res, n_sims, seed, keep)
+        case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(df, n_res, n_sims, seed, keep, uniprot_id)
         n_case = case_ac_matrix[:,0].sum()
         n_control = control_ac_matrix[:,0].sum()
         n_case_nbhd_mat = get_nbhd_counts(adjacency_matrix, case_ac_matrix)
@@ -290,7 +306,7 @@ def compute_all_pvals(
             f'{uniprot_id}: conditioning masks {int((~keep).sum())} of {n_res} residues; '
             f'{int(dead_any.sum())} centres not re-tested'
         )
-    return df_pvals, adjacency_matrix
+    return df_pvals
 
 def write_df_pvals(results_dir, uniprot_id, df_pvals, pval_file):
     with h5py.File(os.path.join(results_dir, pval_file), 'a') as fid:
@@ -304,7 +320,7 @@ def write_df_pvals(results_dir, uniprot_id, df_pvals, pval_file):
 def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir, uniprot_id, radius, pae_cutoff, n_sims, pval_file, seed=None,
                           keep_residues=None, min_retained=DEFAULT_MIN_RETAINED,
                           include_depletion=False):
-    df_pvals, adj_mat = compute_all_pvals(
+    df_pvals = compute_all_pvals(
         df,
         pdb_file_pos_guide,
         pdb_dir,
@@ -336,22 +352,29 @@ def _preprocess_scan_data(df_rvas, ignore_ac):
     return df_processed
 
 
-def _filter_proteins_by_allele_count(df_rvas, df_fdr_filter, min_alleles=5):
-    """Filter proteins to include only those with sufficient case and control alleles."""
+def _filter_proteins_by_allele_count(df_rvas, df_fdr_filter, min_alleles=DEFAULT_MIN_ALLELES):
+    """
+    Genes with enough case AND control alleles to be worth testing.
+
+    Applied as strictly greater than min_alleles, so the default of 5 requires at least
+    6 of each. This matches --min-denovo in the mutation-rate path, which uses the same
+    convention.
+    """
     grouped = df_rvas.groupby('uniprot_id')[['ac_case', 'ac_control']].sum()
     ac_high_enough = grouped[(grouped['ac_case'] > min_alleles) & (grouped['ac_control'] > min_alleles)]
     uniprot_id_list = ac_high_enough.index.tolist()
-    
+
     if df_fdr_filter is not None:
         uniprot_id_list = np.intersect1d(uniprot_id_list, np.unique(df_fdr_filter.uniprot_id))
-    
-    logger.info(f"Selected {len(uniprot_id_list)} proteins for analysis (min {min_alleles} alleles each)")
+
+    logger.info(f"Selected {len(uniprot_id_list)} proteins for analysis "
+                f"(more than {min_alleles} case and control alleles each)")
     return uniprot_id_list
 
 
 def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, conditioning, pval_file, seed=None,
                             min_retained=DEFAULT_MIN_RETAINED, seed_salt=None,
-                            include_depletion=False):
+                            include_depletion=False, min_alleles=DEFAULT_MIN_ALLELES):
     """
     Process each protein individually with scan test.
 
@@ -383,8 +406,9 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
                     logger.info(f'{uniprot_id}: conditioning out {what} '
                                 f'({n_removed} residues)')
 
-            if (sum(df.ac_case) < 5) or (sum(df.ac_control) < 5):
-                logger.warning(f'{uniprot_id}: There must be at least 5 case and 5 control alleles. Skipping.')
+            if (sum(df.ac_case) <= min_alleles) or (sum(df.ac_control) <= min_alleles):
+                logger.warning(f'{uniprot_id}: needs more than {min_alleles} case and '
+                               f'{min_alleles} control alleles. Skipping.')
                 continue
             
             # Each protein gets its own derived stream. A single shared seed would
@@ -438,6 +462,7 @@ def scan_test(
     seed_salt=None,
     uniprot_id_list=None,
     include_depletion=False,
+    min_alleles=DEFAULT_MIN_ALLELES,
 ):
     """
     Perform scan test analysis on protein structure data.
@@ -461,17 +486,24 @@ def scan_test(
     # Filter proteins by allele count. A conditional round passes its own list so that
     # only the proteins being re-scanned are touched.
     if uniprot_id_list is None:
-        uniprot_id_list = _filter_proteins_by_allele_count(df_processed, df_fdr_filter)
+        uniprot_id_list = _filter_proteins_by_allele_count(df_processed, df_fdr_filter,
+                                                          min_alleles)
     
     # Process each protein
     _process_proteins_batch(
         df_processed, uniprot_id_list, reference_dir, 
         radius, pae_cutoff, results_dir, n_sims, conditioning,
-        pval_file, seed, min_retained, seed_salt, include_depletion
+        pval_file, seed, min_retained, seed_salt, include_depletion, min_alleles
     )
 
     with h5py.File(os.path.join(results_dir, pval_file), 'a') as fid:
+        # Record how this file was made. resolve_pval_node keys off test_type, and
+        # include_depletion is not recoverable from the p-values themselves -- without it
+        # a one-sided file is indistinguishable from a two-sided one after the fact.
+        fid.attrs['test_type'] = 'case_control'
         fid.attrs['n_sims'] = n_sims
+        fid.attrs['include_depletion'] = bool(include_depletion)
+        fid.attrs['min_alleles'] = int(min_alleles)
         if seed is not None:
             fid.attrs['seed'] = seed
     

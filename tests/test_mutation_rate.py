@@ -228,45 +228,6 @@ def test_injected_cluster_recovery():
 
 
 # ---------------------------------------------------------------------------
-def test_depletion_direction():
-    """
-    The depletion tail must be valid under the null, and must fire on depleted data
-    while the enrichment tail does not.
-    """
-    print('\n7. Depletion direction')
-    n_res, n_sims = 150, 3000
-    adj = banded_adjacency(n_res, 6)
-    rng = np.random.default_rng(21)
-    m = rng.uniform(0.2, 3.0, size=(n_res, 1))
-    lambda_hat = 0.8
-
-    x_null = simulate_poisson_null(m, lambda_hat, n_sims, rng)
-    n_g = int(round(lambda_hat * m.sum()))
-    x_b = simulate_multinomial_null(m, n_g, n_sims, rng)
-    p_a, p_b, _, _, _ = _pvals_for_radius(adj, x_null, x_b, m, lambda_hat, n_g,
-                                          float(m.sum()), 'depletion')
-    for alpha in (0.05, 0.01):
-        ra, rb = float((p_a <= alpha).mean()), float((p_b <= alpha).mean())
-        check(f'depletion Test A valid at alpha={alpha}', ra <= alpha * 1.05, f'rate {ra:.4f}')
-        check(f'depletion Test B valid at alpha={alpha}', rb <= alpha * 1.05, f'rate {rb:.4f}')
-
-    # a genuinely depleted region: depletion fires, enrichment does not
-    depleted = np.ones((n_res, 1))
-    depleted[40:90] = 0.15
-    x = rng.poisson(lambda_hat * m * depleted, size=(n_res, 200))
-    region = slice(55, 75)
-    pd_a, _, _, _, _ = _pvals_for_radius(adj, x, x, m, lambda_hat,
-                                         int(x[:, 0].sum()), float(m.sum()), 'depletion')
-    pe_a, _, _, _, _ = _pvals_for_radius(adj, x, x, m, lambda_hat,
-                                         int(x[:, 0].sum()), float(m.sum()), 'enrichment')
-    dep = float((pd_a[region] <= 0.05).mean())
-    enr = float((pe_a[region] <= 0.05).mean())
-    print(f'      in the depleted region:  depletion {dep:.3f}   enrichment {enr:.3f}')
-    check('depletion tail detects a depleted region', dep > 0.80, f'rate {dep:.3f}')
-    check('enrichment tail does not', enr < 0.05, f'rate {enr:.3f}')
-
-
-# ---------------------------------------------------------------------------
 def test_min_denovo_selection_bias():
     """
     Documents a KNOWN, DELIBERATELY UNFIXED property rather than checking a fix.
@@ -281,7 +242,7 @@ def test_min_denovo_selection_bias():
     FWER should land well above nominal and Test B's should stay near it. On the real
     simulated-null ASD run the figures were 14.3% and 4.3%.
     """
-    print('\n8. --min-denovo selection bias (known, deliberately not fixed)')
+    print('\n7. --min-denovo selection bias (known, deliberately not fixed)')
     n_res, n_sims, min_denovo = 250, 600, 5
     adj = banded_adjacency(n_res, 8)
     rng = np.random.default_rng(11)
@@ -328,7 +289,6 @@ if __name__ == '__main__':
     test_regional_constraint()
     test_gene_level_inflation()
     test_injected_cluster_recovery()
-    test_depletion_direction()
     test_min_denovo_selection_bias()
     print('\n' + ('ALL TESTS PASSED' if not FAILURES else f'FAILURES: {FAILURES}'))
     sys.exit(1 if FAILURES else 0)

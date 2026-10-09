@@ -402,9 +402,13 @@ downstream it would have to be applied to the nulls too, and forgetting would le
 null pool full of small depleted p-values the observed data can no longer produce: an
 anti-conservative FDR, and a silent one.
 
-`--include-depletion` restores the two-sided test. The mutation-rate null is already
-one-sided, so the flag has no effect there; use `--test-direction depletion` to test
-that direction explicitly, and the two cannot be combined.
+`--include-depletion` restores the two-sided test for the case/control scan. The
+mutation-rate null only ever tests enrichment, so the flag has no effect there and
+there is no way to test depletion with it.
+
+The case/control scan analyzes genes with more than `--min-alleles` (default 5, so at
+least 6) case and control alleles each; the mutation-rate null uses `--min-denovo` the
+same way.
 
 **This changes results.** Dropping a direction halves the multiple-testing burden, so
 re-running existing analyses gives more power, not the same answer. On a four-gene
@@ -744,6 +748,12 @@ all_proteins.pvals.round1.h5
 all_proteins.fdr.components.tsv    every component found, all rounds
 all_proteins.fdr.conditional.tsv   one row per independent signal, all rounds
 ```
+
+Every p-value file records how it was made in its HDF5 attributes: `test_type`
+(`case_control` or `mutation_rate`), `n_sims`, `seed`, and the direction settings
+(`include_depletion` and `min_alleles`, or `direction`, `min_denovo`, `lambda_hat` and
+`rate_calibration`). A file written before these existed has no `test_type`, which the
+readers treat as case/control.
 
 `components.tsv` carries, per component: `residues_pymol` (the union of its member
 neighborhoods, in PyMOL selection notation), `centers_pymol`, `centers_detail`

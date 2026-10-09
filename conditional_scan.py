@@ -138,6 +138,7 @@ def conditional_scan(
     conditioning_radius='best',
     ignore_ac=False,
     include_depletion=False,
+    min_alleles=5,
     gene_criterion='fwer',
     gene_cutoff=0.05,
     min_denovo=5,
@@ -202,7 +203,7 @@ def conditional_scan(
             df_rvas, reference_dir, radius, pae_cutoff, results_dir, n_sims,
             False, False, fdr_cutoff, df_filter, ignore_ac, fdr_file, pval_file,
             conditioning=None, seed=seed, min_retained=min_retained,
-            include_depletion=include_depletion,
+            include_depletion=include_depletion, min_alleles=min_alleles,
         )
 
     df_results = pd.read_csv(os.path.join(results_dir, fdr_file), sep='\t')
@@ -334,6 +335,7 @@ def conditional_scan(
                 current_pval_file, conditioning=conditioning, seed=seed,
                 min_retained=min_retained, seed_salt=round_idx,
                 uniprot_id_list=active, include_depletion=include_depletion,
+                min_alleles=min_alleles,
             )
             df_results = compute_fdr(results_dir, fdr_cutoff, round_filter,
                                      reference_dir, current_pval_file)

@@ -217,27 +217,26 @@ def sum_per_residue(df, colname, n_res, dtype=float):
 # --n-sims.
 # ---------------------------------------------------------------------------
 
-def poisson_pval_lookup(expected, x_max, direction='enrichment'):
+def poisson_pval_lookup(expected, x_max):
     """
-    L[i, k] = P(X >= k) for X ~ Poisson(expected[i]), or P(X <= k) for depletion.
-    Shape (n_res, x_max + 1).
+    L[i, k] = P(X >= k) for X ~ Poisson(expected[i]). Shape (n_res, x_max + 1).
+
+    Upper tail only: the test is for neighborhoods carrying MORE de novos than the rate
+    model predicts, and the tool does not test depletion in either null.
     """
     k = np.arange(x_max + 1)
     expected = np.maximum(np.asarray(expected, dtype=float), P_FLOOR)
-    if direction == 'depletion':
-        return poisson.cdf(k[np.newaxis, :], expected[:, np.newaxis])
     return poisson.sf(k[np.newaxis, :] - 1, expected[:, np.newaxis])
 
 
-def binomial_pval_lookup(p_nbhd, n_trials, x_max, direction='enrichment'):
+def binomial_pval_lookup(p_nbhd, n_trials, x_max):
     """
-    L[i, k] = P(X >= k) for X ~ Binomial(n_trials, p_nbhd[i]), or P(X <= k) for depletion.
-    Shape (n_res, x_max + 1).
+    L[i, k] = P(X >= k) for X ~ Binomial(n_trials, p_nbhd[i]). Shape (n_res, x_max + 1).
+
+    Upper tail only, as for the Poisson lookup.
     """
     k = np.arange(x_max + 1)
     p_nbhd = np.clip(np.asarray(p_nbhd, dtype=float), 0.0, 1.0)
-    if direction == 'depletion':
-        return binom.cdf(k[np.newaxis, :], n_trials, p_nbhd[:, np.newaxis])
     return binom.sf(k[np.newaxis, :] - 1, n_trials, p_nbhd[:, np.newaxis])
 
 
@@ -293,8 +292,7 @@ def simulate_multinomial_null(m, n_g, n_sims, rng):
 # core computation
 # ---------------------------------------------------------------------------
 
-def _pvals_for_radius(adjacency_matrix, x_a, x_b, m, lambda_hat, n_g, m_g,
-                      direction='enrichment'):
+def _pvals_for_radius(adjacency_matrix, x_a, x_b, m, lambda_hat, n_g, m_g):
     """
     Returns (p_a, p_b, x_nbhd_obs, exp_a, exp_b) for one adjacency matrix.
     x_a / x_b are (n_res, n_sims + 1) with the observed counts in column 0.
@@ -311,8 +309,8 @@ def _pvals_for_radius(adjacency_matrix, x_a, x_b, m, lambda_hat, n_g, m_g,
     p_frac = m_nbhd / m_g if m_g > 0 else np.zeros_like(m_nbhd)
     exp_b = n_g * p_frac
 
-    lookup_a = poisson_pval_lookup(exp_a, int(nbhd_a.max()), direction)
-    lookup_b = binomial_pval_lookup(p_frac, n_g, int(nbhd_b.max()), direction)
+    lookup_a = poisson_pval_lookup(exp_a, int(nbhd_a.max()))
+    lookup_b = binomial_pval_lookup(p_frac, n_g, int(nbhd_b.max()))
 
     rows = np.arange(adjacency_matrix.shape[0])[:, np.newaxis]
     p_a = lookup_a[rows, nbhd_a]
@@ -340,13 +338,11 @@ def compute_all_pvals_mu(
         radius=15,
         pae_cutoff=15,
         seed=None,
-        direction='enrichment',
         keep_residues=None,
         min_retained=DEFAULT_MIN_RETAINED,
 ):
     """
-    Returns (df_pvals_poisson, df_pvals_binomial, adjacency_matrix, mu_coverage)
-    for one protein.
+    Returns (df_pvals_poisson, df_pvals_binomial, mu_coverage) for one protein.
 
     `keep_residues` conditions the scan on one or more neighborhoods already called: an
     (n_res,) bool array, entry i for residue i+1, False where the residue is masked out.
@@ -392,8 +388,7 @@ def compute_all_pvals_mu(
     x_a = np.hstack([x_obs, simulate_poisson_null(m, lambda_hat, n_sims, rng)])
     x_b = np.hstack([x_obs, simulate_multinomial_null(m, n_g, n_sims, rng)])
 
-    per_radius = {r: _pvals_for_radius(adj_matrices[r], x_a, x_b, m, lambda_hat, n_g, m_g,
-                                       direction)
+    per_radius = {r: _pvals_for_radius(adj_matrices[r], x_a, x_b, m, lambda_hat, n_g, m_g)
                   for r in radii}
 
     if keep is not None:
@@ -424,12 +419,10 @@ def compute_all_pvals_mu(
         nbhd_b_obs, exp_b = nbhd_by_radius[best_b, pos_idx], exp_b_by_radius[best_b, pos_idx]
         radius_a = np.array([radii[i] for i in best_a], dtype=float)
         radius_b = np.array([radii[i] for i in best_b], dtype=float)
-        adjacency_matrix = adj_matrices.get(15, adj_matrices[radii[0]])
     else:
         p_a, p_b, nbhd_obs, exp_a, exp_b = per_radius[radii[0]]
         nbhd_a_obs = nbhd_b_obs = nbhd_obs
         radius_a = radius_b = float(radii[0])
-        adjacency_matrix = adj_matrices[radii[0]]
 
     def _build(pval_matrix, nbhd_obs, expected, radius_col):
         pval_columns = ['p_value'] + [f'null_pval_{i}' for i in range(n_sims)]
@@ -443,7 +436,7 @@ def compute_all_pvals_mu(
 
     return (_build(p_a, nbhd_a_obs, exp_a, radius_a),
             _build(p_b, nbhd_b_obs, exp_b, radius_b),
-            adjacency_matrix, mu_coverage)
+            mu_coverage)
 
 
 def write_df_pvals_mu(results_dir, uniprot_id, df_pvals, pval_file, group):
@@ -549,7 +542,7 @@ def _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage
 
 def _process_proteins_batch_mu(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
                                results_dir, n_sims, pval_file, lambda_hat, mu_lookup,
-                               seed=None, max_residues=None, direction='enrichment',
+                               seed=None, max_residues=None,
                                conditioning=None, min_retained=DEFAULT_MIN_RETAINED,
                                seed_salt=None):
     """
@@ -612,10 +605,10 @@ def _process_proteins_batch_mu(df_rvas, uniprot_id_list, reference_dir, radius, 
                 # Conditional rounds re-scan the same protein: without a per-round salt
                 # every round would replay the identical null draws.
                 protein_seed = protein_seed + [seed_salt]
-            df_a, df_b, _, mu_coverage = compute_all_pvals_mu(
+            df_a, df_b, mu_coverage = compute_all_pvals_mu(
                 df, pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id,
                 n_sims, lambda_hat, mu_lookup, radius, pae_cutoff, seed=protein_seed,
-                direction=direction, keep_residues=keep_residues,
+                keep_residues=keep_residues,
                 min_retained=min_retained,
             )
             write_df_pvals_mu(results_dir, uniprot_id, df_a, pval_file, POISSON_GROUP)
@@ -712,7 +705,6 @@ def mutation_rate_scan_test(
     min_mu_coverage=0.0,
     max_residues=10000,
     simulate_null=False,
-    direction='enrichment',
     conditioning=None,
     min_retained=DEFAULT_MIN_RETAINED,
     seed_salt=None,
@@ -729,9 +721,6 @@ def mutation_rate_scan_test(
 
     logger.info(f'Input dataset contains {len(df_rvas)} variants across '
                 f'{df_rvas["uniprot_id"].nunique()} proteins')
-    if direction == 'depletion':
-        logger.info('Testing DEPLETION: lower-tail p-values, i.e. fewer variants in the '
-                    'neighborhood than the mutation rate predicts.')
 
     calibration_genes = None
     if rate_calibration_genes is not None:
@@ -776,7 +765,7 @@ def mutation_rate_scan_test(
     gene_totals = _process_proteins_batch_mu(
         df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
         results_dir, n_sims, pval_file, lambda_hat, mu_lookup, seed, max_residues,
-        direction, conditioning, min_retained, seed_salt,
+        conditioning, min_retained, seed_salt,
     )
 
     with h5py.File(os.path.join(results_dir, pval_file), 'a') as fid:
@@ -785,7 +774,7 @@ def mutation_rate_scan_test(
         fid.attrs['rate_calibration'] = rate_calibration
         fid.attrs['n_sims'] = n_sims
         fid.attrs['min_denovo'] = min_denovo
-        fid.attrs['direction'] = direction
+        fid.attrs['direction'] = 'enrichment'
         if seed is not None:
             fid.attrs['seed'] = seed
 

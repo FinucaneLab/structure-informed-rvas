@@ -191,15 +191,6 @@ def get_adjacency_matrix(pdb_pae_file_pos_guide, pdb_dir, pae_dir, uniprot_id, r
     adj_mat = dist_thresh & pae_thresh
     logger.debug(f"Adjacency matrix computed: {np.sum(adj_mat)} edges from {adj_mat.shape[0]} positions")
     return adj_mat
-def valid_for_fisher(contingency_table):
-    valid_columns = np.all(np.sum(contingency_table, axis=0) > 0)
-    valid_rows = np.all(np.sum(contingency_table, axis=1) > 0)
-    all_non_neg = np.all(contingency_table >= 0)
-    if valid_columns and valid_rows and all_non_neg:
-        return True
-    else:
-        return False
-
 def write_dataset(fid, name, data, clevel=5):
     if name in fid:
         del fid[name]
@@ -225,6 +216,8 @@ def resolve_pval_node(fid, test='binomial'):
 
     Returns (node, mu_mode). `test` selects the group and is ignored for standard files.
     """
+    # Standard files are either marked 'case_control' or, if written before that
+    # attribute existed, marked with nothing at all.
     if fid.attrs.get('test_type') != 'mutation_rate':
         return fid, False
     if test not in MU_TEST_GROUPS:

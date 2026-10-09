@@ -6,7 +6,6 @@ import h5py
 import glob
 from scan_test import scan_test
 from read_data import map_to_protein
-from pymol_code import make_movie_from_pse
 from logger_config import get_logger
 from utils import get_nbhd_info
 
@@ -259,18 +258,6 @@ if __name__ == '__main__':
         '''
     )
     parser.add_argument(
-        '--test-direction',
-        type=str,
-        default='enrichment',
-        choices=['enrichment', 'depletion'],
-        help='''
-        Which tail to test. 'enrichment' (default) asks whether a neighborhood holds more
-        variants than the mutation rate predicts; 'depletion' asks whether it holds fewer,
-        which is the direction selection acts in and the relevant one for variant classes
-        that have already been filtered by it.
-        '''
-    )
-    parser.add_argument(
         '--min-mu-coverage',
         type=float,
         default=0.0,
@@ -464,8 +451,7 @@ if __name__ == '__main__':
         called: the tool looks for clusters of case variants, and spending
         multiple-testing burden on the opposite direction costs power. Setting this
         restores the two-sided Fisher test, and with it the old behaviour. Has no effect
-        on the mutation-rate null, which is already one-sided -- use --test-direction
-        there.
+        on the mutation-rate null, which only ever tests enrichment.
         '''
     )
     parser.add_argument(
@@ -573,32 +559,21 @@ if __name__ == '__main__':
         '''
     )
     parser.add_argument(
-        '--permute',
-        action='store_true',
-        default=False,
+        '--min-alleles',
+        type=int,
+        default=5,
         help='''
-        Permute case/control allele counts within each gene (uniprot_id) before saving
-        with --save-df-rvas. Within each gene the total case and control allele counts are
-        preserved; individual variant counts are redrawn from the hypergeometric distribution
-        (equivalent to shuffling allele labels at random). Requires --save-df-rvas.
-        '''
-    )
-    parser.add_argument(
-        '--permute-gene-filter',
-        type=str,
-        default=None,
-        help='''
-        Comma-separated list of filter files (same format as --df-filter) whose uniprot_id
-        columns are intersected to define the set of genes to permute. Only variants in those
-        genes are written to the --save-df-rvas output; all variants per gene are retained
-        (no position-level filtering). Requires --permute.
+        Minimum case and control alleles a gene needs to be analyzed by the standard
+        case/control 3DNT, applied as strictly greater than this value (so the default
+        of 5 requires at least 6 of each). The mutation-rate null uses --min-denovo
+        instead.
         '''
     )
     parser.add_argument(
         '--ignore-ac',
         action='store_true',
         default=False,
-        help='count every variant only once',
+        help='analyze case-only and control-only variants; count every variant only once',
     )
     parser.add_argument(
         '--dont-remove-common',
@@ -625,9 +600,10 @@ if __name__ == '__main__':
         '''
     )
     parser.add_argument(
-        '--make_movie',
+        '--make-movie', '--make_movie',
         action='store_true',
         default=False,
+        dest='make_movie',
         help='make movie from a Pymol session file',
     )
     parser.add_argument(
@@ -682,13 +658,6 @@ if __name__ == '__main__':
     if not (0 < args.fdr_cutoff < 1):
         raise ValueError(f"FDR cutoff must be between 0 and 1, got {args.fdr_cutoff}")
 
-    if args.include_depletion and args.test_direction == 'depletion':
-        raise ValueError(
-            "--include-depletion makes the case/control test two-sided; "
-            "--test-direction depletion makes the mutation-rate test one-sided in the "
-            "other direction. Pick one."
-        )
-
     # Conditional analysis is on by default, so an incompatible flag must switch it off
     # quietly rather than fail: a command that was valid before this became the default
     # must stay valid. An EXPLICIT --conditional still errors, because then the user has
@@ -741,10 +710,6 @@ if __name__ == '__main__':
         logger.info(f"Creating results directory: {args.results_dir}")
         os.makedirs(args.results_dir, exist_ok=True)
 
-    if args.permute and args.save_df_rvas is None:
-        raise ValueError("--permute requires --save-df-rvas")
-    if args.permute_gene_filter is not None and not args.permute:
-        raise ValueError("--permute-gene-filter requires --permute")
     if args.pre_mapped_rvas is not None and args.rvas_data_to_map is not None:
         raise ValueError("--pre-mapped-rvas and --rvas-data-to-map are mutually exclusive")
 
@@ -812,35 +777,6 @@ if __name__ == '__main__':
     did_nothing = True
 
     if args.save_df_rvas is not None:
-        if args.permute:
-            logger.info("Permuting case/control labels within each gene (hypergeometric)")
-            if args.permute_gene_filter is not None:
-                filter_files = args.permute_gene_filter.split(',')
-                gene_sets = [
-                    set(pd.read_csv(f, sep='\t')['uniprot_id'].unique())
-                    for f in filter_files
-                ]
-                permute_uniprot_ids = gene_sets[0].intersection(*gene_sets[1:])
-                df_rvas = df_rvas[df_rvas['uniprot_id'].isin(permute_uniprot_ids)].reset_index(drop=True)
-                logger.info(f"Restricting permutation to {len(permute_uniprot_ids)} genes from --permute-gene-filter")
-            rng = np.random.default_rng()
-            for uniprot, idx in df_rvas.groupby('uniprot_id').groups.items():
-                ac_case = df_rvas.loc[idx, 'ac_case'].values.astype(int)
-                ac_control = df_rvas.loc[idx, 'ac_control'].values.astype(int)
-                n_each = ac_case + ac_control
-                # Explode: one entry per allele across all variants, 1=case 0=control
-                labels = np.repeat([1, 0], [ac_case.sum(), ac_control.sum()])
-                rng.shuffle(labels)
-                # Group back: count case alleles per variant
-                ends = np.cumsum(n_each)
-                starts = np.concatenate([[0], ends[:-1]])
-                new_ac_case = np.array([labels[s:e].sum() for s, e in zip(starts, ends)])
-                df_rvas.loc[idx, 'ac_case'] = new_ac_case
-                df_rvas.loc[idx, 'ac_control'] = n_each - new_ac_case
-            # Remove any variants that appear in more than one gene
-            counts = df_rvas['Variant ID'].value_counts()
-            df_rvas = df_rvas[df_rvas['Variant ID'].isin(counts[counts == 1].index)].reset_index(drop=True)
-            logger.info(f"After removing multi-gene variants: {len(df_rvas)} variants")
         logger.info(f"Saving mapped RVAS dataframe to {args.save_df_rvas}")
         df_rvas.to_csv(args.save_df_rvas, sep='\t', index=False)
         did_nothing = False
@@ -853,7 +789,7 @@ if __name__ == '__main__':
             df_filter, args.fdr_file, args.pval_file, args.rate_calibration,
             args.rate_calibration_genes, args.min_denovo, args.n_trios, args.seed,
             args.mu_residue_file, args.mu_col is not None, args.min_mu_coverage,
-            args.max_residues, args.simulate_null_from_mu, args.test_direction,
+            args.max_residues, args.simulate_null_from_mu,
         )
         did_nothing = False
 
@@ -878,7 +814,6 @@ if __name__ == '__main__':
                 min_mu_coverage=args.min_mu_coverage,
                 max_residues=args.max_residues,
                 simulate_null=args.simulate_null_from_mu,
-                direction=args.test_direction,
             )
         conditional_scan(
             df_rvas,
@@ -901,6 +836,7 @@ if __name__ == '__main__':
             conditioning_radius=args.conditional_radius,
             ignore_ac=args.ignore_ac,
             include_depletion=args.include_depletion,
+            min_alleles=args.min_alleles,
             gene_criterion=args.conditional_gene_criterion,
             gene_cutoff=args.conditional_gene_cutoff,
             min_denovo=args.min_denovo,
@@ -935,7 +871,6 @@ if __name__ == '__main__':
             args.min_mu_coverage,
             args.max_residues,
             args.simulate_null_from_mu,
-            args.test_direction,
             conditioning=remove_nbhd_conditioning(args),
             min_retained=args.conditional_min_retained,
         )
@@ -961,12 +896,17 @@ if __name__ == '__main__':
             args.seed,
             args.conditional_min_retained,
             include_depletion=args.include_depletion,
+            min_alleles=args.min_alleles,
         )
         did_nothing = False
 
     elif args.make_movie:
         if not (args.pse and args.results_dir):
             raise ValueError("For making a movie, you must provide --pse and --results_dir")
+        # Imported here, not at module scope: pymol_code pulls in PyMOL, and the
+        # scan has no need of it. A module-level import made the whole tool,
+        # --help included, unusable in a PyMOL-free install.
+        from pymol_code import make_movie_from_pse
         make_movie_from_pse(args.results_dir, args.pse)
         did_nothing = False
 
