@@ -306,16 +306,6 @@ def get_uniprot_sequence(uniprot_id):
     return response.json().get('sequence', {}).get('value', '')
 
 
-def get_protein_function(uniprot_id):
-    """Return the first FUNCTION comment text from UniProt, or None if absent."""
-    response = requests.get(f"https://rest.uniprot.org/uniprotkb/{uniprot_id}")
-    response.raise_for_status()
-    try:
-        return response.json()['comments'][0]['texts'][0]['value']
-    except (KeyError, IndexError):
-        return None
-
-
 def get_functional_sites_detailed(uniprot_id, cache_dir=None):
     """
     Fetch functional site annotations from UniProt for `uniprot_id`.
@@ -1491,9 +1481,35 @@ def pse_to_gif(input_pse, n_frames=36, width=640, height=480, fps=15, ray_trace_
 def main():
     parser = argparse.ArgumentParser(
         description='Protein structure interpretation tools',
+        epilog=(
+            "Each subcommand has its own options, which plain -h does not show.\n"
+            "  %(prog)s --help-all           every subcommand's options\n"
+            "  %(prog)s <subcommand> -h      just one subcommand's options"
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     subparsers = parser.add_subparsers(dest='command', required=True)
+
+    class _HelpAll(argparse.Action):
+        """
+        Print the top-level help and then every subcommand's.
+
+        argparse shows subcommand options only under `prog subcommand -h`, so plain -h
+        lists the subcommand names and nothing else -- there is no way to see the whole
+        interface at once, which is the first thing anyone wants.
+        """
+
+        def __call__(self, parser_, namespace, values, option_string=None):
+            parser_.print_help()
+            for name, sub in subparsers.choices.items():
+                print('\n' + '=' * 72)
+                print(f'  {parser_.prog} {name}')
+                print('=' * 72)
+                print(sub.format_help())
+            parser_.exit()
+
+    parser.add_argument('--help-all', action=_HelpAll, nargs=0,
+                        help="show this help, plus every subcommand's options, and exit")
 
     def add_test_arg(p):
         """--test selects the null for a mutation-rate p-value file; ignored otherwise."""
@@ -1546,7 +1562,7 @@ def main():
     # -- visualize subcommand --
     p_vis = subparsers.add_parser(
         'visualize',
-        help='Generate PyMOL visualizations for a protein (wraps run.py --visualization)',
+        help='Generate PyMOL visualizations for a protein',
     )
     p_vis.add_argument('--uniprot', required=True, help='UniProt ID')
     p_vis.add_argument('--results-dir', required=True, help='Results directory')

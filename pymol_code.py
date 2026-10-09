@@ -32,17 +32,33 @@ def _pse_base(pdb_filename, gene_name, uniprot_id):
 
 
 def get_pdb_filename(annot_df, info_df):
-    """Map each row in annot_df to its PDB filename based on amino acid position."""
-    pdb_filenames = []
-    for _, r1 in annot_df.iterrows():
-        aa_pos = r1['aa_pos']
-        for _, r2 in info_df.iterrows():
-            pos_covered = ast.literal_eval(r2['pos_covered'])
-            if int(pos_covered[0]) <= int(aa_pos) <= int(pos_covered[1]):
-                pdb_filename = r2['pdb_filename']
-                break
-        pdb_filenames.append(pdb_filename)
-    annot_df['pdb_filename'] = pdb_filenames
+    """
+    Label each row of annot_df with the PDB file covering its residue.
+
+    Rows whose position falls in no covered range get None rather than inheriting the
+    previous row's filename, which is what the earlier version did: `pdb_filename` was
+    assigned inside the inner loop and read outside it, so a miss silently reused
+    whatever the last hit had been (and raised NameError if the very first row missed).
+
+    The ranges are parsed once up front; they used to be re-parsed with literal_eval for
+    every residue, which is O(residues x fragments) calls on a long protein.
+    """
+    ranges = [(int(ast.literal_eval(r['pos_covered'])[0]),
+               int(ast.literal_eval(r['pos_covered'])[1]),
+               r['pdb_filename'])
+              for _, r in info_df.iterrows()]
+
+    def _lookup(aa_pos):
+        for start, end, filename in ranges:
+            if start <= int(aa_pos) <= end:
+                return filename
+        return None
+
+    annot_df = annot_df.copy()
+    annot_df['pdb_filename'] = [_lookup(p) for p in annot_df['aa_pos']]
+    n_missing = int(annot_df['pdb_filename'].isna().sum())
+    if n_missing:
+        print(f"  [WARNING] {n_missing} residues fall outside every PDB fragment range")
     return annot_df
 
 
@@ -350,44 +366,6 @@ def pymol_scan_test(uniprot_id, reference_directory, results_directory, pval_fil
         print(f"[ERROR] in pymol_scan_test(): {e}")
 
 
-def pymol_neighborhood(uniprot_id, results_directory, reference_directory, pval_file, gene_name=None,
-                       test='binomial'):
-    """Re-save the ratio PSE (hook for future neighborhood-level annotations)."""
-    try:
-        if gene_name is None:
-            gene_name = _load_gene_name(uniprot_id, reference_directory)
-
-        pymol_dir = os.path.join(results_directory, 'pymol_visualizations')
-        os.makedirs(pymol_dir, exist_ok=True)
-
-        df_results_p = pval_file
-        with h5py.File(df_results_p, 'r') as fid:
-            node, mu_mode = resolve_pval_node(fid, test)
-            df_results = read_p_values(node, uniprot_id, mu_mode=mu_mode)
-
-        info = os.path.join(reference_directory, INFO_TSV)
-        if not os.path.isfile(info):
-            print(f"[WARNING] Info TSV not found: {info}")
-            return
-        info_df = pd.read_csv(info, sep='\t')
-
-        tmp_info = info_df[info_df['uniprot_id'] == uniprot_id]
-        tmp_df = df_results[df_results['uniprot_id'] == uniprot_id]
-        tmp_df = get_pdb_filename(tmp_df, tmp_info)
-
-        tmp_df['visual_filename'] = tmp_df['pdb_filename'].apply(
-            lambda x: os.path.join(pymol_dir, _pse_base(x, gene_name, uniprot_id) + '.pse')
-        )
-
-        for v in set(tmp_df['visual_filename']):
-            cmd.reinitialize()
-            cmd.load(v.split('.')[0] + '_ratio.pse')
-            cmd.save(v.split('.')[0] + '_ratio.pse')
-
-    except Exception as e:
-        print(f"[ERROR] in pymol_neighborhood(): {e}")
-
-
 def pymol_component(uniprot_id, reference_directory, results_directory, pval_file,
                     residues, label, gene_name=None, test='binomial', centers=None):
     """
@@ -519,5 +497,3 @@ def run_all(uniprot_id, results_directory, reference_directory, pval_file, test=
                gene_name=gene_name, test=test, components=components)
     pymol_scan_test(uniprot_id, reference_directory, results_directory, pval_file,
                     gene_name=gene_name, test=test)
-    pymol_neighborhood(uniprot_id, results_directory, reference_directory, pval_file,
-                       gene_name=gene_name, test=test)

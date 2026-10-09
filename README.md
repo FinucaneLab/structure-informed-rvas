@@ -216,6 +216,10 @@ python structure-informed-rvas/visualize_and_interpret.py visualize \
   --reference-dir sir-reference-data/
 ```
 
+`visualize_and_interpret.py` is a subcommand tool, so plain `-h` lists only the
+subcommand names. Use `--help-all` to see every subcommand's options at once, or
+`visualize_and_interpret.py <subcommand> -h` for one.
+
 This produces three PSE files under `results_schema/pymol_visualizations/`:
 - `GRIA3_P42263_gray.pse`: plain grey cartoon of the protein structure
 - `GRIA3_P42263_mut.pse`: structure with mutations shown as spheres (blue = control-only, red = case-only, purple = both)
