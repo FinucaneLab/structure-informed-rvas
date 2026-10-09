@@ -5,9 +5,10 @@ The failure mode these guard against is silent. A mutation-rate p-value file reu
 dataset names of a standard 3DNT file but fills them with different quantities: the
 second column of `_original` is mutational opportunity rather than a control allele
 count, and the second column of `_nbhd` is an expected de novo count rather than an
-observed control count. Roulette rates are far below 1, so code written for case/control
-does not crash on them -- it finds no controls, no case-only residues, and a near-constant
-ratio, and produces a plausible-looking answer from the wrong column.
+observed control count. Mutation rates are not allele counts, and code written for
+case/control does not crash on them -- it finds no case-only residues, a near-constant
+ratio, and (at the gnomAD scale used here, ~2e-08) no controls either, producing a
+plausible-looking answer from the wrong column.
 
 So these tests assert on the column *names* as much as the values: in mutation-rate mode
 `ac_control` and `ratio` must be absent, so a caller written for the other mode fails
@@ -64,7 +65,7 @@ def _pvals_frame(second_col_name, second_col, original_second):
 def _write_file(path, mu_mode):
     """Write a p-value file of either flavour, with the real dataset layout."""
     if mu_mode:
-        # mu well below 1, as Roulette rates are -- the magnitude is the whole reason
+        # mu at the gnomAD per-residue scale -- the magnitude is the whole reason
         # case/control code fails silently on these files.
         mu = np.full(N_RES, 3.7e-8)
         df = _pvals_frame('nbhd_expected', np.linspace(0.5, 4.0, N_RES), mu)

@@ -149,8 +149,10 @@ def estimate_lambda(df_rvas, df_mu, rate_calibration, calibration_genes=None, n_
         f'missense variants in {len(genes)} genes)'
     )
     if n_trios is not None and n_trios > 0:
-        # lambda_hat itself is not interpretable when the rate model is relative (as
-        # Roulette's is), so check the quantity that is: de novo missense per trio.
+        # lambda_hat itself is not interpretable when the rate model is relative, which
+        # both gnomAD's mu_snp and Roulette's rates are (on different scales, so
+        # lambda_hat is not comparable between them either). Check the quantity that is
+        # interpretable: de novo missense per trio.
         per_trio = sum_x / n_trios
         logger.info(f'Sanity check: {per_trio:.3f} de novo missense per trio '
                     f'({sum_x:.0f} over {n_trios} trios); expect roughly 0.6-1.1')
@@ -500,17 +502,20 @@ def _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage
 
     # A gene is only testable if it carries a nonzero total mutation rate. Genes with
     # rows in the table but zero total rate are those the rate model does not cover at
-    # all -- the Roulette file is autosomes only, so every chrX gene lands here.
+    # all. The default gnomAD rate file covers chrX; Roulette does not, so against a
+    # Roulette-derived table every chrX gene lands here.
     missing = [u for u in uniprot_id_list if u not in mu_lookup]
     zero_rate = [u for u in uniprot_id_list
                  if u in mu_lookup and mu_lookup[u][1].sum() <= 0]
     if missing:
         logger.warning(f'{len(missing)} genes are absent from the rate table and are skipped')
     if zero_rate:
+        n_x = sum(1 for u in zero_rate if u in mu_lookup)
         logger.warning(
-            f'{len(zero_rate)} genes have zero total mutation rate and are skipped. The '
-            'Roulette rate file covers autosomes only, so chrX genes cannot be tested '
-            'with it; supply a rate file with chrX to include them.'
+            f'{len(zero_rate)} genes have zero total mutation rate and are skipped '
+            f'({n_x} present in the table but with no rate anywhere). If these are chrX '
+            'genes, the rate table was probably built from Roulette, which covers '
+            'autosomes only; the default gnomAD rate file includes chrX.'
         )
     skip = set(missing) | set(zero_rate)
     uniprot_id_list = [u for u in uniprot_id_list if u not in skip]

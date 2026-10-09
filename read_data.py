@@ -43,10 +43,30 @@ def load_ref_for_chrom(path, chrom, pos_filter):
     return df
 
 
+# Rate column names, most preferred first. gnomAD is the default rate model, so its
+# column is checked before Roulette's; `mu_snp` matches neither a 'rate' substring nor a
+# bare 'mu', so without naming it explicitly the gnomAD file is unreadable.
+KNOWN_RATE_COLUMNS = ('mu_snp', 'roulette_rate', 'mu')
+
+
+def identify_rate_column(schema_names, path=''):
+    """Pick the mutation-rate column of a rate reference file."""
+    for name in KNOWN_RATE_COLUMNS:
+        if name in schema_names:
+            return name
+    candidates = [c for c in schema_names if 'rate' in c.lower() or c.lower() in ('mu', 'u')]
+    if len(candidates) != 1:
+        raise ValueError(
+            f'Could not identify a mutation rate column in {path}. '
+            f'Columns present: {list(schema_names)}. Known names: {list(KNOWN_RATE_COLUMNS)}.'
+        )
+    return candidates[0]
+
+
 def load_mu_for_chrom(mu_path, chrom, pos_filter):
     """
     Load per-variant mutation rates for one chromosome from a rate reference file
-    (e.g. roulette_missenses_filtered.parquet), restricted to the positions present
+    (by default gnomad_mu_snp_by_variant.parquet), restricted to the positions present
     in the RVAS data.
 
     Returns a dataframe indexed by chr-pos-ref-alt with column mu (and mu_adjusted
@@ -63,16 +83,7 @@ def load_mu_for_chrom(mu_path, chrom, pos_filter):
         )
 
     schema_names = pq.ParquetFile(mu_path).schema_arrow.names
-    if 'roulette_rate' in schema_names:
-        rate_col = 'roulette_rate'
-    else:
-        candidates = [c for c in schema_names if 'rate' in c.lower() or c.lower() in ('mu', 'u')]
-        if len(candidates) != 1:
-            raise ValueError(
-                f'Could not identify a mutation rate column in {mu_path}. '
-                f'Columns present: {schema_names}'
-            )
-        rate_col = candidates[0]
+    rate_col = identify_rate_column(schema_names, mu_path)
 
     columns = ['chrom', 'pos', 'ref', 'alt', rate_col]
     if 'adjusted' in schema_names:

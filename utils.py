@@ -287,10 +287,13 @@ def read_original_mutation_data(fid, uniprot_id, mu_mode=False):
     expected de novo count under that test's null. The returned frame then carries `mu`
     and `obs_exp` instead of `ac_control` and `ratio`.
 
-    The columns are deliberately NOT aliased onto the case/control names. Roulette rates
-    are far below 1, so a caller testing `ac_control >= 1` would silently find no controls
-    and one testing `ac_control == 0` would silently find no case-only residues -- both
-    produce a plausible-looking answer from a column that means something else entirely.
+    The columns are deliberately NOT aliased onto the case/control names. Mutation rates
+    are not allele counts and their scale depends on the rate model: per-residue gnomAD mu
+    sits around 2e-08, while a Roulette-derived table has a median near 0.3. So a caller
+    testing `ac_control == 0` silently finds no case-only residues under either model, and
+    one testing `ac_control >= 1` silently finds no controls under gnomAD but a scattering
+    of them under Roulette. Both produce a plausible-looking answer from a column that
+    means something else entirely, and the answer changes with the rate file.
     """
     pvalue_data = fid[uniprot_id][:]
     original_data = fid[f'{uniprot_id}_original'][:]

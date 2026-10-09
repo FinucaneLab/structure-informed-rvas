@@ -399,9 +399,32 @@ python structure-informed-rvas/run.py \
   --fdr-file ASD_mutation_rate.fdr.tsv
 ```
 
-`--mu-file` with no argument uses `<reference-dir>/roulette_missenses_filtered.parquet`.
-The input file supplies only the observed de novo counts, in `ac_case` (or via
-`--ac-case-col`); no control column is needed.
+`--mu-file` with no argument uses `<reference-dir>/gnomad_mu_snp_by_variant.parquet`,
+and `--mu-residue-file` defaults to the matching
+`<reference-dir>/mu_per_residue_gnomad.parquet`. The input file supplies only the
+observed de novo counts, in `ac_case` (or via `--ac-case-col`); no control column is
+needed.
+
+#### Using Roulette instead
+
+Roulette rates are still shipped in the reference directory and can be used by naming
+both files explicitly:
+
+```
+--mu-file <reference-dir>/roulette_missenses_filtered.parquet \
+--mu-residue-file <reference-dir>/mu_per_residue.parquet
+```
+
+**Roulette has no chrX.** The file covers autosomes only, so every chrX gene gets a
+total mutation rate of zero and is skipped with a message. In the ASD analysis that
+costs 1,510 genes (2.83M possible missense variants, 421,858 residues) — including
+hits such as ALG13 and NAA10, which are only testable under gnomAD. Use Roulette for
+comparison against the default, not as the primary rate model.
+
+The two rate models are on different scales (per-residue `mu` has a median near 0.3
+under Roulette and around 2e-08 under gnomAD), so `lambda_hat` is not comparable
+between them and a `--rate-calibration fixed:` value from one must never be reused
+with the other.
 
 `--mu-col NAME` is the alternative: a rate column already present in the input file,
 for comparison against a rate reference. It is only valid if that file enumerates every
@@ -460,10 +483,10 @@ Combining warns if the chunks disagree on `lambda_hat`.
 
 ### Limitations
 
-- **The Roulette rate file covers autosomes only.** No chrX rates are available in it,
-  so 1,510 genes (2.83M possible missense variants, 421,858 residues) cannot be tested;
-  they are skipped with an explicit message. Supply a rate file including chrX to
-  include them.
+- **Rate coverage is not complete, and what is missing depends on the rate file.** The
+  default gnomAD file covers chrX; Roulette does not (see "Using Roulette instead"
+  above), and against a Roulette-derived table all 1,510 chrX genes are skipped with an
+  explicit message. The coverage figures below were measured on Roulette.
 - Autosomal rate coverage is 82–96% per chromosome (median ~92%, lowest on chr19), and
   the gaps cluster spatially within low-coverage genes. This costs power rather than
   biasing the tests: a variant's de novo count and its rate are dropped together, so
