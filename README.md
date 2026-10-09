@@ -39,6 +39,25 @@ To set this up:
 
 All commands in this tutorial should be run from the working directory.
 
+### Calling the tool from Python
+
+`run.py` exposes `build_parser()`, `validate_args(args)` and `main(argv)`, so an
+analysis can be driven in process rather than through a subprocess:
+
+```python
+import run
+run.main([
+    '--rvas-data-to-map', 'input.tsv.gz',
+    '--reference-dir', 'sir-reference-data',
+    '--results-dir', 'results/',
+    '--run-3dnt',
+])
+```
+
+`main` returns 0 and raises `ValueError` on an unusable argument combination, which is
+what the command line reports too. Everything the CLI does is reachable this way; the
+two paths produce identical output.
+
 ## Basic 3DNT 
 
 ```

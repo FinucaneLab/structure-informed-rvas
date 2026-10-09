@@ -1,4 +1,6 @@
 import argparse
+import sys
+
 import pandas as pd
 import numpy as np
 import os
@@ -169,7 +171,13 @@ def _neighborhood_radius_type(value):
             f"Invalid neighborhood radius: '{value}'. Must be a number, 'multiple-small', or 'multiple-big'."
         )
 
-if __name__ == '__main__':
+def build_parser():
+    """
+    The command-line interface.
+
+    Split out so the parser can be built without running anything -- for --help,
+    for tests, and so a driver script can inspect or reuse it.
+    """
     parser=argparse.ArgumentParser()
     parser.add_argument(
         '--rvas-data-to-map',
@@ -605,7 +613,17 @@ if __name__ == '__main__':
         default=None,
         help='Amino acid residue position in --uniprot-id for center of desired neighborhood'
     )
-    args = parser.parse_args()
+    return parser
+
+
+def validate_args(args):
+    """
+    Check the argument combination and fill in what is derived from it.
+
+    Mutates `args` in place -- it resolves --pval-file from --fdr-file, picks a seed,
+    and settles whether conditional analysis applies -- then returns it, so a caller
+    can do `args = validate_args(build_parser().parse_args())`.
+    """
 
     # Derive pval file name from fdr file name if not explicitly set
     if args.pval_file is None:
@@ -742,6 +760,23 @@ if __name__ == '__main__':
                     f"Build it with: python precompute_mu_per_residue.py "
                     f"--reference-dir {args.reference_dir}"
                 )
+
+    return args
+
+
+def main(argv=None):
+    """
+    Run one analysis. `argv` defaults to sys.argv[1:].
+
+    Returns 0 on success. Raises on an unusable argument combination, which is how
+    the CLI reports it too.
+    """
+    args = validate_args(build_parser().parse_args(argv))
+
+    # Which null is in play. validate_args works this out too, for its own checks; it is
+    # cheap and derived purely from the arguments, so it is recomputed rather than
+    # smuggled across on the namespace.
+    mutation_rate_mode = (args.mu_col is not None) or (args.mu_file is not None)
 
     df_rvas, df_filter = map_and_filter_rvas(
         args.rvas_data_to_map,
@@ -957,4 +992,13 @@ if __name__ == '__main__':
         did_nothing=False
 
     if did_nothing:
-        raise Exception('no analysis specified')
+        raise ValueError(
+            'No analysis was selected. Pass one of --run-3dnt, --fdr-only, '
+            '--save-df-rvas, --get-nbhd or --combine-pval-files.'
+        )
+    return 0
+
+
+
+if __name__ == '__main__':
+    sys.exit(main())
