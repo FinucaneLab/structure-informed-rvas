@@ -3,7 +3,8 @@
 visualize_and_interpret.py - Protein structure visualization and interpretation tools
 
 Subcommands:
-  run_all    Full pipeline (visualize, annotate, neighborhoods) for all significant proteins
+  run_all    Full pipeline (visualize, annotate, neighborhoods) for all significant
+             proteins, or for every component with --components
   visualize  Generate PyMOL visualizations for a single protein
   annotate   Transfer functional site annotations from protein family members
   nbhd-features  Cross-reference a neighborhood with functional features
@@ -1138,40 +1139,59 @@ def cmd_visualize(args):
 # Subcommand: analyze
 # ---------------------------------------------------------------------------
 
-def cmd_analyze(args):
+def _units_from_components(components_file, gene_map):
     """
-    Full pipeline for every significant protein in an FDR results file:
-      1. Visualization (PyMOL session)
-      2. Annotation (functional sites)
-      3. Top-neighborhood residue table (_nbhd.tsv)
-      4. Neighborhood × features table (_nbhd_features.tsv)
+    One unit per component, read straight from <stem>.components.tsv.
+
+    The residue set is taken from the file rather than recomputed: a component is the
+    union of many overlapping neighborhoods, the conditional analysis already masked
+    exactly that set, and rebuilding it here from centres and radii would risk
+    annotating a different region from the one that was conditioned on. It also means
+    this path needs no structures at all.
     """
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from utils import parse_pymol_positions
+
+    df = pd.read_csv(components_file, sep='\t')
+    required = {'uniprot_id', 'component_id', 'residues_pymol', 'lead_aa_pos'}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(
+            f'{components_file} is missing {sorted(missing)}; expected the '
+            'components.tsv written by a --conditional run.'
+        )
+
+    units = []
+    for row in df.sort_values(['round', 'lead_p'] if 'lead_p' in df.columns
+                              else ['round']).itertuples():
+        uniprot_id = row.uniprot_id
+        gene_name = getattr(row, 'gene_name', None) or gene_map.get(uniprot_id, uniprot_id)
+        residues = parse_pymol_positions(row.residues_pymol)
+        lead = int(row.lead_aa_pos)
+        rnd = int(getattr(row, 'round', 0))
+        info = (f'component {row.component_id} (round {rnd}), lead {lead}, '
+                f'{len(residues)} residues, {getattr(row, "n_centers", "?")} neighborhoods, '
+                f'{getattr(row, "n_case_alleles", "?")} case alleles')
+        units.append({
+            'uniprot_id': uniprot_id,
+            'gene_name': gene_name,
+            'center': lead,
+            'residues': residues,
+            'label': f'c{int(row.component_id)}_{lead}',
+            'kind': 'component',
+            'info': info,
+        })
+    return units
+
+
+def _units_from_fdr(args, df_fdr, sig_col, p_col, radius_cols, gene_map):
+    """One unit per called neighborhood (or per protein, without --all-signals)."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from utils import best_radius_for_hit
-    from pymol_code import run_all
-
-    # Load FDR file and work out which layout it has. A mutation-rate run corrects each
-    # test separately and reports the max, so it has no plain `fdr` or `p_value` column.
-    df_fdr = pd.read_csv(args.fdr_file, sep='\t')
-    schema = _fdr_schema(df_fdr)
-    sig_col = args.significance_column or schema['significance_column']
-    p_col = schema['p_column'][args.test]
-    radius_cols = schema['radius_columns'][args.test]
-    if schema is MU_FDR_SCHEMA:
-        print(f"Mutation-rate results detected; ranking by {p_col}, "
-              f"significance from {sig_col}.")
-
-    for col in (sig_col, p_col):
-        if col not in df_fdr.columns:
-            raise ValueError(
-                f"Column '{col}' not found in {args.fdr_file}. "
-                f"Available: {list(df_fdr.columns)}"
-            )
 
     df_sig = df_fdr[df_fdr[sig_col] < args.significance_cutoff].copy()
     if len(df_sig) == 0:
-        print(f"No proteins with {sig_col} < {args.significance_cutoff} in {args.fdr_file}")
-        return 0
+        return []
 
     if args.all_signals:
         # One row per independent signal, as written by --conditional. Collapsing to the
@@ -1182,7 +1202,75 @@ def cmd_analyze(args):
                       .groupby('uniprot_id', as_index=False)
                       .first())
 
+    units = []
+    for row in hits.itertuples():
+        uniprot_id = row.uniprot_id
+        center = int(row.aa_pos)
+        # The scan records which radius it chose for this position under
+        # --neighborhood-radius multiple-*; re-deriving the neighborhood at a fixed 15 A
+        # would annotate a different neighborhood from the one that was tested.
+        radius = best_radius_for_hit(df_fdr, uniprot_id, center,
+                                     default=args.radius, radius_cols=radius_cols)
+        units.append({
+            'uniprot_id': uniprot_id,
+            'gene_name': gene_map.get(uniprot_id, uniprot_id),
+            'center': center,
+            'residues': None,            # computed from the structure in the loop
+            'radius': radius,
+            'label': str(center),
+            'kind': 'neighborhood',
+            'info': (f'neighborhood centre {center}, radius {radius}, '
+                     f'{sig_col}={getattr(row, sig_col):.4g} {p_col}={getattr(row, p_col):.4g}'),
+        })
+    return units
+
+
+def cmd_analyze(args):
+    """
+    Full pipeline for every called region:
+      1. Visualization (PyMOL session, once per protein)
+      2. Annotation (functional sites, once per protein)
+      3. Per-residue table for the region
+      4. Region x features table
+
+    The region is a component when --components is given, and a single neighborhood
+    otherwise. A component is the unit the conditional analysis actually masked, so
+    annotating it describes the whole signal rather than the one window that scored best.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
     gene_map = _load_gene_map(args.reference_dir)
+
+    if args.components:
+        units = _units_from_components(args.components, gene_map)
+        print(f"Components mode: {len(units)} components from {args.components}")
+        if args.significance_column or args.all_signals:
+            print("  Note: --significance-column and --all-signals do not apply with "
+                  "--components; the file already holds the called components.")
+    else:
+        # Load FDR file and work out which layout it has. A mutation-rate run corrects
+        # each test separately and reports the max, so it has no plain `fdr` or
+        # `p_value` column.
+        df_fdr = pd.read_csv(args.fdr_file, sep='\t')
+        schema = _fdr_schema(df_fdr)
+        sig_col = args.significance_column or schema['significance_column']
+        p_col = schema['p_column'][args.test]
+        radius_cols = schema['radius_columns'][args.test]
+        if schema is MU_FDR_SCHEMA:
+            print(f"Mutation-rate results detected; ranking by {p_col}, "
+                  f"significance from {sig_col}.")
+        for col in (sig_col, p_col):
+            if col not in df_fdr.columns:
+                raise ValueError(
+                    f"Column '{col}' not found in {args.fdr_file}. "
+                    f"Available: {list(df_fdr.columns)}"
+                )
+        units = _units_from_fdr(args, df_fdr, sig_col, p_col, radius_cols, gene_map)
+        if not units:
+            print(f"No proteins with {sig_col} < {args.significance_cutoff} "
+                  f"in {args.fdr_file}")
+            return 0
+
     annotations_dir = args.annotations_dir or os.path.join(args.results_dir, 'annotations')
     cache_dir = args.cache_dir or os.path.join(annotations_dir, 'cache')
     os.makedirs(annotations_dir, exist_ok=True)
@@ -1192,59 +1280,78 @@ def cmd_analyze(args):
     nbhd_dir = os.path.join(args.results_dir, 'neighborhoods')
     os.makedirs(nbhd_dir, exist_ok=True)
 
-    n = len(hits)
+    n = len(units)
     visualized = set()
-    for i, row in enumerate(hits.itertuples(), 1):
-        uniprot_id = row.uniprot_id
-        center = int(row.aa_pos)
-        gene_name = gene_map.get(uniprot_id, uniprot_id)
-        # The scan records which radius it chose for this position under
-        # --neighborhood-radius multiple-*; re-deriving the neighborhood at a fixed 15 A
-        # would annotate a different neighborhood from the one that was tested.
-        radius = best_radius_for_hit(df_fdr, uniprot_id, center,
-                                     default=args.radius, radius_cols=radius_cols)
+    annotated = {}
+    for i, unit in enumerate(units, 1):
+        uniprot_id = unit['uniprot_id']
+        gene_name = unit['gene_name']
+        center = unit['center']
+        kind = unit['kind']
 
         print(f"\n{'='*60}")
-        print(f"[{i}/{n}] {gene_name} ({uniprot_id})  neighborhood center: {center}")
-        print(f"  {sig_col}={getattr(row, sig_col):.4g}  {p_col}={getattr(row, p_col):.4g}")
+        print(f"[{i}/{n}] {gene_name} ({uniprot_id})")
+        print(f"  {unit['info']}")
         print('='*60)
 
-        # 1. Visualization (per protein, not per signal -- the PSEs cover the whole chain)
-        if not args.skip_visualization and uniprot_id not in visualized:
-            print("  Running visualization...")
-            try:
-                run_all(uniprot_id, args.results_dir, args.reference_dir, pval_file=pval_path,
-                        test=args.test)
-                print("  Visualization done.")
-            except Exception as e:
-                print(f"  Warning: visualization failed: {e}")
-            visualized.add(uniprot_id)
+        # 1. Visualization. The whole-chain PSEs are per protein; the component PSE is
+        # per component, since that is what it highlights.
+        if not args.skip_visualization:
+            if uniprot_id not in visualized:
+                print("  Running visualization...")
+                try:
+                    from pymol_code import run_all
+                    run_all(uniprot_id, args.results_dir, args.reference_dir,
+                            pval_file=pval_path, test=args.test)
+                    print("  Visualization done.")
+                except Exception as e:
+                    print(f"  Warning: visualization failed: {e}")
+                visualized.add(uniprot_id)
+            if kind == 'component':
+                try:
+                    from pymol_code import pymol_component
+                    pymol_component(uniprot_id, args.reference_dir, args.results_dir,
+                                    pval_path, unit['residues'], unit['label'],
+                                    gene_name=gene_name, test=args.test)
+                except Exception as e:
+                    print(f"  Warning: component visualization failed: {e}")
 
-        # 2. Annotation
+        # 2. Annotation (per protein -- several components can share one protein)
         features_path = os.path.join(
             annotations_dir, f'{uniprot_id}_features.tsv'
         )
-        print(f"  Annotating functional sites -> {features_path}")
-        try:
-            features_df = _annotate_and_save(
-                uniprot_id, features_path, cache_dir,
-                confidence_threshold=args.confidence_threshold
-            )
-        except Exception as e:
-            print(f"  Warning: annotation failed: {e}")
-            features_df = pd.DataFrame()
+        if uniprot_id in annotated:
+            features_df = annotated[uniprot_id]
+        else:
+            print(f"  Annotating functional sites -> {features_path}")
+            try:
+                features_df = _annotate_and_save(
+                    uniprot_id, features_path, cache_dir,
+                    confidence_threshold=args.confidence_threshold
+                )
+            except Exception as e:
+                print(f"  Warning: annotation failed: {e}")
+                features_df = pd.DataFrame()
+            annotated[uniprot_id] = features_df
 
-        # 3. Compute neighborhood
-        print(f"  Computing neighborhood (center={center}, radius={radius}, pae={args.pae_cutoff})...")
-        try:
-            nbhd = _compute_nbhd(
-                uniprot_id, center, args.reference_dir,
-                radius, args.pae_cutoff
-            )
-            print(f"  Neighborhood has {len(nbhd)} residues")
-        except Exception as e:
-            print(f"  Warning: neighborhood computation failed: {e}")
-            continue
+        # 3. The region's residues. A component carries its own set; a neighborhood is
+        # rebuilt from the structure at the radius its scan chose.
+        if unit['residues'] is not None:
+            nbhd = unit['residues']
+            print(f"  Component has {len(nbhd)} residues")
+        else:
+            radius = unit['radius']
+            print(f"  Computing neighborhood (center={center}, radius={radius}, "
+                  f"pae={args.pae_cutoff})...")
+            try:
+                nbhd = _compute_nbhd(
+                    uniprot_id, center, args.reference_dir,
+                    radius, args.pae_cutoff
+                )
+                print(f"  Neighborhood has {len(nbhd)} residues")
+            except Exception as e:
+                print(f"  Warning: neighborhood computation failed: {e}")
+                continue
 
         # 4. Load per-residue mutation data
         try:
@@ -1253,25 +1360,28 @@ def cmd_analyze(args):
             print(f"  Warning: could not read mutation data: {e}")
             continue
 
-        # 5. Save _nbhd.tsv
+        # 5. Per-residue table for the region
         second_col = 'mu' if mu_mode else 'ac_control'
-        nbhd_path = os.path.join(nbhd_dir, f'{gene_name}_{uniprot_id}_{center}_nbhd.tsv')
+        stem = f'{gene_name}_{uniprot_id}_{unit["label"]}'
+        suffix = 'component' if kind == 'component' else 'nbhd'
+        res_path = os.path.join(nbhd_dir, f'{stem}_{suffix}.tsv')
         df_mut[df_mut['aa_pos'].isin(nbhd)][['aa_pos', 'ac_case', second_col]].to_csv(
-            nbhd_path, sep='\t', index=False
+            res_path, sep='\t', index=False
         )
-        print(f"  Saved neighborhood residues to {nbhd_path}")
+        print(f"  Saved {kind} residues to {res_path}")
 
-        # 6. _nbhd_features.tsv (skip if no features)
+        # 6. Features table (skip if no features)
         if len(features_df) == 0:
-            print("  No features available; skipping nbhd-features table.")
+            print(f"  No features available; skipping {kind}-features table.")
             continue
 
         result_df = _nbhd_features_table(nbhd, df_mut, features_df, mu_mode=mu_mode)
-        nbhd_feat_path = os.path.join(nbhd_dir, f'{gene_name}_{uniprot_id}_{center}_nbhd_features.tsv')
-        result_df.to_csv(nbhd_feat_path, sep='\t', index=False)
-        print(f"  Saved {len(result_df)} overlapping features to {nbhd_feat_path}")
+        feat_path = os.path.join(nbhd_dir, f'{stem}_{suffix}_features.tsv')
+        result_df.to_csv(feat_path, sep='\t', index=False)
+        print(f"  Saved {len(result_df)} overlapping features to {feat_path}")
 
-    label = 'signals' if args.all_signals else 'proteins'
+    label = ('components' if args.components
+             else ('signals' if args.all_signals else 'proteins'))
     print(f"\nDone. Processed {n} {label}.")
     return 0
 
@@ -1437,9 +1547,17 @@ def main():
         description='For each significant protein: visualization, annotation, top-neighborhood '
                     'residue table, and neighborhood × features table.',
     )
-    p_analyze.add_argument('--fdr-file', required=True,
+    p_analyze.add_argument('--fdr-file', default=None,
                            help='FDR results TSV (output of run.py --run-3dnt), or the '
-                                '.conditional.tsv from a --conditional run')
+                                '.conditional.tsv from a --conditional run. Required '
+                                'unless --components is given')
+    p_analyze.add_argument('--components', default=None,
+                           help='<stem>.components.tsv from a --conditional run. Switches '
+                                'the unit of analysis from one neighborhood to one '
+                                'component: the whole set of overlapping neighborhoods '
+                                'reporting a signal, which is what the conditional '
+                                'analysis masked. Residues come from the file, so no '
+                                'structure is needed to rebuild them')
     p_analyze.add_argument('--results-dir', required=True,
                            help='Results directory (must contain p_values.h5)')
     p_analyze.add_argument('--reference-dir', required=True,
@@ -1519,6 +1637,9 @@ def main():
                                help='Outline thickness (default: 0.15; use smaller for large complexes)')
 
     args = parser.parse_args()
+
+    if args.command == 'run_all' and not (args.fdr_file or args.components):
+        parser.error('run_all needs --fdr-file or --components')
 
     if args.command == 'annotate':
         return cmd_annotate(args)

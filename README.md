@@ -267,6 +267,49 @@ python structure-informed-rvas/visualize_and_interpret.py run_all \
 
 For each significant protein this produces the PSE files described above, plus `_nbhd.tsv` and `_nbhd_features.tsv` files in `results_schema/neighborhoods/`. Use `--significance-column fwer` to filter by FWER instead of FDR. Use `--skip-visualization` to run only annotation and neighborhood steps without PyMOL.
 
+### Annotating components
+
+A `--conditional` run writes `<stem>.components.tsv`, and `run_all --components` makes
+that the unit of analysis instead of a single neighborhood:
+
+```
+python structure-informed-rvas/visualize_and_interpret.py run_all \
+  --components results_asd/asd.fdr.components.tsv \
+  --pval-file results_asd/asd.pvals.h5 \
+  --results-dir results_asd/ \
+  --reference-dir sir-reference-data/
+```
+
+This is usually what you want. A component is the whole set of overlapping neighborhoods
+reporting one signal, and it is what the conditional analysis actually masked; annotating
+only the best-scoring window describes a part of the finding and calls it the finding.
+`--fdr-file` is not needed -- the components file already holds the called components,
+so `--significance-column` and `--all-signals` do not apply.
+
+The residue set comes from the file rather than being recomputed, so **no structures are
+needed** for the tables (PyMOL is still needed for the PSEs). That also guarantees the
+region annotated is exactly the region conditioned on.
+
+Per component you get, in `neighborhoods/`:
+
+```
+{gene}_{uniprot}_c{id}_{lead}_component.tsv            per-residue counts
+{gene}_{uniprot}_c{id}_{lead}_component_features.tsv   features x component
+```
+
+and in `pymol_visualizations/`, `{gene}_{uniprot}_c{id}_{lead}_component.pse` -- the
+component highlighted on the greyed-out chain with its mutations as spheres. The
+whole-chain PSEs are still written once per protein.
+
+**The proportions are relative to the region.** `prop_denovo_in_feature` and
+`prop_mu_in_feature` are shares of the region being annotated, so the same feature scores
+differently against a component than against one neighborhood, and the two are not
+directly comparable. A component usually spans more non-domain sequence than a single
+window does, which lowers a domain's share of the opportunity and so sharpens the
+contrast: on the ASD data CDK13's ATP site goes from 2.2x enriched per-neighborhood to
+6.1x for the protein kinase domain per-component, with the Mg2+ site at 31x. Read these
+as "within this region", not as an absolute effect size.
+
 ### Visualizing mutation-rate results
 
 Every subcommand above also accepts a mutation-rate p-value file and FDR table, and

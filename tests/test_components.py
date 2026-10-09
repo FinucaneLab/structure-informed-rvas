@@ -213,11 +213,61 @@ def test_masking_can_exhaust_a_gene():
           out.iloc[0].n_case_alleles == 7, str(out.iloc[0].n_case_alleles))
 
 
+# ---------------------------------------------------------------------------
+def test_units_from_components():
+    """
+    visualize_and_interpret must take a component's residues from the file.
+
+    Re-deriving them from the lead centre and radius would annotate a different region
+    from the one the conditional analysis actually masked -- a component is the union of
+    many overlapping neighborhoods, so its lead's own neighborhood is a strict subset.
+    """
+    print('\n6. Reading components into visualize_and_interpret units')
+    from visualize_and_interpret import _units_from_components
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'x.components.tsv')
+        pd.DataFrame([
+            {'uniprot_id': 'P1', 'gene_name': 'G1', 'component_id': 1, 'round': 0,
+             'n_centers': 3, 'lead_aa_pos': 20, 'lead_p': 1e-9,
+             'residues_pymol': '15-25+40', 'n_case_alleles': 4},
+            {'uniprot_id': 'P1', 'gene_name': 'G1', 'component_id': 2, 'round': 1,
+             'n_centers': 1, 'lead_aa_pos': 70, 'lead_p': 1e-6,
+             'residues_pymol': '65-75', 'n_case_alleles': 2},
+        ]).to_csv(path, sep='\t', index=False)
+
+        units = _units_from_components(path, {})
+
+    check('one unit per component row', len(units) == 2, f'{len(units)} units')
+    u = units[0]
+    check('residues come from the file, gaps included',
+          u['residues'] == set(range(15, 26)) | {40}, str(sorted(u['residues'])[:5]))
+    check('label distinguishes components of the same protein',
+          [x['label'] for x in units] == ['c1_20', 'c2_70'],
+          str([x['label'] for x in units]))
+    check('kind marks it as a component', u['kind'] == 'component')
+    check('gene name is taken from the file, not the fallback map',
+          u['gene_name'] == 'G1')
+    check('the later round is carried through',
+          units[1]['info'].startswith('component 2 (round 1)'), units[1]['info'])
+
+    # A file without the component columns must fail loudly, not half-work.
+    with tempfile.TemporaryDirectory() as tmp:
+        bad = os.path.join(tmp, 'bad.tsv')
+        pd.DataFrame([{'uniprot_id': 'P1', 'aa_pos': 20}]).to_csv(bad, sep='\t', index=False)
+        try:
+            _units_from_components(bad, {})
+            check('a non-components file is rejected', False)
+        except ValueError:
+            check('a non-components file is rejected', True)
+
+
 if __name__ == '__main__':
     test_shared_mutation_connects()
     test_overlap_without_mutation_does_not_connect()
     test_component_table_contents()
     test_residue_conditioning_mask()
     test_masking_can_exhaust_a_gene()
+    test_units_from_components()
     print('\n' + ('ALL TESTS PASSED' if not FAILURES else f'FAILURES: {FAILURES}'))
     sys.exit(1 if FAILURES else 0)

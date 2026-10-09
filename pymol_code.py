@@ -283,6 +283,99 @@ def pymol_neighborhood(uniprot_id, results_directory, reference_directory, pval_
         print(f"[ERROR] in pymol_neighborhood(): {e}")
 
 
+def pymol_component(uniprot_id, reference_directory, results_directory, pval_file,
+                    residues, label, gene_name=None, test='binomial'):
+    """
+    Render one component: its residues highlighted on the grey chain, its mutations
+    shown as spheres.
+
+    Loads the structure directly rather than the _gray.pse, so this works with
+    --skip-visualization and does not depend on the order the other PSEs were made.
+
+    `residues` is the component's 1-based residue set and `label` goes into the filename
+    (e.g. 'c1_842'), giving {gene}_{uniprot}_{label}_component.pse.
+    """
+    try:
+        if gene_name is None:
+            gene_name = _load_gene_name(uniprot_id, reference_directory)
+        residues = sorted(int(r) for r in residues)
+        if not residues:
+            print(f"  [WARNING] component for {uniprot_id} has no residues; skipping PSE")
+            return
+
+        pymol_dir = os.path.join(results_directory, 'pymol_visualizations')
+        os.makedirs(pymol_dir, exist_ok=True)
+
+        with h5py.File(pval_file, 'r') as fid:
+            node, mu_mode = resolve_pval_node(fid, test)
+            df_mut = read_original_mutation_data(node, uniprot_id, mu_mode=mu_mode)
+
+        info = os.path.join(reference_directory, INFO_TSV)
+        if not os.path.isfile(info):
+            print(f"  [WARNING] Info TSV not found: {info}")
+            return
+        info_df = pd.read_csv(info, sep='\t')
+        tmp_info = info_df[info_df['uniprot_id'] == uniprot_id]
+        pdbs = set(tmp_info['pdb_filename'].tolist())
+        if len(pdbs) != 1:
+            print(f"  Skipping component PSE for {gene_name} ({uniprot_id}): "
+                  f"structure spans {len(pdbs)} PDB files")
+            return
+        pdb_file = os.path.join(reference_directory, 'pdb_files', pdbs.pop())
+        if not os.path.isfile(pdb_file):
+            print(f"  [ERROR] PDB file not found: {pdb_file}")
+            return
+
+        cmd.reinitialize()
+        cmd.load(pdb_file, "structure")
+        cmd.bg_color("white")
+        cmd.hide("everything", "all")
+        cmd.show("cartoon", "all")
+        cmd.color("grey80", "all")
+
+        resi = '+'.join(str(r) for r in residues)
+        cmd.select("component", f"resi {resi}")
+        cmd.color("palecyan", "component")
+        # The component is the region; the mutations are why it is one, so they stay on
+        # top of it rather than replacing it.
+        cmd.set("cartoon_transparency", 0.55, "not component")
+
+        in_comp = df_mut[df_mut['aa_pos'].isin(residues)]
+
+        def _spheres(name, positions, color):
+            positions = [int(p) for p in positions]
+            if not positions:
+                return
+            cmd.select(name, f"resi {'+'.join(str(p) for p in positions)} and name CA")
+            cmd.show("spheres", name)
+            cmd.color(color, name)
+
+        if mu_mode:
+            _spheres("denovo", in_comp.loc[in_comp.ac_case == 1, 'aa_pos'], "salmon")
+            _spheres("denovo_recurrent", in_comp.loc[in_comp.ac_case >= 2, 'aa_pos'], "firebrick")
+        else:
+            case_only = in_comp[(in_comp.ac_case >= 1) & (in_comp.ac_control == 0)]
+            both = in_comp[(in_comp.ac_case >= 1) & (in_comp.ac_control >= 1)]
+            ctrl_only = in_comp[(in_comp.ac_control >= 1) & (in_comp.ac_case == 0)]
+            _spheres("control_only", ctrl_only['aa_pos'], "blue")
+            _spheres("case_only", case_only['aa_pos'], "red")
+            _spheres("case_and_control", both['aa_pos'], "purple")
+
+        cmd.set("specular", 0.0)
+        cmd.set("ambient", 0.4)
+        cmd.set("ray_trace_mode", 1)
+        cmd.set("ray_trace_gain", 0.15)
+        cmd.set("cartoon_loop_radius", 0.4)
+        cmd.deselect()
+
+        out = os.path.join(pymol_dir, f"{gene_name}_{uniprot_id}_{label}_component.pse")
+        cmd.save(out)
+        print(f"  Saved component PSE: {out}")
+
+    except Exception as e:
+        print(f"[ERROR] in pymol_component(): {e}")
+
+
 def make_movie_from_pse(result_directory, pse_name):
     """Render a PNG and rotating movie from a saved PSE file.
 
