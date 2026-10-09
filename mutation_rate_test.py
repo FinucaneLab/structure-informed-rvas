@@ -486,12 +486,18 @@ def _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage
     Gene-level selection. Called AFTER estimate_lambda -- see the note there on why the
     order matters.
 
-    Applied as strictly greater than min_denovo, matching the existing 3DNT gene filter
-    in scan_test._filter_proteins_by_allele_count (which uses `> min_alleles`), so the
-    default of 5 requires at least 6 de novos.
+    Inclusive: min_denovo is the minimum, so the default of 5 admits a gene with exactly
+    5 de novos. scan_test._filter_proteins_by_allele_count means the same by
+    --min-alleles.
+
+    Measured on the ASD analysis, moving from "more than 5" to "at least 5" takes the
+    tested set from 805 genes to 1,267. Nothing is lost at FWER -- all 20 genes and all
+    227 neighborhoods survive -- and PDE4DIP is gained. At FDR it is 87 genes to 91:
+    nine drop out, every one of them from just under the line to just over (worst
+    0.0487 -> 0.0569), and thirteen newly admitted genes come in.
     """
     grouped = df_rvas.groupby('uniprot_id')['ac_case'].sum()
-    uniprot_id_list = grouped[grouped > min_denovo].index.tolist()
+    uniprot_id_list = grouped[grouped >= min_denovo].index.tolist()
 
     # A gene is only testable if it carries a nonzero total mutation rate. Genes with
     # rows in the table but zero total rate are those the rate model does not cover at
@@ -535,7 +541,7 @@ def _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage
 
     logger.info(
         f'Selected {len(uniprot_id_list)} of {len(grouped)} genes for analysis '
-        f'(more than {min_denovo} de novos each)'
+        f'(at least {min_denovo} de novos each)'
     )
     return uniprot_id_list
 

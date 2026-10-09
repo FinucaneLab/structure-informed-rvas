@@ -289,11 +289,11 @@ def conditional_scan(
         exhausted = []
         for uid in list(active):
             left = remaining_denovo(uid, conditioning.get(uid, set()))
-            if left is not None and left <= min_denovo:
+            if left is not None and left < min_denovo:
                 exhausted.append((uid, left))
         if exhausted:
             logger.info(
-                f'Round {round_idx}: {len(exhausted)} genes have {min_denovo} or fewer '
+                f'Round {round_idx}: {len(exhausted)} genes have fewer than {min_denovo} '
                 f'de novos left after conditioning and are not re-scanned '
                 f'({", ".join(f"{u}:{n}" for u, n in exhausted[:8])}'
                 f'{", ..." if len(exhausted) > 8 else ""})'

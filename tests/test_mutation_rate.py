@@ -255,7 +255,7 @@ def test_min_denovo_selection_bias():
         m = rng.uniform(0.2, 3.0, size=(n_res, 1))
         lam = 4.0 / m.sum()            # expected total ~4, so ">5" really is selective
         obs = rng.poisson(lam * m, size=(n_res, 1))
-        if obs.sum() <= min_denovo:
+        if obs.sum() < min_denovo:
             continue
         n_kept += 1
         n_g = int(obs.sum())

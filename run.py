@@ -305,7 +305,7 @@ def build_parser():
         default=5,
         help='''
         Minimum case allele count per gene for the mutation-rate test, applied as
-        strictly greater than this value (so the default of 5 requires at least 6),
+        inclusive, so the default of 5 admits a gene with exactly 5,
         matching the existing 3DNT gene filter.
         '''
     )
@@ -572,9 +572,8 @@ def build_parser():
         default=5,
         help='''
         Minimum case and control alleles a gene needs to be analyzed by the standard
-        case/control 3DNT, applied as strictly greater than this value (so the default
-        of 5 requires at least 6 of each). The mutation-rate null uses --min-denovo
-        instead.
+        case/control 3DNT, inclusive -- the default of 5 admits a gene with exactly 5 of
+        each. The mutation-rate null uses --min-denovo, which means the same thing.
         '''
     )
     parser.add_argument(

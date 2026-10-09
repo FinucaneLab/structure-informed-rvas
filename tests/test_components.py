@@ -206,8 +206,8 @@ def test_masking_can_exhaust_a_gene():
     masked = parse_pymol_positions(out.iloc[0].residues_pymol)
     left = int(df_mut.loc[~df_mut.aa_pos.isin(masked), 'ac_case'].sum())
 
-    check('the gene entered with more than --min-denovo de novos', total > 5, f'{total}')
-    check('masking the component leaves it at or below the bar', left <= 5,
+    check('the gene entered with at least --min-denovo de novos', total >= 5, f'{total}')
+    check('masking the component leaves it below the bar', left < 5,
           f'{total} -> {left} de novos remain')
     check('the component holds the mass, not the residue count',
           out.iloc[0].n_case_alleles == 7, str(out.iloc[0].n_case_alleles))

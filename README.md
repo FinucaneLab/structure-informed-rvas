@@ -434,9 +434,9 @@ anti-conservative FDR, and a silent one.
 mutation-rate null only ever tests enrichment, so the flag has no effect there and
 there is no way to test depletion with it.
 
-The case/control scan analyzes genes with more than `--min-alleles` (default 5, so at
-least 6) case and control alleles each; the mutation-rate null uses `--min-denovo` the
-same way.
+The case/control scan analyzes genes with at least `--min-alleles` (default 5) case and
+control alleles each; the mutation-rate null uses `--min-denovo` the same way. Both are
+inclusive, so the default admits a gene with exactly 5.
 
 **This changes results.** Dropping a direction halves the multiple-testing burden, so
 re-running existing analyses gives more power, not the same answer. On a four-gene
@@ -560,10 +560,12 @@ to 1 for a model that already gives absolute expected counts.
 
 ### Other flags
 
-- `--min-denovo` (default 5) minimum de novos per gene, applied as strictly greater
-  than, matching `scan_test._filter_proteins_by_allele_count`; so the default requires
-  at least 6. Note the existing gene filter is internally inconsistent — it gates on
-  `> 5` in one place and `< 5` in another — and this mode mirrors the binding one.
+- `--min-denovo` (default 5) minimum de novos per gene, inclusive: the default admits a
+  gene with exactly 5. `--min-alleles` is the same filter for the case/control scan.
+  Measured on the ASD analysis, "at least 5" tests 1,267 genes against 805 for "more
+  than 5". Nothing is lost at FWER — all 20 genes and all 227 neighborhoods survive, and
+  one more gene is gained — and at FDR it goes from 87 genes to 91, the nine that drop
+  out all moving from just under the line to just over it.
 - `--max-residues` (default 10000) skips very long proteins; the distance matrix scales
   as `n_res^2`, so titin alone would need 9.4 GB.
 - `--min-mu-coverage` (default 0, i.e. report only) skips genes whose rate coverage is

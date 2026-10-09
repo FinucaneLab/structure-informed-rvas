@@ -20,8 +20,8 @@ P_FLOOR = np.finfo(float).tiny
 # at the rim rather than by residual structure. Overridable per run.
 DEFAULT_MIN_RETAINED = 0.5
 
-# Gene-level filter for the case/control scan, as strictly-greater-than, so 5
-# requires at least 6. Mirrors --min-denovo in the mutation-rate path.
+# Gene-level filter for the case/control scan: the minimum case and control alleles a
+# gene needs, inclusive. Mirrors --min-denovo in the mutation-rate path.
 DEFAULT_MIN_ALLELES = 5
 
 
@@ -356,19 +356,18 @@ def _filter_proteins_by_allele_count(df_rvas, df_fdr_filter, min_alleles=DEFAULT
     """
     Genes with enough case AND control alleles to be worth testing.
 
-    Applied as strictly greater than min_alleles, so the default of 5 requires at least
-    6 of each. This matches --min-denovo in the mutation-rate path, which uses the same
-    convention.
+    Inclusive: min_alleles is the minimum, so the default of 5 admits a gene with
+    exactly 5 of each. --min-denovo in the mutation-rate path means the same thing.
     """
     grouped = df_rvas.groupby('uniprot_id')[['ac_case', 'ac_control']].sum()
-    ac_high_enough = grouped[(grouped['ac_case'] > min_alleles) & (grouped['ac_control'] > min_alleles)]
+    ac_high_enough = grouped[(grouped['ac_case'] >= min_alleles) & (grouped['ac_control'] >= min_alleles)]
     uniprot_id_list = ac_high_enough.index.tolist()
 
     if df_fdr_filter is not None:
         uniprot_id_list = np.intersect1d(uniprot_id_list, np.unique(df_fdr_filter.uniprot_id))
 
     logger.info(f"Selected {len(uniprot_id_list)} proteins for analysis "
-                f"(more than {min_alleles} case and control alleles each)")
+                f"(at least {min_alleles} case and control alleles each)")
     return uniprot_id_list
 
 
@@ -406,8 +405,8 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
                     logger.info(f'{uniprot_id}: conditioning out {what} '
                                 f'({n_removed} residues)')
 
-            if (sum(df.ac_case) <= min_alleles) or (sum(df.ac_control) <= min_alleles):
-                logger.warning(f'{uniprot_id}: needs more than {min_alleles} case and '
+            if (sum(df.ac_case) < min_alleles) or (sum(df.ac_control) < min_alleles):
+                logger.warning(f'{uniprot_id}: needs at least {min_alleles} case and '
                                f'{min_alleles} control alleles. Skipping.')
                 continue
             
