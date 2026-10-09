@@ -600,19 +600,6 @@ if __name__ == '__main__':
         '''
     )
     parser.add_argument(
-        '--make-movie', '--make_movie',
-        action='store_true',
-        default=False,
-        dest='make_movie',
-        help='make movie from a Pymol session file',
-    )
-    parser.add_argument(
-        '--pse',
-        type=str,
-        default=None,
-        help='Pymol session to make a movie from'
-    )
-    parser.add_argument(
         '--aa-pos',
         type=str,
         default=None,
@@ -898,16 +885,6 @@ if __name__ == '__main__':
             include_depletion=args.include_depletion,
             min_alleles=args.min_alleles,
         )
-        did_nothing = False
-
-    elif args.make_movie:
-        if not (args.pse and args.results_dir):
-            raise ValueError("For making a movie, you must provide --pse and --results_dir")
-        # Imported here, not at module scope: pymol_code pulls in PyMOL, and the
-        # scan has no need of it. A module-level import made the whole tool,
-        # --help included, unusable in a PyMOL-free install.
-        from pymol_code import make_movie_from_pse
-        make_movie_from_pse(args.results_dir, args.pse)
         did_nothing = False
 
     elif args.get_nbhd:

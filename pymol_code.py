@@ -158,6 +158,72 @@ def _add_component_spheres(components, prefix='component'):
     cmd.set_view(view)
 
 
+def show_mutation_spheres(df_mut, mu_mode, scope='', pos_col='aa_pos'):
+    """
+    Show each mutation class as spheres, one named selection per class.
+
+    The selections are what make a session useful afterwards: `denovo`,
+    `case_only` and so on each hold every residue of that class, so they can be
+    recoloured, hidden or zoomed as a unit rather than residue by residue.
+
+    `scope` narrows the selection to one object (e.g. 'target_chain and'), which the
+    complex-structure path needs and the monomer path does not. `pos_col` is the column
+    holding the residue number to select on -- `aa_pos_file` where the PDB is numbered
+    per fragment rather than per protein.
+
+    Returns the names created, in draw order.
+    """
+    created = []
+
+    def _select(name, rows, color):
+        positions = [str(p) for p in rows[pos_col]]
+        if not positions:
+            return
+        prefix = f'{scope} ' if scope else ''
+        cmd.select(name, f"{prefix}resi {'+'.join(positions)} and name CA")
+        cmd.show("spheres", name)
+        cmd.color(color, name)
+        created.append(name)
+
+    if mu_mode:
+        # No control cohort exists, so there is nothing to contrast against; recurrence
+        # is the only extra dimension the data carries.
+        _select("denovo", df_mut[df_mut.ac_case == 1], "salmon")
+        _select("denovo_recurrent", df_mut[df_mut.ac_case >= 2], "firebrick")
+    else:
+        case_only = df_mut[(df_mut.ac_case >= 1) & (df_mut.ac_control == 0)]
+        both = df_mut[(df_mut.ac_case >= 1) & (df_mut.ac_control >= 1)]
+        ctrl_only = df_mut[(df_mut.ac_control >= 1) & (df_mut.ac_case == 0)]
+        _select("control_only", ctrl_only, "blue")
+        _select("case_only", case_only, "red")
+        _select("case_and_control", both, "purple")
+    return created
+
+
+def apply_effect_coloring(positions, effect, mu_mode, selection):
+    """
+    Colour `selection` by per-residue effect size, via the B-factor column.
+
+    Mutation-rate mode uses observed/expected on a diverging scale pinned at 1 (see
+    _obs_exp_to_b); case/control uses the regularized ratio normalized to its own
+    maximum, which has no meaningful anchor and so is left auto-ranged.
+    """
+    if mu_mode:
+        b_values = _obs_exp_to_b(np.asarray(effect, dtype=float))
+        palette, spectrum_range = "ratio_blue white ratio_red", {'minimum': 0.0, 'maximum': 1.0}
+    else:
+        effect = np.asarray(effect, dtype=float)
+        b_values = (effect / (effect.max() or 1.0)) ** 2
+        palette, spectrum_range = "ratio_blue ratio_red", {}
+
+    for pos, b in zip(positions, b_values):
+        cmd.alter(f"{selection} and resi {int(pos)}", f"b={float(b)}")
+    cmd.rebuild()
+    cmd.set_color("ratio_blue", [0.45, 0.78, 1.0])
+    cmd.set_color("ratio_red", [1.0, 0.55, 0.55])
+    cmd.spectrum("b", palette, selection, byres=1, **spectrum_range)
+
+
 def pymol_rvas(uniprot_id, reference_directory, results_directory, pval_file, gene_name=None,
                test='binomial', components=None):
     """Create PyMOL visualizations for RVAS results.
@@ -231,42 +297,10 @@ def pymol_rvas(uniprot_id, reference_directory, results_directory, pval_file, ge
 
             tmp_df = df_rvas[df_rvas['pdb_filename'] == item]
 
-            def _pos_strs(pos_set):
-                return [str(r['aa_pos_file']) for _, r in tmp_df[tmp_df['aa_pos'].isin(pos_set)].iterrows()]
-
-            def _select_show(name, pos_set, color):
-                pos_strs = _pos_strs(pos_set)
-                if not pos_strs:
-                    return
-                cmd.select(name, f"resi {'+'.join(pos_strs)} and name CA")
-                cmd.show("spheres", name)
-                cmd.color(color, name)
-
-            if mu_mode:
-                single = set(tmp_df[tmp_df['ac_case'] == 1]['aa_pos'])
-                multi  = set(tmp_df[tmp_df['ac_case'] >= 2]['aa_pos'])
-                print(f"  {len(single)} residues with one de novo, {len(multi)} with more than one")
-                _select_show("denovo", single, "salmon")
-                _select_show("denovo_recurrent", multi, "firebrick")
-            else:
-                control_mask = (tmp_df['ac_control'] >= 1) & (tmp_df['ac_case'] == 0)
-                case_mask    = (tmp_df['ac_case'] >= 1)    & (tmp_df['ac_control'] == 0)
-                both_mask    = (tmp_df['ac_case'] >= 1)    & (tmp_df['ac_control'] >= 1)
-
-                control_pos = set(tmp_df[control_mask]['aa_pos'])
-                case_pos    = set(tmp_df[case_mask]['aa_pos'])
-                both_pos    = set(tmp_df[both_mask]['aa_pos'])
-
-                # Positions in both sets move to the "both" category
-                final_control = control_pos - case_pos - both_pos
-                final_case    = case_pos    - control_pos - both_pos
-                final_both    = both_pos    | (control_pos & case_pos)
-
-                print(f"  {len(final_control)} control-only, {len(final_case)} case-only, {len(final_both)} both")
-
-                _select_show("control_only",     final_control, "blue")
-                _select_show("case_only",        final_case,    "red")
-                _select_show("case_and_control", final_both,    "purple")
+            if 'aa_pos_file' not in tmp_df:
+                tmp_df = tmp_df.assign(aa_pos_file=tmp_df['aa_pos'])
+            names = show_mutation_spheres(tmp_df, mu_mode, pos_col='aa_pos_file')
+            print(f"  Mutation selections: {', '.join(names) if names else 'none'}")
 
             _add_component_spheres(components)
 
@@ -329,29 +363,14 @@ def pymol_scan_test(uniprot_id, reference_directory, results_directory, pval_fil
         tmp_df['visual_filename'] = tmp_df['pdb_filename'].apply(
             lambda x: os.path.join(pymol_dir, _pse_base(x, gene_name, uniprot_id) + '.pse')
         )
-        if mu_mode:
-            tmp_df['b_value'] = _obs_exp_to_b(tmp_df['obs_exp'])
-            palette = "ratio_blue white ratio_red"
-            # Fixed endpoints rather than the data range, so the white midpoint really is
-            # obs/exp = 1 and the same colour means the same thing in every protein.
-            spectrum_range = {'minimum': 0.0, 'maximum': 1.0}
-        else:
-            tmp_df['b_value'] = (tmp_df['ratio'] / tmp_df['ratio'].max()) ** 2
-            palette = "ratio_blue ratio_red"
-            spectrum_range = {}
+        effect_col = 'obs_exp' if mu_mode else 'ratio'
 
         for v in set(tmp_df['visual_filename']):
             cmd.reinitialize()
             cmd.load(f"{v.split('.')[0]}_gray.pse")
             objects = cmd.get_names('objects')[-1]
-
-            for _, row in tmp_df[tmp_df['visual_filename'] == v].iterrows():
-                cmd.alter(f"{objects} and resi {int(row['aa_pos'])}", f"b={float(row['b_value'])}")
-            cmd.rebuild()
-
-            cmd.set_color("ratio_blue", [0.45, 0.78, 1.0])
-            cmd.set_color("ratio_red",  [1.0, 0.55, 0.55])
-            cmd.spectrum("b", palette, objects, byres=1, **spectrum_range)
+            sub = tmp_df[tmp_df['visual_filename'] == v]
+            apply_effect_coloring(sub['aa_pos'], sub[effect_col], mu_mode, objects)
             cmd.show("cartoon", objects)
             cmd.hide("lines", objects)
             cmd.set("specular", 0.0)
@@ -425,24 +444,7 @@ def pymol_component(uniprot_id, reference_directory, results_directory, pval_fil
 
         in_comp = df_mut[df_mut['aa_pos'].isin(residues)]
 
-        def _spheres(name, positions, color):
-            positions = [int(p) for p in positions]
-            if not positions:
-                return
-            cmd.select(name, f"resi {'+'.join(str(p) for p in positions)} and name CA")
-            cmd.show("spheres", name)
-            cmd.color(color, name)
-
-        if mu_mode:
-            _spheres("denovo", in_comp.loc[in_comp.ac_case == 1, 'aa_pos'], "salmon")
-            _spheres("denovo_recurrent", in_comp.loc[in_comp.ac_case >= 2, 'aa_pos'], "firebrick")
-        else:
-            case_only = in_comp[(in_comp.ac_case >= 1) & (in_comp.ac_control == 0)]
-            both = in_comp[(in_comp.ac_case >= 1) & (in_comp.ac_control >= 1)]
-            ctrl_only = in_comp[(in_comp.ac_control >= 1) & (in_comp.ac_case == 0)]
-            _spheres("control_only", ctrl_only['aa_pos'], "blue")
-            _spheres("case_only", case_only['aa_pos'], "red")
-            _spheres("case_and_control", both['aa_pos'], "purple")
+        show_mutation_spheres(in_comp, mu_mode)
 
         if centers:
             _add_component_spheres([{'label': label, 'centers': centers}])
@@ -460,28 +462,6 @@ def pymol_component(uniprot_id, reference_directory, results_directory, pval_fil
 
     except Exception as e:
         print(f"[ERROR] in pymol_component(): {e}")
-
-
-def make_movie_from_pse(result_directory, pse_name):
-    """Render a PNG and rotating movie from a saved PSE file.
-
-    Looks for {result_directory}/pymol_visualizations/{pse_name}.pse and
-    produces a PNG snapshot and a .mov rotating movie in the same directory.
-    Requires ffmpeg on PATH.
-    """
-    pymol_dir = os.path.join(result_directory, 'pymol_visualizations')
-    os.makedirs(pymol_dir, exist_ok=True)
-    pse = os.path.join(pymol_dir, f"{pse_name}.pse")
-    try:
-        cmd.reinitialize()
-        cmd.load(pse)
-        cmd.ray(2400, 1800)
-        cmd.set("ray_opaque_background", 1)
-        cmd.png(os.path.join(pymol_dir, f"{pse_name}.png"))
-        cmd.movie.add_roll(10, axis='y', start=1)
-        cmd.movie.produce(os.path.join(pymol_dir, f"{pse_name}.mov"))
-    except Exception as e:
-        print(f"[ERROR] Failed to create movie from PSE: {e}")
 
 
 def run_all(uniprot_id, results_directory, reference_directory, pval_file, test='binomial',

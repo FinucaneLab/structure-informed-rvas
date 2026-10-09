@@ -19,421 +19,61 @@ Usage:
 import argparse
 import csv
 import os
-import re
 import sys
-import json
-import time
 import numpy as np
 import pandas as pd
 from collections import defaultdict
-from Bio.Align import PairwiseAligner
 
-try:
-    import requests
-except ImportError:
-    # Only the UniProt annotation paths need network access. Visualization, the
-    # neighborhood residue tables and the feature cross-reference all work offline, so
-    # a missing `requests` must not stop them being imported.
-    class _RequestsUnavailable:
-        def __getattr__(self, name):
-            raise ImportError(
-                'The annotation steps need the `requests` package (pip install requests). '
-                'Visualization and neighborhood feature tables do not.'
-            )
-
-    requests = _RequestsUnavailable()
+from uniprot_annotation import (aggregate_annotations_across_family,
+                                generate_simple_feature_table, resolve_family_members)
 
 
 # ---------------------------------------------------------------------------
 # Alignment utilities
 # ---------------------------------------------------------------------------
 
-def get_pairwise_alignment(seq1, seq2):
-    """Global pairwise alignment with gap-open=-10, gap-extend=-0.5 to penalize fragmented gaps."""
-    aligner = PairwiseAligner()
-    aligner.mode = 'global'
-    aligner.match_score = 1
-    aligner.mismatch_score = 0
-    aligner.open_gap_score = -10
-    aligner.extend_gap_score = -0.5
-    alignments = aligner.align(seq1, seq2)
-    return alignments[0]
 
 
-def alignment_to_strings(alignment):
-    """Convert a Biopython Alignment object to two equal-length strings with '-' for gaps."""
-    coords = alignment.coordinates
-    seq1 = alignment.sequences[0]
-    seq2 = alignment.sequences[1]
-
-    aligned1 = []
-    aligned2 = []
-
-    for i in range(len(coords[0]) - 1):
-        start1, end1 = coords[0][i], coords[0][i+1]
-        start2, end2 = coords[1][i], coords[1][i+1]
-
-        len1 = end1 - start1
-        len2 = end2 - start2
-
-        if len1 == 0:
-            aligned1.extend(['-'] * len2)
-            aligned2.extend(list(seq2[start2:end2]))
-        elif len2 == 0:
-            aligned1.extend(list(seq1[start1:end1]))
-            aligned2.extend(['-'] * len1)
-        else:
-            aligned1.extend(list(seq1[start1:end1]))
-            aligned2.extend(list(seq2[start2:end2]))
-
-    return ''.join(aligned1), ''.join(aligned2)
 
 
-def get_alignment_position(aligned_seq, query_pos):
-    """
-    Return the index in the gapped string `aligned_seq` corresponding to
-    1-indexed position `query_pos` in the ungapped sequence. Returns None if
-    `query_pos` is beyond the end of the sequence.
-    """
-    current_query_pos = 0
-    for align_pos in range(len(aligned_seq)):
-        if aligned_seq[align_pos] != '-':
-            current_query_pos += 1
-        if current_query_pos == query_pos:
-            return align_pos
-    return None
 
 
-def calculate_local_identity(alignment, position, window=5):
-    """Fraction of identical residue pairs in a ±window window around `position` in seq1."""
-    aligned_seq1, aligned_seq2 = alignment_to_strings(alignment)
-    align_pos = get_alignment_position(aligned_seq1, position)
-    if align_pos is None:
-        return 0.0
-
-    start = max(0, align_pos - window)
-    end = min(len(aligned_seq1), align_pos + window + 1)
-    matches = 0
-    comparisons = 0
-
-    for i in range(start, end):
-        if aligned_seq1[i] != '-' and aligned_seq2[i] != '-':
-            comparisons += 1
-            if aligned_seq1[i] == aligned_seq2[i]:
-                matches += 1
-
-    return matches / comparisons if comparisons > 0 else 0.0
 
 
-def calculate_gap_density(alignment, position, window=5):
-    """Fraction of positions that are gaps in either sequence in a ±window window around `position`."""
-    aligned_seq1, aligned_seq2 = alignment_to_strings(alignment)
-    align_pos = get_alignment_position(aligned_seq1, position)
-    if align_pos is None:
-        return 1.0
-
-    start = max(0, align_pos - window)
-    end = min(len(aligned_seq1), align_pos + window + 1)
-    total_positions = end - start
-    if total_positions == 0:
-        return 1.0
-
-    gaps = sum(1 for i in range(start, end)
-               if aligned_seq1[i] == '-' or aligned_seq2[i] == '-')
-    return gaps / total_positions
 
 
-def calculate_position_score(alignment, position):
-    """1.0 if the residue at `position` is an exact match, 0.0 if gapped or mismatched."""
-    aligned_seq1, aligned_seq2 = alignment_to_strings(alignment)
-    align_pos = get_alignment_position(aligned_seq1, position)
-    if align_pos is None:
-        return 0.0
-    if aligned_seq1[align_pos] == '-' or aligned_seq2[align_pos] == '-':
-        return 0.0
-    return 1.0 if aligned_seq1[align_pos] == aligned_seq2[align_pos] else 0.0
 
 
-def calculate_confidence_score(alignment, position):
-    """
-    Weighted annotation-transfer confidence for a single position:
-      0.4 * local_identity + 0.3 * (1 - gap_density) + 0.3 * position_score
-    Ranges 0–1; used to filter transferred annotations before writing output.
-    """
-    local_identity = calculate_local_identity(alignment, position)
-    gap_density = calculate_gap_density(alignment, position)
-    position_score = calculate_position_score(alignment, position)
-    return 0.4 * local_identity + 0.3 * (1 - gap_density) + 0.3 * position_score
 
 
-def get_aligned_position(alignment, query_pos):
-    """
-    Map 1-indexed `query_pos` in seq1 to its 1-indexed position in seq2 via the alignment.
-    Returns None if the aligned column is a gap in seq2.
-    """
-    aligned_seq1, aligned_seq2 = alignment_to_strings(alignment)
-    align_pos = get_alignment_position(aligned_seq1, query_pos)
-    if align_pos is None:
-        return None
-    if aligned_seq2[align_pos] == '-':
-        return None
-    target_pos = sum(1 for i in range(align_pos + 1) if aligned_seq2[i] != '-')
-    return target_pos
 
 
-def transfer_all_annotations(query_seq, target_seq, target_annotations):
-    """
-    Align query to target and transfer every annotation in `target_annotations`
-    to the corresponding query position. Each returned record includes the
-    alignment confidence score so low-quality transfers can be filtered later.
-    `target_annotations` is a dict mapping str(position) -> list of annotation dicts.
-    """
-    alignment = get_pairwise_alignment(query_seq, target_seq)
-    transferred = []
-
-    for query_pos in range(1, len(query_seq) + 1):
-        target_pos = get_aligned_position(alignment, query_pos)
-        if target_pos is None:
-            continue
-        target_pos_str = str(target_pos)
-        if target_pos_str not in target_annotations:
-            continue
-        confidence = calculate_confidence_score(alignment, query_pos)
-        for annotation in target_annotations[target_pos_str]:
-            transferred.append({
-                'query_position': query_pos,
-                'target_position': target_pos,
-                'feature_type': annotation['feature_type'],
-                'feature_description': annotation['description'],
-                'alignment_confidence': confidence
-            })
-
-    return transferred
 
 
 # ---------------------------------------------------------------------------
 # UniProt API utilities
 # ---------------------------------------------------------------------------
 
-def get_protein_family(uniprot_id):
-    """
-    Return the raw SIMILARITY comment from UniProt (e.g. "Belongs to the Kv1
-    potassium channel family"), or None if the protein has no such comment.
-    """
-    url = f"https://rest.uniprot.org/uniprotkb/{uniprot_id}.json"
-    response = requests.get(url)
-    response.raise_for_status()
-    data = response.json()
-    try:
-        for comment in data.get('comments', []):
-            if comment.get('commentType') == 'SIMILARITY':
-                return comment['texts'][0]['value']
-    except (KeyError, IndexError):
-        pass
-    return None
 
 
-def extract_family_name(family_text):
-    """
-    Parse the family name from "Belongs to the X (super)family" text.
-    Returns X (stripped), or None if the pattern does not match.
-    """
-    if not family_text:
-        return None
-    match = re.search(r'Belongs to the (.+?)(super)?family', family_text)
-    if match:
-        return match.group(1).strip()
-    return None
 
 
-def search_family_members_with_annotations(family_name, is_superfamily=False):
-    """
-    Search UniProt for proteins in `family_name` that have PDB structures.
-    Tries "family" then "superfamily" suffix (or the reverse if `is_superfamily`).
-    Returns a list of UniProt accessions, or [] if nothing is found.
-    """
-    url = "https://rest.uniprot.org/uniprotkb/search"
-    if not family_name.endswith(' '):
-        family_name = family_name + ' '
-    suffixes = ['superfamily', 'family'] if is_superfamily else ['family', 'superfamily']
-
-    for suffix in suffixes:
-        params = {
-            'query': f'family:"{family_name}{suffix}" AND database:pdb',
-            'fields': 'accession,organism_name,ft_binding,ft_act_site,ft_site,xref_pdb',
-            'size': 500,
-            'format': 'json'
-        }
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-        protein_list = [p['primaryAccession'] for p in response.json().get('results', [])]
-        if protein_list:
-            return protein_list
-
-    return []
 
 
-def get_protein_list(uniprot_id):
-    """
-    Return a list of UniProt accessions for PDB-annotated family members of
-    `uniprot_id`. Raises ValueError if no family information is found or if the
-    family name cannot be parsed from the SIMILARITY comment.
-    """
-    family_text = get_protein_family(uniprot_id)
-    if not family_text:
-        raise ValueError(
-            f"No family information found for {uniprot_id}. "
-            f"Check https://www.uniprot.org/uniprotkb/{uniprot_id}"
-        )
-    family_name = extract_family_name(family_text)
-    if not family_name:
-        raise ValueError(f"Could not extract family name from: {family_text}")
-
-    is_superfamily = 'superfamily' in family_text.lower()
-    print(f'Family name: {family_name}')
-    if is_superfamily:
-        print('Type: superfamily')
-
-    protein_list = search_family_members_with_annotations(family_name, is_superfamily)
-    print(f'Found {len(protein_list)} family members with PDB structures')
-    return protein_list
 
 
-def get_uniprot_sequence(uniprot_id):
-    """Fetch the canonical amino acid sequence for `uniprot_id` from UniProt."""
-    response = requests.get(f"https://rest.uniprot.org/uniprotkb/{uniprot_id}")
-    response.raise_for_status()
-    return response.json().get('sequence', {}).get('value', '')
 
 
-def get_functional_sites_detailed(uniprot_id, cache_dir=None):
-    """
-    Fetch functional site annotations from UniProt for `uniprot_id`.
-
-    Returns a dict mapping str(residue_position) -> list of
-    {position, feature_type, description} dicts. Results are cached to
-    {cache_dir}/{uniprot_id}.json so repeated calls are free.
-
-    Included feature types: Binding site, Active site, Site, Metal binding,
-    Calcium binding, DNA binding, Nucleotide binding, Modified residue,
-    Cross-link, Transmembrane, Motif, Region, Domain, Topological domain,
-    Zinc finger.
-
-    Range features spanning >250 residues are excluded to avoid capturing
-    whole-protein features (e.g. Chain, Propeptide).
-    """
-    if cache_dir:
-        os.makedirs(cache_dir, exist_ok=True)
-        cache_file = os.path.join(cache_dir, f"{uniprot_id}.json")
-        if os.path.exists(cache_file):
-            with open(cache_file, 'r') as f:
-                return json.load(f)
-
-    functional_sites = {}
-
-    try:
-        url = f"https://rest.uniprot.org/uniprotkb/{uniprot_id}.json"
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        features = data.get('features', [])
-
-        functional_types = {
-            'Binding site', 'Active site', 'Site', 'Metal binding',
-            'Calcium binding', 'DNA binding', 'Nucleotide binding',
-            'Modified residue', 'Cross-link', 'Transmembrane', 'Motif',
-            'Region', 'Domain', 'Topological domain', 'Zinc finger',
-        }
-
-        for feature in features:
-            if feature.get('type') not in functional_types:
-                continue
-            location = feature.get('location', {})
-            feature_type = feature.get('type')
-            description = feature.get('description', '')
-            if 'ligand' in feature:
-                ligand_name = feature['ligand'].get('name', '')
-                if ligand_name:
-                    description = f"{description} Ligand: {ligand_name}".strip()
-
-            positions_to_add = []
-            if 'position' in location:
-                pos = location['position'].get('value')
-                if pos:
-                    positions_to_add.append(int(pos))
-            elif 'start' in location and 'end' in location:
-                start_pos = location['start'].get('value')
-                end_pos = location['end'].get('value')
-                if start_pos and end_pos and (end_pos - start_pos < 250):
-                    positions_to_add.extend(range(int(start_pos), int(end_pos) + 1))
-
-            for pos in positions_to_add:
-                site = {'position': pos, 'feature_type': feature_type, 'description': description}
-                pos_str = str(pos)
-                if pos_str not in functional_sites:
-                    functional_sites[pos_str] = []
-                functional_sites[pos_str].append(site)
-
-        time.sleep(0.1)
-
-    except Exception as e:
-        print(f"Warning: Error fetching data for {uniprot_id}: {e}")
-
-    if cache_dir:
-        with open(cache_file, 'w') as f:
-            json.dump(functional_sites, f, indent=2)
-
-    return functional_sites
 
 
-def save_alignment_cache(query_id, target_id, aligned_seq1, aligned_seq2, cache_dir):
-    """Save a gapped alignment string pair to {cache_dir}/alignment_{query_id}_{target_id}.json."""
-    os.makedirs(cache_dir, exist_ok=True)
-    cache_file = os.path.join(cache_dir, f"alignment_{query_id}_{target_id}.json")
-    with open(cache_file, 'w') as f:
-        json.dump({'seqA': aligned_seq1, 'seqB': aligned_seq2}, f)
 
 
-def load_alignment_cache(query_id, target_id, cache_dir):
-    """Load a cached alignment string pair, or return None if not cached."""
-    cache_file = os.path.join(cache_dir, f"alignment_{query_id}_{target_id}.json")
-    if os.path.exists(cache_file):
-        with open(cache_file, 'r') as f:
-            return json.load(f)
-    return None
 
 
 # ---------------------------------------------------------------------------
 # Annotation transfer logic
 # ---------------------------------------------------------------------------
 
-def filter_family_by_annotation_count(family_members, cache_dir, max_members=50):
-    """
-    Trim `family_members` to the `max_members` proteins with the most annotated
-    positions. Used to keep runtime manageable when a family has hundreds of members.
-    """
-    functional_cache = os.path.join(cache_dir, 'functional_sites')
-    os.makedirs(functional_cache, exist_ok=True)
-    print(f"\nFiltering {len(family_members)} family members to top {max_members} by annotation count...")
-
-    annotation_counts = []
-    for member_id in family_members:
-        try:
-            annotations = get_functional_sites_detailed(member_id, functional_cache)
-            annotation_counts.append((member_id, len(annotations)))
-        except Exception:
-            annotation_counts.append((member_id, 0))
-
-    annotation_counts.sort(key=lambda x: x[1], reverse=True)
-    top_members = [mid for mid, _ in annotation_counts[:max_members]]
-
-    print(f"Selected {len(top_members)} family members with most annotations")
-    print(f"  Top member: {annotation_counts[0][0]} with {annotation_counts[0][1]} positions")
-    if len(annotation_counts) > 1:
-        print(f"  Median: {annotation_counts[len(annotation_counts)//2][1]} positions")
-        print(f"  Bottom: {annotation_counts[-1][1]} positions")
-
-    return top_members
 
 
 def _load_gene_map(reference_dir):
@@ -567,10 +207,11 @@ def _nbhd_features_table(nbhd, df_mut, features_df, mu_mode=False):
 
 def _annotate_and_save(uniprot_id, features_path, cache_dir, confidence_threshold=0.8):
     """
-    Convenience wrapper used by cmd_run_all. If `features_path` already exists,
-    load and return it (no network calls). Otherwise run the full annotation
-    pipeline (family search → alignment → transfer → feature table) and save
-    the result to `features_path`.
+    Functional-site features for one protein, cached on disk.
+
+    If `features_path` already exists it is loaded and returned, so re-running over a
+    list of proteins costs nothing for the ones already done. Otherwise the full
+    pipeline runs: family lookup, annotation transfer, feature table.
     """
     if os.path.exists(features_path):
         print(f"  Loading existing features from {features_path}")
@@ -579,37 +220,7 @@ def _annotate_and_save(uniprot_id, features_path, cache_dir, confidence_threshol
     os.makedirs(os.path.dirname(os.path.abspath(features_path)), exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
 
-    no_family_info = False
-    try:
-        family_members = get_protein_list(uniprot_id)
-    except ValueError as e:
-        print(f"  Warning: {e}")
-        print("  No family info; using direct annotations only.")
-        family_members = []
-        no_family_info = True
-
-    if not family_members and not no_family_info:
-        family_text = get_protein_family(uniprot_id)
-        family_name = extract_family_name(family_text)
-        if family_name:
-            is_superfamily = 'superfamily' in (family_text or '').lower()
-            suffixes = ['superfamily', 'family'] if is_superfamily else ['family', 'superfamily']
-            for suffix in suffixes:
-                params = {'query': f'family:"{family_name} {suffix}" AND reviewed:true',
-                          'fields': 'accession', 'size': 50, 'format': 'json'}
-                r = requests.get("https://rest.uniprot.org/uniprotkb/search", params=params)
-                if r.status_code == 200 and r.json().get('results'):
-                    family_members = [x['primaryAccession'] for x in r.json()['results']]
-                    break
-            if not family_members:
-                for suffix in suffixes:
-                    params = {'query': f'family:"{family_name} {suffix}"',
-                              'fields': 'accession', 'size': 50, 'format': 'json'}
-                    r = requests.get("https://rest.uniprot.org/uniprotkb/search", params=params)
-                    if r.status_code == 200 and r.json().get('results'):
-                        family_members = [x['primaryAccession'] for x in r.json()['results']]
-                        break
-
+    family_members = resolve_family_members(uniprot_id, cache_dir)
     annotations_df = aggregate_annotations_across_family(
         uniprot_id, family_members, cache_dir, confidence_threshold=0.7
     )
@@ -656,168 +267,8 @@ def positions_to_pymol_notation(positions):
     return "+".join(ranges)
 
 
-def aggregate_annotations_across_family(query_id, family_members, cache_dir, confidence_threshold=0.7):
-    """
-    Core annotation pipeline. First adds the query protein's own annotations
-    at confidence 1.0, then for each family member: fetches its sequence and
-    functional sites, aligns it to the query, and transfers annotations to
-    query positions using calculate_confidence_score.
-
-    Returns a flat DataFrame with one row per (query_position, feature, source_protein),
-    including all transfers regardless of confidence — filtering happens downstream
-    in generate_simple_feature_table.
-    """
-    print("\n=== Annotation Transfer ===")
-    print(f"Query protein: {query_id}")
-    print(f"Family members: {len(family_members)}")
-
-    query_seq = get_uniprot_sequence(query_id)
-    print(f"Query sequence length: {len(query_seq)}")
-
-    functional_cache = os.path.join(cache_dir, 'functional_sites')
-    alignment_cache = os.path.join(cache_dir, 'alignments')
-    os.makedirs(functional_cache, exist_ok=True)
-    os.makedirs(alignment_cache, exist_ok=True)
-
-    all_transferred = []
-
-    print(f"\n[0/{len(family_members)}] Processing {query_id} (query itself)...")
-    query_annotations = get_functional_sites_detailed(query_id, functional_cache)
-    print(f"  Functional sites: {len(query_annotations)} positions annotated")
-
-    for pos_str, annotations in query_annotations.items():
-        pos = int(pos_str)
-        for annot in annotations:
-            all_transferred.append({
-                'query_position': pos,
-                'target_position': pos,
-                'feature_type': annot['feature_type'],
-                'feature_description': annot['description'],
-                'alignment_confidence': 1.0,
-                'source_protein': query_id
-            })
-    print(f"  Added: {len([a for a in all_transferred if a['source_protein'] == query_id])} annotations from query itself")
-
-    for i, target_id in enumerate(family_members, 1):
-        print(f"\n[{i}/{len(family_members)}] Processing {target_id}...")
-        if target_id == query_id:
-            print("  Skipping (already processed as query)")
-            continue
-
-        try:
-            target_seq = get_uniprot_sequence(target_id)
-            print(f"  Target sequence length: {len(target_seq)}")
-
-            target_annotations = get_functional_sites_detailed(target_id, functional_cache)
-            print(f"  Functional sites: {len(target_annotations)} positions annotated")
-
-            if len(target_annotations) == 0:
-                print("  Skipping (no functional sites)")
-                continue
-
-            cached_alignment = load_alignment_cache(query_id, target_id, alignment_cache)
-            if cached_alignment:
-                print("  Using cached alignment")
-                alignment = get_pairwise_alignment(query_seq, target_seq)
-                aligned_seq1, aligned_seq2 = alignment_to_strings(alignment)
-            else:
-                print("  Computing alignment...")
-                alignment = get_pairwise_alignment(query_seq, target_seq)
-                aligned_seq1, aligned_seq2 = alignment_to_strings(alignment)
-                save_alignment_cache(query_id, target_id, aligned_seq1, aligned_seq2, alignment_cache)
-
-            transferred = transfer_all_annotations(query_seq, target_seq, target_annotations)
-            print(f"  Transferred: {len(transferred)} annotations")
-
-            for item in transferred:
-                item['source_protein'] = target_id
-
-            feature_groups = defaultdict(list)
-            for item in transferred:
-                feature_groups[(item['feature_type'], item['feature_description'])].append(item)
-
-            print("  Feature details:")
-            for (feat_type, feat_desc), items in feature_groups.items():
-                source_positions = set()
-                for pos_str, annotations in target_annotations.items():
-                    for annot in annotations:
-                        if annot['feature_type'] == feat_type and annot['description'] == feat_desc:
-                            source_positions.add(int(pos_str))
-
-                high_conf_items = [it for it in items if it['alignment_confidence'] >= confidence_threshold]
-                query_positions = sorted(set(it['query_position'] for it in high_conf_items))
-                target_positions = sorted(set(it['target_position'] for it in high_conf_items))
-
-                print(f"    [{feat_type}] {feat_desc[:60]}...")
-                print(f"      Source: {len(source_positions)} positions in {target_id}")
-                print(f"      Transferred: {len(high_conf_items)} high-confidence (≥{confidence_threshold}) positions to query")
-                if query_positions:
-                    qr = f"{min(query_positions)}-{max(query_positions)}" if len(query_positions) > 1 else str(query_positions[0])
-                    tr = f"{min(target_positions)}-{max(target_positions)}" if len(target_positions) > 1 else str(target_positions[0])
-                    print(f"      Query positions: {qr} (from target {tr})")
-
-            all_transferred.extend(transferred)
-
-        except Exception as e:
-            print(f"  Error processing {target_id}: {e}")
-            continue
-
-    if not all_transferred:
-        print("\nWarning: No annotations transferred!")
-        return pd.DataFrame(columns=['query_position', 'source_protein', 'feature_type',
-                                     'feature_description', 'alignment_confidence'])
-
-    df = pd.DataFrame(all_transferred)
-    print(f"\n=== Transfer Complete ===")
-    print(f"Total annotations transferred: {len(df)}")
-    print(f"Unique query positions annotated: {df['query_position'].nunique()}")
-    print(f"Mean confidence: {df['alignment_confidence'].mean():.3f}")
-    return df
 
 
-def generate_simple_feature_table(annotations_df, confidence_threshold=0.8):
-    """
-    Collapse the per-position annotation DataFrame from aggregate_annotations_across_family
-    into one row per unique (feature_type, feature_description), keeping only
-    annotations with alignment_confidence >= confidence_threshold.
-
-    Output columns: feature_name, functional_site_category, is_major_functional_site,
-    residues_pymol, num_positions, num_supporting_proteins, source_uniprot_ids,
-    mean_confidence.
-    """
-    print("\n=== Generating Feature Table ===")
-    print(f"Confidence threshold: {confidence_threshold}")
-
-    total_before = len(annotations_df)
-    annotations_df = annotations_df[annotations_df['alignment_confidence'] >= confidence_threshold].copy()
-    total_after = len(annotations_df)
-    print(f"Filtered annotations: {total_before} → {total_after} (removed {total_before - total_after} low-confidence)")
-
-    if len(annotations_df) == 0:
-        print("\nWarning: No annotations remain after confidence filtering!")
-        return pd.DataFrame(columns=['feature_name', 'functional_site_category', 'is_major_functional_site',
-                                     'residues_pymol', 'num_positions', 'num_supporting_proteins',
-                                     'source_uniprot_ids', 'mean_confidence'])
-
-    features = []
-    for (feat_type, feat_desc), group in annotations_df.groupby(['feature_type', 'feature_description']):
-        positions = group['query_position'].unique().tolist()
-        source_proteins = sorted(group['source_protein'].unique())
-        features.append({
-            'feature_name': feat_desc,
-            'functional_site_category': feat_type,
-            'is_major_functional_site': feat_type in ['Binding site', 'Domain', 'Active site', 'Site'],
-            'residues_pymol': positions_to_pymol_notation(positions),
-            'num_positions': len(positions),
-            'num_supporting_proteins': len(source_proteins),
-            'source_uniprot_ids': ', '.join(source_proteins),
-            'mean_confidence': round(group['alignment_confidence'].mean(), 3)
-        })
-
-    features_df = pd.DataFrame(features)
-    features_df = features_df.sort_values(['functional_site_category', 'num_positions'], ascending=[True, False])
-    print(f"\nGenerated {len(features_df)} unique features")
-    return features_df
 
 
 # ---------------------------------------------------------------------------
@@ -826,10 +277,10 @@ def generate_simple_feature_table(annotations_df, confidence_threshold=0.8):
 
 def cmd_annotate(args):
     """
-    CLI handler for `annotate`. Fetches family members from UniProt, transfers
-    their functional site annotations to the query protein via pairwise alignment,
-    and writes a features TSV. Falls back to the query protein's own annotations
-    if no family information is available. Results are cached so re-runs are fast.
+    CLI handler for `annotate`. Transfers functional site annotations from the query's
+    family members onto the query via pairwise alignment, and writes a features TSV.
+    Falls back to the protein's own annotations when it has no family record. Results
+    are cached, so re-runs across a family are fast.
     """
     print(f"Simple functional site annotation for {args.uniprot_id}")
     print(f"Output will be saved to: {args.output_file}")
@@ -839,75 +290,28 @@ def cmd_annotate(args):
     os.makedirs(args.cache_dir, exist_ok=True)
 
     print("\n=== Fetching Family Members ===")
-    no_family_info = False
-    try:
-        family_members = get_protein_list(args.uniprot_id)
-    except ValueError as e:
-        print(f"Warning: {e}")
-        print("No family information found; using direct annotations from the protein itself.")
-        family_members = []
-        no_family_info = True
-
-    if len(family_members) == 0 and not no_family_info:
-        print("No family members with PDB found. Searching without PDB requirement...")
-        family_text = get_protein_family(args.uniprot_id)
-        family_name = extract_family_name(family_text)
-        is_superfamily = 'superfamily' in family_text.lower()
-        suffixes = ['superfamily', 'family'] if is_superfamily else ['family', 'superfamily']
-
-        for suffix in suffixes:
-            params = {
-                'query': f'family:"{family_name} {suffix}" AND reviewed:true',
-                'fields': 'accession',
-                'size': 50,
-                'format': 'json'
-            }
-            response = requests.get("https://rest.uniprot.org/uniprotkb/search", params=params)
-            if response.status_code == 200:
-                results = response.json().get('results', [])
-                if results:
-                    family_members = [r['primaryAccession'] for r in results]
-                    print(f"Found {len(family_members)} reviewed family members (max 50)")
-                    break
-
-        if len(family_members) == 0:
-            for suffix in suffixes:
-                params = {
-                    'query': f'family:"{family_name} {suffix}"',
-                    'fields': 'accession',
-                    'size': 50,
-                    'format': 'json'
-                }
-                response = requests.get("https://rest.uniprot.org/uniprotkb/search", params=params)
-                if response.status_code == 200:
-                    results = response.json().get('results', [])
-                    if results:
-                        family_members = [r['primaryAccession'] for r in results]
-                        print(f"Found {len(family_members)} family members (reviewed + unreviewed, max 50)")
-                        break
+    family_members = resolve_family_members(args.uniprot_id, args.cache_dir,
+                                            max_members=args.max_family_members)
 
     annotations_df = aggregate_annotations_across_family(
-        args.uniprot_id, family_members, args.cache_dir,
-        confidence_threshold=0.7
+        args.uniprot_id, family_members, args.cache_dir, confidence_threshold=0.7
     )
-
     features_df = generate_simple_feature_table(annotations_df, args.confidence_threshold)
 
     output_dir = os.path.dirname(args.output_file)
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir)
-
     features_df.to_csv(args.output_file, sep='\t', index=False)
 
     print(f"\n{'='*80}")
     print(f"Output saved to: {args.output_file}")
     print(f"{'='*80}")
 
-    print("\nFeature summary by category:")
-    type_counts = features_df.groupby('functional_site_category').size().sort_values(ascending=False)
-    for feat_type, count in type_counts.items():
-        print(f"  {feat_type}: {count} unique features")
-
+    if len(features_df):
+        print("\nFeature summary by category:")
+        counts = features_df.groupby('functional_site_category').size().sort_values(ascending=False)
+        for feat_type, count in counts.items():
+            print(f"  {feat_type}: {count} unique features")
     return 0
 
 
@@ -997,25 +401,10 @@ def _make_mut_pse(pymol_cmd, input_cif, chain, uniprot_id, pval_file, output_pse
     pymol_cmd.set("ray_trace_mode", 1)
     pymol_cmd.set("ray_trace_gain", 0.15)
 
-    def _select_show(name, positions, color):
-        if not positions:
-            return
-        resi_str = '+'.join(str(p) for p in positions)
-        pymol_cmd.select(name, f"target_chain and resi {resi_str} and name CA")
-        pymol_cmd.show("spheres", name)
-        pymol_cmd.color(color, name)
-
-    if mu_mode:
-        _select_show("denovo",           df_mut[df_mut['ac_case'] == 1]['aa_pos'].tolist(), "salmon")
-        _select_show("denovo_recurrent", df_mut[df_mut['ac_case'] >= 2]['aa_pos'].tolist(), "firebrick")
-    else:
-        control_mask = (df_mut['ac_control'] >= 1) & (df_mut['ac_case'] == 0)
-        case_mask    = (df_mut['ac_case']    >= 1) & (df_mut['ac_control'] == 0)
-        both_mask    = (df_mut['ac_case']    >= 1) & (df_mut['ac_control'] >= 1)
-
-        _select_show("control_only",     df_mut[control_mask]['aa_pos'].tolist(), "blue")
-        _select_show("case_only",        df_mut[case_mask]['aa_pos'].tolist(),    "red")
-        _select_show("case_and_control", df_mut[both_mask]['aa_pos'].tolist(),    "purple")
+    from pymol_code import show_mutation_spheres
+    # The same named selections as the whole-chain sessions, scoped to the extracted
+    # chain so the rest of the complex is left alone.
+    show_mutation_spheres(df_mut, mu_mode, scope='target_chain and')
 
     pymol_cmd.save(output_pse)
     print(f"[OK] Saved mutations session to {output_pse}")
@@ -1077,24 +466,9 @@ def cmd_color(args):
     if not residue_ratios:
         raise RuntimeError(f"No ratio data found for UniProt ID {args.uniprot}")
 
-    if mu_mode:
-        from pymol_code import _obs_exp_to_b
-        b_values = {resi: float(_obs_exp_to_b(v)) for resi, v in residue_ratios.items()}
-        palette = "ratio_blue white ratio_red"
-        spectrum_range = {'minimum': 0.0, 'maximum': 1.0}
-    else:
-        max_ratio = max(residue_ratios.values()) or 1.0
-        b_values = {resi: (v / max_ratio) ** 2 for resi, v in residue_ratios.items()}
-        palette = "ratio_blue ratio_red"
-        spectrum_range = {}
-
-    for resi, b in b_values.items():
-        pymol_cmd.alter(f"target_chain and resi {resi}", f"b={b}")
-
-    pymol_cmd.rebuild()
-    pymol_cmd.set_color("ratio_blue", [0.45, 0.78, 1.0])
-    pymol_cmd.set_color("ratio_red",  [1.0, 0.55, 0.55])
-    pymol_cmd.spectrum("b", palette, "target_chain", byres=1, **spectrum_range)
+    from pymol_code import apply_effect_coloring
+    apply_effect_coloring(list(residue_ratios.keys()), list(residue_ratios.values()),
+                          mu_mode, "target_chain")
     pymol_cmd.set("specular", 0.0)
     pymol_cmd.set("ambient", 0.4)
     pymol_cmd.set("ray_trace_mode", 1)
@@ -1532,6 +906,10 @@ def main():
     p_annotate.add_argument('--cache-dir', default='cache', help='Cache directory (default: cache)')
     p_annotate.add_argument('--confidence-threshold', type=float, default=0.8,
                             help='Minimum alignment confidence to include (default: 0.8)')
+    p_annotate.add_argument('--max-family-members', type=int, default=50,
+                            help='Cap the family at this many best-annotated members '
+                                 '(default: 50). UniProt returns up to 500 for a large '
+                                 'family, and each one costs a full-length alignment')
 
     # -- nbhd-features subcommand --
     p_nbhd = subparsers.add_parser(

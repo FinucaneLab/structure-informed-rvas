@@ -239,6 +239,11 @@ To annotate a single protein, use the `annotate` subcommand:
 python structure-informed-rvas/visualize_and_interpret.py annotate Q09470 results_epi25/annotations/Q09470_features.tsv
 ```
 
+The family is capped at the 50 best-annotated members (`--max-family-members`). UniProt
+returns up to 500 for a large family and each one costs a full-length pairwise
+alignment, so the cap is most of the difference between a fast run and a slow one; the
+members it drops are the ones with least to transfer.
+
 This writes a TSV with one row per functional feature (feature type, positions, description, alignment confidence). Intermediate alignment results are cached so that re-runs across multiple proteins in the same family are fast.
 
 To cross-reference a specific neighborhood with the resulting feature table, use `nbhd-features`:
