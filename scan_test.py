@@ -7,7 +7,7 @@ import h5py
 from scipy.stats import fisher_exact, binom
 from scipy import special
 from utils import (get_adjacency_matrix, valid_for_fisher, write_dataset, read_p_values,
-                   check_keep_mask, neighborhood_retention, conditioning_keep_mask)
+                   check_keep_mask, neighborhood_retention, build_conditioning_mask)
 from logger_config import get_logger
 from empirical_fdr import compute_fdr
 
@@ -334,14 +334,16 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
             df = df_rvas[df_rvas.uniprot_id == uniprot_id]
 
             keep_residues = None
-            centers = conditioning.get(uniprot_id)
-            if centers:
-                keep_residues, _, removed = conditioning_keep_mask(
-                    pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id, centers, pae_cutoff
+            entry = conditioning.get(uniprot_id)
+            if entry:
+                keep_residues, _, removed = build_conditioning_mask(
+                    pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id, entry, pae_cutoff
                 )
-                for aa_pos, n_removed in removed.items():
-                    logger.info(f'{uniprot_id}: conditioning out neighborhood of residue '
-                                f'{aa_pos} ({n_removed} residues)')
+                for key, n_removed in removed.items():
+                    what = ('component' if key == 'residues'
+                            else f'neighborhood of residue {key}')
+                    logger.info(f'{uniprot_id}: conditioning out {what} '
+                                f'({n_removed} residues)')
 
             if (sum(df.ac_case) < 5) or (sum(df.ac_control) < 5):
                 logger.warning(f'{uniprot_id}: There must be at least 5 case and 5 control alleles. Skipping.')

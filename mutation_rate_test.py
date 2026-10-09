@@ -37,7 +37,7 @@ import pandas as pd
 from scipy.stats import poisson, binom
 
 from utils import (get_adjacency_matrix, write_dataset, check_keep_mask,
-                   conditioning_keep_mask)
+                   build_conditioning_mask)
 from logger_config import get_logger
 from empirical_fdr import compute_fdr
 from scan_test import (MULTI_RADII_SMALL, MULTI_RADII_BIG, P_FLOOR,
@@ -592,14 +592,16 @@ def _process_proteins_batch_mu(df_rvas, uniprot_id_list, reference_dir, radius, 
             df = df_rvas[df_rvas.uniprot_id == uniprot_id]
 
             keep_residues = None
-            centers = conditioning.get(uniprot_id)
-            if centers:
-                keep_residues, _, removed = conditioning_keep_mask(
-                    pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id, centers, pae_cutoff
+            entry = conditioning.get(uniprot_id)
+            if entry:
+                keep_residues, _, removed = build_conditioning_mask(
+                    pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id, entry, pae_cutoff
                 )
-                for aa_pos, n_removed in removed.items():
-                    logger.info(f'{uniprot_id}: conditioning out neighborhood of residue '
-                                f'{aa_pos} ({n_removed} residues)')
+                for key, n_removed in removed.items():
+                    what = ('component' if key == 'residues'
+                            else f'neighborhood of residue {key}')
+                    logger.info(f'{uniprot_id}: conditioning out {what} '
+                                f'({n_removed} residues)')
 
             # Derive a per-protein stream from the seed so the null draws stay
             # independent across proteins. The stream depends on the protein's index in

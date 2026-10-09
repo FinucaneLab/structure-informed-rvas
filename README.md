@@ -522,29 +522,72 @@ A gene can carry more than one 3D signal, but a single strong neighborhood makes
 hard to see: every neighborhood overlapping it inherits its variants, so the second,
 third and fourth best hits in a gene are usually the same cluster viewed through
 slightly shifted windows. Conditional analysis answers the question directly. Call the
-best neighborhood, mask it out, and scan what is left.
+signal, mask it out, and scan what is left.
 
-`--conditional` does this automatically, and works with both nulls -- the standard
-case/control 3DNT and the mutation-rate 3DNT.
+**This runs by default** with `--run-3dnt`, for both nulls. Pass `--no-conditional` to
+skip it. It also does not apply, silently, with `--fdr-only`, with `--remove-nbhd`, or
+without `--run-3dnt`.
 
 ```
 python structure-informed-rvas/run.py \
   --rvas-data-to-map input/SCHEMA_tutorial.tsv.gz \
   --reference-dir sir-reference-data/ \
   --results-dir results/ \
-  --run-3dnt \
-  --conditional
+  --run-3dnt
 ```
 
-Round 0 is the ordinary scan. Then, in each round, every gene whose top hit clears the
-cutoff has that neighborhood masked out and is scanned again. Genes without a hit are
-never re-scanned, so a round costs one scan per gene still carrying signal rather than a
-full exome scan. The loop stops when no gene has a further hit, or at
-`--conditional-max-rounds` (default 5).
+### Components: the unit that gets conditioned on
+
+The thing masked is a *component*, not a single neighborhood. One real signal is
+reported by every window that overlaps it -- in the ASD analysis the 20 genes with an
+FWER-significant neighborhood carry 746 FDR-significant neighborhoods between them --
+so masking only the best window leaves the rest of the same signal in place for the next
+round to re-find.
+
+Two neighborhoods join the same component when **they share at least one case-mutated
+residue**. The rule is about the mutations, not the geometry: plain residue overlap
+connects any two centres within roughly twice the radius whether or not a variant sits in
+the overlap, which chains distinct sites together across a domain. Requiring a shared
+mutated residue means the two windows are reporting the same variants, which is what
+makes them the same finding. Membership is transitive, so a run of windows walking along
+one cluster of de novos is one component.
+
+Two different gates:
+
+| gate | flag | default | what it decides |
+| --- | --- | --- | --- |
+| gene | `--conditional-gene-criterion` / `--conditional-gene-cutoff` | `fwer` < 0.05 | whether a gene is considered at all |
+| member | `--conditional-criterion` / `--conditional-cutoff` | `fdr` < `--fdr-cutoff` | which neighborhoods make up its components |
+
+A gene therefore qualifies on strong evidence but conditions on everything that evidence
+is spread across. FWER significance implies FDR significance at the same cutoff, so the
+gate never admits a gene whose qualifying neighborhood is then left out of its component.
+
+Round 0 is the ordinary scan. Then each round masks each active gene's **top component**
+-- the one holding its best neighborhood -- and re-scans. Genes without a hit are never
+re-scanned, so a round costs one scan per gene still carrying signal rather than a full
+exome scan. The gene gate is re-applied each round, so a gene continues only on fresh
+FWER-strength evidence. The loop stops when no gene has a further component, or at
+`--conditional-max-rounds` (default 5) -- in practice it usually stops much earlier.
+
+### Expect round 1 to be mostly empty, and why
+
+Conditioning on a whole component removes a great deal more than one neighborhood did.
+Measured on the ASD analysis it takes out a median of **13% of a gene's residues but 73%
+of its de novos**; three genes are left with none at all and seven more with one or two.
+
+Those genes are dropped before the re-scan rather than re-scanned to produce a table of
+p = 1. Test B conditions on the gene's remaining de novo total, so with one or two left
+no neighborhood can reach significance and the empty result is arithmetic, not evidence
+of absence. The bar is `--min-denovo`, the same filter a gene had to clear to enter the
+analysis; the log names the genes and their remaining counts.
+
+So an empty round 1 is the normal outcome and means "all of this gene's signal was in
+that component", not "the conditional analysis failed".
 
 ### What gets masked
 
-The residues of the called neighborhood are zeroed in place: their case and control
+The residues of the called component are zeroed in place: their case and control
 allele counts, and -- under the mutation-rate null -- their mutational opportunity `m`
 along with them.
 
@@ -596,8 +639,20 @@ all_proteins.fdr.tsv               round 0, identical to a plain run
 all_proteins.pvals.h5
 all_proteins.fdr.round1.tsv        full exome-wide table for each later round
 all_proteins.pvals.round1.h5
+all_proteins.fdr.components.tsv    every component found, all rounds
 all_proteins.fdr.conditional.tsv   one row per independent signal, all rounds
 ```
+
+`components.tsv` carries, per component: `residues_pymol` (the union of its member
+neighborhoods, in PyMOL selection notation), `centers_pymol`, `case_pymol` and
+`case_detail` (`pos:count`, so recurrence survives), counts of case residues and alleles,
+the lead neighborhood and its statistics, and `seq_span_aa`. Case/control runs add
+`control_pymol` and control counts; mutation-rate runs add `mu_component` instead, since
+there is no control cohort.
+
+`seq_span_aa` is the span along the *sequence*, not a spatial diameter. A large value is
+not a defect -- it means the component is assembled in 3D from parts of the chain that
+are far apart in sequence, which is exactly what 3DNT exists to find.
 
 The conditional table adds `round`, `conditioned_on` (the positions masked before that
 round) and `n_conditioned_nbhds` to the usual result columns. A gene with three rows

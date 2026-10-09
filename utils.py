@@ -401,6 +401,45 @@ def check_keep_mask(keep, n_res, uniprot_id=''):
     return keep
 
 
+def positions_to_pymol_notation(positions):
+    """
+    Encode a collection of 1-based integer positions as a compact PyMOL selection
+    string using run-length range syntax, e.g. [1,2,3,5,6] -> "1-3+5-6".
+    """
+    if positions is None:
+        return ""
+    positions = sorted(set(int(p) for p in positions))
+    if not positions:
+        return ""
+    ranges = []
+    start = end = positions[0]
+    for pos in positions[1:]:
+        if pos == end + 1:
+            end = pos
+        else:
+            ranges.append(str(start) if start == end else f"{start}-{end}")
+            start = end = pos
+    ranges.append(str(start) if start == end else f"{start}-{end}")
+    return "+".join(ranges)
+
+
+def parse_pymol_positions(pymol_str):
+    """Parse PyMOL residue notation like '10+20-25+30' back to a set of integers."""
+    if not pymol_str:
+        return set()
+    positions = set()
+    for part in str(pymol_str).split('+'):
+        part = part.strip()
+        if not part:
+            continue
+        if '-' in part:
+            start, end = part.split('-', 1)
+            positions.update(range(int(start), int(end) + 1))
+        else:
+            positions.add(int(part))
+    return positions
+
+
 def residues_in_nbhd_idx(adjacency_matrix, center_aa_pos):
     """
     Zero-based row indices of the residues in the neighborhood centered on the
@@ -417,20 +456,35 @@ def residues_in_nbhd_idx(adjacency_matrix, center_aa_pos):
 
 
 def conditioning_keep_mask(pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id,
-                           centers, pae_cutoff):
+                           centers, pae_cutoff, residues=None, n_res=None):
     """
-    Build the keep-mask that conditions out one or more neighborhoods.
+    Build the keep-mask that conditions out one or more called regions.
 
-    `centers` is an iterable of (aa_pos, radius) pairs, both referring to this protein;
-    aa_pos is one-based. Every residue within `radius` of any center is dropped from the
-    mask. Adjacency matrices are built once per distinct radius.
+    Two forms, because the two callers have different things in hand:
 
-    Returns (keep, n_res, removed_by_center) where removed_by_center maps each center's
-    aa_pos to the number of residues it took out.
+      `centers`  an iterable of (aa_pos, radius) pairs. Every residue within `radius` of
+                 any center is dropped. This is what --remove-nbhd passes, and what the
+                 old single-neighborhood conditioning used. Adjacency matrices are built
+                 once per distinct radius.
+
+      `residues` an explicit iterable of 1-based residue positions to drop. Conditional
+                 analysis passes this: a component is the union of many overlapping
+                 neighborhoods, so its residue set is already known and re-deriving it
+                 from centers and radii would just rebuild the same union. Needs `n_res`
+                 unless `centers` is also given.
+
+    Both may be supplied, in which case the masks are unioned.
+
+    Returns (keep, n_res, removed_by_center). removed_by_center maps each center's aa_pos
+    to the number of residues it took out, with the key 'residues' used for the explicit
+    set; counts are of residues not already masked by an earlier entry, so they sum to
+    the total removed.
     """
-    centers = list(centers)
-    if not centers:
-        raise ValueError('conditioning_keep_mask called with no centers')
+    centers = list(centers or [])
+    if not centers and residues is None:
+        raise ValueError('conditioning_keep_mask needs centers or residues')
+    if not centers and n_res is None:
+        raise ValueError('conditioning_keep_mask needs n_res when only residues are given')
 
     adj_cache = {}
     keep = None
@@ -454,7 +508,65 @@ def conditioning_keep_mask(pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id,
         removed_by_center[int(aa_pos)] = int(keep[idx].sum())
         keep[idx] = False
 
+    if residues is not None:
+        if keep is None:
+            keep = np.ones(int(n_res), dtype=bool)
+        idx = np.asarray(sorted(set(int(r) for r in residues)), dtype=int) - 1
+        if len(idx) and (idx.min() < 0 or idx.max() >= keep.shape[0]):
+            raise ValueError(
+                f'{uniprot_id}: conditioning residues fall outside the structure '
+                f'(1..{keep.shape[0]})'
+            )
+        removed_by_center['residues'] = int(keep[idx].sum())
+        keep[idx] = False
+
     return keep, keep.shape[0], removed_by_center
+
+
+_STRUCT_LEN_CACHE = {}
+
+
+def structure_length(pdb_file_pos_guide, uniprot_id):
+    """
+    Number of residues in a protein's structure, read from the position guide.
+
+    This is the same n_res the adjacency matrix has -- get_distance_matrix_structure
+    sizes itself by the maximum end of pos_covered -- so a mask built against it will
+    pass check_keep_mask. Reading the guide is cached because conditioning calls this
+    once per gene per round.
+    """
+    guide = _STRUCT_LEN_CACHE.get(pdb_file_pos_guide)
+    if guide is None:
+        df = pd.read_csv(pdb_file_pos_guide, sep='\t')
+        ends = df.pos_covered.str.extract(r'(\d+)\s*\]')[0].astype(float)
+        guide = df.assign(end=ends).groupby('uniprot_id')['end'].max().to_dict()
+        _STRUCT_LEN_CACHE[pdb_file_pos_guide] = guide
+    n_res = guide.get(uniprot_id)
+    if n_res is None or not np.isfinite(n_res):
+        raise ValueError(f'{uniprot_id}: no structure length in {pdb_file_pos_guide}')
+    return int(n_res)
+
+
+def build_conditioning_mask(pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id, entry,
+                            pae_cutoff):
+    """
+    Keep-mask for one gene's conditioning entry, whichever form it takes.
+
+    `entry` is either a list of (aa_pos, radius) pairs -- what --remove-nbhd supplies --
+    or an iterable of 1-based residue positions, which is what conditional analysis
+    supplies now that it masks whole components. Dispatching here keeps the two scan
+    backends from each having to know the difference.
+    """
+    entry = list(entry)
+    if not entry:
+        return None, None, {}
+    is_centers = isinstance(entry[0], (tuple, list))
+    if is_centers:
+        return conditioning_keep_mask(pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id,
+                                      entry, pae_cutoff)
+    n_res = structure_length(pdb_file_pos_guide, uniprot_id)
+    return conditioning_keep_mask(pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id,
+                                  None, pae_cutoff, residues=entry, n_res=n_res)
 
 
 def neighborhood_retention(adjacency_matrix, keep):

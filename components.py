@@ -1,0 +1,253 @@
+"""
+Group a gene's significant neighborhoods into components.
+
+The scan tests a neighborhood centred on every residue, so one real 3D signal is
+reported many times over: in the ASD analysis the 20 genes with an FWER-significant
+neighborhood carry 746 FDR-significant neighborhoods between them. Those are not 746
+findings. A component is the unit that is.
+
+Two neighborhoods join the same component when they share at least one CASE-MUTATED
+residue. The rule is deliberately about the mutations rather than the geometry. Plain
+residue overlap connects any two centres within roughly twice the radius whether or not
+a single variant sits in the overlap, which chains distinct sites together across a
+domain; requiring a shared mutated residue means the two windows are reporting the same
+variants, which is what makes them the same finding.
+
+Membership is transitive, as connected components always are: A and C can land in one
+component through B without sharing a mutated residue themselves. That is intended -- a
+run of overlapping windows walking along one cluster of de novos is one signal -- but it
+is also the direction in which this can over-merge, so component_table reports
+seq_span_aa and the caller can see how far a component reaches.
+
+Gene gate and member gate are different by design. A gene qualifies on having an
+FWER-significant neighborhood; the components are then built from all of its
+FDR-significant neighborhoods. FWER significance implies FDR significance at the same
+cutoff, so the gate never admits a gene whose qualifying neighborhood is then left out
+of the clustering.
+"""
+
+import numpy as np
+import pandas as pd
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components
+
+from logger_config import get_logger
+from utils import get_adjacency_matrix, positions_to_pymol_notation
+
+logger = get_logger(__name__)
+
+
+def neighborhood_sets(adj_by_radius, centers):
+    """
+    Residue sets of each centre's neighborhood, as 1-based positions.
+
+    `centers` is a list of (aa_pos, radius) pairs; each neighborhood is built at its own
+    radius, which matters under --neighborhood-radius multiple-*, where every position
+    picks its own.
+    """
+    out = []
+    for aa_pos, radius in centers:
+        adj = adj_by_radius[radius]
+        out.append(set(np.flatnonzero(adj[int(aa_pos) - 1]) + 1))
+    return out
+
+
+def build_components(centers, adj_by_radius, case_positions):
+    """
+    Label each centre with its component index.
+
+    Returns (labels, nbhd_sets, shared_sets) where labels[i] is the component of
+    centers[i], nbhd_sets[i] is that centre's residue set, and shared_sets[i] is the
+    case-mutated subset that decides the edges.
+    """
+    nbhd = neighborhood_sets(adj_by_radius, centers)
+    case_positions = set(int(p) for p in case_positions)
+    shared = [n & case_positions for n in nbhd]
+
+    k = len(centers)
+    if k == 0:
+        return np.zeros(0, dtype=int), nbhd, shared
+
+    # Centres x mutated-residues incidence, so the edge test is one boolean matmul
+    # rather than k^2 set intersections. The mutated residues are few (tens), so this
+    # stays small even for CDK13's 87 centres.
+    mutated = sorted(set().union(*shared)) if any(shared) else []
+    if not mutated:
+        # No centre contains a case mutation: nothing can share one, so every centre is
+        # its own component. Reachable when a neighborhood is significant through
+        # depletion (--test-direction depletion).
+        return np.arange(k), nbhd, shared
+    index = {p: j for j, p in enumerate(mutated)}
+    B = np.zeros((k, len(mutated)), dtype=bool)
+    for i, s in enumerate(shared):
+        for p in s:
+            B[i, index[p]] = True
+    edges = (B.astype(np.int32) @ B.astype(np.int32).T) > 0
+    np.fill_diagonal(edges, False)
+    _, labels = connected_components(csr_matrix(edges), directed=False)
+    return labels, nbhd, shared
+
+
+def _seq_span(centers, labels, comp):
+    """
+    Sequence separation between the first and last centre of a component.
+
+    This is a span along the sequence, NOT a spatial diameter. A large value is not a
+    defect: it means the component is assembled in 3D from parts of the chain that are
+    far apart in sequence, which is the case 3DNT exists to find. It is reported so that
+    such components are visible, not so they can be filtered out.
+    """
+    members = [int(centers[i][0]) for i in range(len(centers)) if labels[i] == comp]
+    return (max(members) - min(members)) if members else 0
+
+
+def component_table(
+    df_results,
+    uniprot_id,
+    gene_name,
+    centers,
+    adj_by_radius,
+    df_mut,
+    p_col,
+    fdr_col,
+    fwer_col,
+    mu_mode,
+    round_idx=0,
+):
+    """
+    One row per component for a single gene.
+
+    `df_mut` is the per-residue mutation frame from read_original_mutation_data: aa_pos
+    and ac_case always, plus mu (mutation-rate mode) or ac_control (case/control).
+    `centers` is a list of (aa_pos, radius).
+    """
+    case_pos = set(df_mut.loc[df_mut.ac_case > 0, 'aa_pos'].astype(int))
+    labels, nbhd, shared = build_components(centers, adj_by_radius, case_pos)
+
+    by_pos = df_results.set_index('aa_pos')
+    rows = []
+    for comp in sorted(set(labels.tolist())):
+        idx = [i for i in range(len(centers)) if labels[i] == comp]
+        member_centers = sorted(int(centers[i][0]) for i in idx)
+        residues = set().union(*[nbhd[i] for i in idx])
+        in_comp = df_mut[df_mut.aa_pos.isin(residues)]
+        case_rows = in_comp[in_comp.ac_case > 0]
+
+        # The lead is the component's best-scoring centre, which is what the conditional
+        # rounds report and what the component is named by.
+        lead = min(member_centers, key=lambda p: by_pos.loc[p, p_col])
+        lead_row = by_pos.loc[lead]
+
+        rec = {
+            'uniprot_id': uniprot_id,
+            'gene_name': gene_name,
+            'component_id': int(comp) + 1,
+            'round': round_idx,
+            'n_centers': len(idx),
+            'lead_aa_pos': int(lead),
+            'lead_p': float(lead_row[p_col]),
+            'lead_fdr': float(lead_row[fdr_col]),
+            'lead_fwer': float(lead_row[fwer_col]),
+            'radius': float(dict(centers)[lead]),
+            'n_residues': len(residues),
+            'seq_span_aa': _seq_span(centers, labels, comp),
+            'residues_pymol': positions_to_pymol_notation(residues),
+            'centers_pymol': positions_to_pymol_notation(member_centers),
+            'n_case_residues': int(len(case_rows)),
+            'n_case_alleles': int(case_rows.ac_case.sum()),
+            'case_pymol': positions_to_pymol_notation(case_rows.aa_pos.astype(int)),
+            'case_detail': ','.join(f'{int(r.aa_pos)}:{int(r.ac_case)}'
+                                    for r in case_rows.sort_values('aa_pos').itertuples()),
+        }
+        if mu_mode:
+            rec['mu_component'] = float(in_comp.mu.sum())
+        else:
+            ctrl = in_comp[in_comp.ac_control > 0]
+            rec['n_control_residues'] = int(len(ctrl))
+            rec['n_control_alleles'] = int(ctrl.ac_control.sum())
+            rec['control_pymol'] = positions_to_pymol_notation(ctrl.aa_pos.astype(int))
+        rows.append(rec)
+
+    return pd.DataFrame(rows).sort_values('lead_p').reset_index(drop=True)
+
+
+def components_for_genes(
+    df_results,
+    genes,
+    reference_dir,
+    pae_cutoff,
+    read_mut,
+    p_col,
+    fdr_col,
+    fwer_col,
+    radius_cols,
+    member_cutoff,
+    mu_mode,
+    round_idx=0,
+    default_radius=15.0,
+):
+    """
+    Build the component table for every gene in `genes`.
+
+    `genes` is the set that passed the gene gate; membership within each is every
+    neighborhood with `fdr_col` below `member_cutoff`. `read_mut(uniprot_id)` returns
+    that gene's per-residue mutation frame.
+
+    Genes whose structure cannot be loaded are skipped with a message rather than
+    failing the run: a component table is a reporting artefact, and losing one gene's
+    row should not take down a scan that already succeeded.
+    """
+    pdb_guide = f'{reference_dir}/pdb_pae_file_pos_guide.tsv'
+    pdb_dir = f'{reference_dir}/pdb_files/'
+    pae_dir = f'{reference_dir}/pae_files/'
+
+    tables = []
+    for uniprot_id in sorted(genes):
+        g = df_results[(df_results.uniprot_id == uniprot_id) &
+                       (df_results[fdr_col] < member_cutoff)]
+        if len(g) == 0:
+            continue
+        gene_name = g.gene_name.iloc[0] if 'gene_name' in g.columns else uniprot_id
+
+        centers = []
+        for row in g.itertuples():
+            radius = default_radius
+            for col in radius_cols:
+                val = getattr(row, col, None)
+                if val is not None and not pd.isna(val):
+                    radius = float(val)
+                    break
+            centers.append((int(row.aa_pos), radius))
+
+        try:
+            adj_by_radius = {
+                r: np.asarray(get_adjacency_matrix(pdb_guide, pdb_dir, pae_dir,
+                                                   uniprot_id, r, pae_cutoff))
+                for r in sorted({r for _, r in centers})
+            }
+            df_mut = read_mut(uniprot_id)
+        except Exception as e:
+            logger.warning(f'{uniprot_id}: could not build components - {e}')
+            continue
+
+        tables.append(component_table(
+            g, uniprot_id, gene_name, centers, adj_by_radius, df_mut,
+            p_col, fdr_col, fwer_col, mu_mode, round_idx,
+        ))
+
+    if not tables:
+        return pd.DataFrame()
+    out = pd.concat(tables, ignore_index=True)
+    logger.info(
+        f'Round {round_idx}: {len(out)} components across {out.uniprot_id.nunique()} '
+        f'genes from {int(out.n_centers.sum())} significant neighborhoods'
+    )
+    return out
+
+
+def top_component(df_components, uniprot_id):
+    """The component holding a gene's best-scoring neighborhood, or None."""
+    g = df_components[df_components.uniprot_id == uniprot_id]
+    if len(g) == 0:
+        return None
+    return g.loc[g.lead_p.idxmin()]

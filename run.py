@@ -456,15 +456,36 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--conditional',
-        action='store_true',
-        default=False,
+        action=argparse.BooleanOptionalAction,
+        default=None,   # None = auto: on unless an incompatible flag is present
         help='''
-        Conditional analysis with --run-3dnt. Run the scan, then repeat it with each
-        significant gene's called neighborhood masked out, until no further signal
-        remains. Per protein: only genes with a hit are re-scanned, and each conditions
-        on its own hits. Writes <fdr-file stem>.conditional.tsv with one row per
-        independent signal, plus the full exome-wide table for each round.
+        Conditional analysis with --run-3dnt, ON BY DEFAULT; pass --no-conditional to
+        turn it off. Run the scan, then repeat it with each significant gene's called
+        COMPONENT masked out, until no further signal remains. A gene qualifies on
+        --conditional-gene-criterion (FWER by default) and its component is built from
+        every neighborhood passing --conditional-criterion (FDR), so the whole signal is
+        masked rather than only its best window. Per protein: only genes with a hit are
+        re-scanned. Writes <fdr-file stem>.components.tsv and .conditional.tsv alongside
+        the full exome-wide table for each round. Silently does not apply with
+        --fdr-only, --remove-nbhd or without --run-3dnt.
         '''
+    )
+    parser.add_argument(
+        '--conditional-gene-criterion',
+        type=str,
+        default='fwer',
+        choices=['fdr', 'fwer'],
+        help='''
+        which correction decides whether a GENE is considered for conditioning at all
+        (default fwer). Its components are then built from the neighborhoods passing
+        --conditional-criterion, which is the looser member gate.
+        '''
+    )
+    parser.add_argument(
+        '--conditional-gene-cutoff',
+        type=float,
+        default=0.05,
+        help='cutoff for --conditional-gene-criterion (default 0.05)'
     )
     parser.add_argument(
         '--conditional-max-rounds',
@@ -647,21 +668,37 @@ if __name__ == '__main__':
     if not (0 < args.fdr_cutoff < 1):
         raise ValueError(f"FDR cutoff must be between 0 and 1, got {args.fdr_cutoff}")
 
+    # Conditional analysis is on by default, so an incompatible flag must switch it off
+    # quietly rather than fail: a command that was valid before this became the default
+    # must stay valid. An EXPLICIT --conditional still errors, because then the user has
+    # asked for two things that cannot both happen.
+    conditional_requested = args.conditional is True
+    incompatible = None
+    if not args.run_3dnt:
+        incompatible = 'it requires --run-3dnt'
+    elif args.fdr_only:
+        incompatible = 'it re-runs the scan each round, so it cannot be combined with --fdr-only'
+    elif args.remove_nbhd is not None:
+        incompatible = 'it chooses what to condition on, so it cannot be combined with --remove-nbhd'
+
+    if incompatible is not None:
+        if conditional_requested:
+            raise ValueError(f"--conditional cannot be used here: {incompatible}")
+        args.conditional = False
+    elif args.conditional is None:
+        args.conditional = True
+        logger.info('Conditional analysis is on by default; pass --no-conditional to skip it')
+
     if args.conditional:
-        if not args.run_3dnt:
-            raise ValueError("--conditional requires --run-3dnt")
-        if args.fdr_only:
-            raise ValueError("--conditional re-runs the scan each round, so it cannot be "
-                             "combined with --fdr-only")
-        if args.remove_nbhd is not None:
-            raise ValueError("--conditional chooses what to condition on; it cannot be "
-                             "combined with --remove-nbhd")
         if args.conditional_max_rounds < 1:
             raise ValueError(f"--conditional-max-rounds must be at least 1, got "
                              f"{args.conditional_max_rounds}")
         if args.conditional_cutoff is not None and not (0 < args.conditional_cutoff < 1):
             raise ValueError(f"--conditional-cutoff must be between 0 and 1, got "
                              f"{args.conditional_cutoff}")
+        if not (0 < args.conditional_gene_cutoff < 1):
+            raise ValueError(f"--conditional-gene-cutoff must be between 0 and 1, got "
+                             f"{args.conditional_gene_cutoff}")
         if not (0 <= args.conditional_min_retained <= 1):
             raise ValueError(f"--conditional-min-retained must be between 0 and 1, got "
                              f"{args.conditional_min_retained}")
@@ -842,6 +879,11 @@ if __name__ == '__main__':
             min_retained=args.conditional_min_retained,
             conditioning_radius=args.conditional_radius,
             ignore_ac=args.ignore_ac,
+            gene_criterion=args.conditional_gene_criterion,
+            gene_cutoff=args.conditional_gene_cutoff,
+            min_denovo=args.min_denovo,
+            default_radius=(15.0 if isinstance(args.neighborhood_radius, str)
+                            else float(args.neighborhood_radius)),
         )
         did_nothing = False
 
