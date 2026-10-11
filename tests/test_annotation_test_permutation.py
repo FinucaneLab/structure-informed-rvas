@@ -1,13 +1,17 @@
 """Assert-based self-check for annotation_test_permutation's matrix builders.
 
-Run directly: python test_annotation_test_permutation.py
+Run directly: python tests/test_annotation_test_permutation.py
 """
 
+import os
+import sys
 import tempfile
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from annotation_test_permutation import (
     NullPvalAccumulator,
