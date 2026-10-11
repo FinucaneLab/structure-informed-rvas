@@ -4,12 +4,13 @@ import numpy as np
 import os
 import h5py
 import glob
-from scan_test import scan_test
+from pathlib import Path
+from scan_test import scan_test, _preprocess_scan_data
 from read_data import map_to_protein
 from pymol_code import make_movie_from_pse
 from logger_config import get_logger
 from utils import get_nbhd_info
-from annotation_test import annotation_test
+from annotation_test_permutation import run_annotation_test, read_table
 
 logger = get_logger(__name__)
 
@@ -32,7 +33,7 @@ def map_and_filter_rvas(
 
     if pre_mapped_rvas is not None:
         logger.info(f"Loading pre-mapped RVAS dataframe from {pre_mapped_rvas}")
-        df_rvas = pd.read_csv(pre_mapped_rvas, sep='\t')
+        df_rvas = read_table(Path(pre_mapped_rvas))
     elif rvas_data_to_map is not None:
         df_rvas = map_to_protein(
             rvas_data_to_map,
@@ -523,14 +524,24 @@ if __name__ == '__main__':
         help='perform a burden test using this annotation',
     )
     parser.add_argument(
+        '--annotation-format',
+        choices=['long', 'wide'],
+        default='long',
+        help='long = one row per annotation-position/interval (concept_type, concept_value, start, end, or aa_pos); wide = one row per residue',
+    )
+    parser.add_argument(
+        '--annotation-expand',
+        default=None,
+        help="comma-separated annotation-id prefixes to expand to their 3D neighborhood using --neighborhood-radius/--pae-cutoff (e.g. 'Binding site,Active site'), or 'all'. Without it there is no expansion.",
+    )
+    parser.add_argument(
         '--annotation_id',
         type=str,
         default=None,
         help='''
-        Can be a column name in annotation_file, 
-        or a comma-separated list of column names. 
-        Used with --annotation_file. Determines what
-        loop_annotations in annotation_test.py will loop over.
+        Used with --annotation_file. Long format: the columns joined into
+        the annotation id (default concept_type,concept_value). Wide format:
+        the columns used as ids (default all).
         '''
     )
     args = parser.parse_args()
@@ -757,16 +768,26 @@ if __name__ == '__main__':
     
     elif args.annotation_file is not None:
         logger.info('Starting annotation test analysis')
-        annotation_test(
-            df_rvas,
-            args.annotation_file,
-            args.annotation_id,
-            args.reference_dir,
-            args.neighborhood_radius,
-            args.pae_cutoff,
-            args.results_dir,
-            df_filter,
-            args.ignore_ac,
+        expand = args.annotation_expand
+        if expand and isinstance(args.neighborhood_radius, str):
+            raise ValueError('--annotation-expand needs a numeric --neighborhood-radius')
+        if args.annotation_id:
+            ann_id_columns = tuple(args.annotation_id.split(','))
+        else:
+            ann_id_columns = ('*',) if args.annotation_format == 'wide' else ('concept_type', 'concept_value')
+        run_annotation_test(
+            _preprocess_scan_data(df_rvas, args.ignore_ac),
+            read_table(Path(args.annotation_file)),
+            ann_format=args.annotation_format,
+            ann_id_columns=ann_id_columns,
+            expand_radius=args.neighborhood_radius if expand else 0,
+            expand_include=None if expand in (None, 'all') else expand.split(','),
+            pae_cutoff=args.pae_cutoff,
+            reference_dir=args.reference_dir,
+            df_include=df_filter[['uniprot_id']].drop_duplicates() if df_filter is not None else None,
+            n_perm=args.n_sims,
+            results_dir=Path(args.results_dir) / 'annotation_test',
+            cleanup_per_protein=True,
         )
         did_nothing = False
 

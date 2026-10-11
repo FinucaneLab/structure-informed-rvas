@@ -11,6 +11,8 @@ pool the null p-values across all tested proteins.
 
 import argparse
 import warnings
+import zlib
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 import numpy as np
@@ -20,12 +22,16 @@ from scipy.stats import fisher_exact
 from statsmodels.stats.multitest import fdrcorrection
 from tqdm.auto import tqdm
 
-from empirical_fdr import _compute_false_discoveries, _compute_fwer
 from logger_config import get_logger
 from scan_test import get_case_control_ac_matrix
 from utils import get_adjacency_matrix, get_chi2_pvals_case_control
 
 logger = get_logger(__name__)
+
+
+def protein_seed(uniprot_id: str, seed: int = 0) -> list[int]:
+    """Per-protein RNG seed: reproducible and independent across proteins."""
+    return [seed, zlib.crc32(uniprot_id.encode())]
 
 
 def load_protein_lengths(reference_dir: str | Path) -> dict[str, int]:
@@ -157,6 +163,8 @@ def convert_wide_annotations_to_binary_matrix(
     several columns (concept types / clustering layers, one column per method) where the
     id is "{column}_{value}" to disambiguate e.g. the same cluster id across layers.
     Missing values (NaN) mean "not annotated in this column" and are dropped.
+    ann_id_columns=None or ["*"] uses every column except uniprot_id/aa_pos/seq_len/
+    length/end (the non-annotation columns fallback_seq_len also knows about).
 
     Returns:
         label_binary_matrix: shape (n_annotations, seq_len), 1 at annotated positions.
@@ -170,8 +178,9 @@ def convert_wide_annotations_to_binary_matrix(
     if seq_len is None:
         seq_len = int(ann_df["aa_pos"].max())
 
-    if ann_id_columns is None:
-        ann_id_columns = [c for c in ann_df.columns if c not in ["uniprot_id", "aa_pos"]]
+    if ann_id_columns is None or list(ann_id_columns) == ["*"]:
+        non_annotation_columns = ["uniprot_id", "aa_pos", "seq_len", "length", "end"]
+        ann_id_columns = [c for c in ann_df.columns if c not in non_annotation_columns]
     single_column = len(ann_id_columns) == 1
 
     aa_pos_0_based = ann_df["aa_pos"].to_numpy(dtype=np.int64) - 1
@@ -281,7 +290,7 @@ def test_protein_annotations(
     permutation, giving local_fdr/local_fwer within this protein.
     """
     case_ac_matrix, ctrl_ac_matrix = get_case_control_ac_matrix(
-        prot_rvas_df, n_res=seq_len, n_sim=n_perm
+        prot_rvas_df, n_res=seq_len, n_sim=n_perm, seed=protein_seed(uniprot_id)
     )
     case_ac_matrix = case_ac_matrix.astype(int)
     ctrl_ac_matrix = ctrl_ac_matrix.astype(int)
@@ -334,50 +343,101 @@ def test_protein_annotations(
     return pvals_df
 
 
+class NullPvalAccumulator:
+    """Pools per-protein permutation nulls for global_fdr/global_fwer one protein at a
+    time, so the full (n_proteins, n_annotations, n_perm) null matrix is never in memory
+    at once - only a running reduction (sub-threshold null p-values, per-sim min)."""
+
+    def __init__(self, n_perm: int, large_p_threshold: float = 0.05):
+        self.n_perm = n_perm
+        self.large_p_threshold = large_p_threshold
+        self.null_cols = [f"null_pval_{i}" for i in range(n_perm)]
+        self.obs_frames: list[pd.DataFrame] = []
+        self.pooled_null_chunks: list[np.ndarray] = []
+        self.min_pvals_per_sim = np.ones(n_perm)
+
+    def add(self, pvals_df: pd.DataFrame) -> None:
+        null_arr = pvals_df[self.null_cols].to_numpy(dtype=float)
+        self.pooled_null_chunks.append(null_arr[null_arr < self.large_p_threshold])
+        self.min_pvals_per_sim = np.minimum(self.min_pvals_per_sim, null_arr.min(axis=0))
+        self.obs_frames.append(pvals_df.drop(columns=self.null_cols))
+
+    def finalize(self) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
+        # global_fdr (computed downstream) is a step-down estimate and only valid computed
+        # in ascending p_value order (rank i+1 divides the pooled-null count exceeded by
+        # observed p-values up to that rank).
+        df_pvals = pd.concat(self.obs_frames, ignore_index=True).sort_values(
+            "p_value", ascending=True, ignore_index=True
+        )
+        pooled_null_pvals = np.sort(np.concatenate(self.pooled_null_chunks))
+        return df_pvals, pooled_null_pvals, self.min_pvals_per_sim
+
+
+def compute_global_fdr(
+    df_pvals: pd.DataFrame,
+    pooled_null_pvals: np.ndarray,
+    n_perm: int,
+    large_p_threshold: float = 0.05,
+) -> np.ndarray:
+    """Same math as empirical_fdr._compute_false_discoveries, but takes the pooled+sorted
+    sub-threshold null p-values directly instead of a per-protein null_pvals_dict."""
+    p_value = df_pvals["p_value"].to_numpy()
+    mask = p_value <= large_p_threshold
+    false_discoveries = np.full(len(df_pvals), float(len(df_pvals)))
+    if mask.any():
+        false_discoveries[mask] = (
+            np.searchsorted(pooled_null_pvals, p_value[mask], side="right") / n_perm
+        )
+    return false_discoveries
+
+
+def compute_global_fwer(df_pvals: pd.DataFrame, min_pvals_per_sim: np.ndarray) -> np.ndarray:
+    """Same math as empirical_fdr._compute_fwer, but takes the already-pooled per-simulation
+    minimum directly."""
+    p_obs = df_pvals["p_value"].to_numpy().reshape(-1, 1)
+    return np.mean(min_pvals_per_sim.reshape(1, -1) <= p_obs, axis=1)
+
+
+def read_per_protein_shards(results_dir: str | Path) -> Iterator[pd.DataFrame]:
+    """Lazily read back the per-protein parquet shards written by process_protein, one at a
+    time - lets summarize_annotation_test rebuild results.* from a completed/crashed run
+    without re-running any permutation tests."""
+    per_protein_dir = Path(results_dir) / "per_protein"
+    for shard in sorted(per_protein_dir.glob("*_annotation_pvals.parquet")):
+        yield pd.read_parquet(shard)
+
+
 def summarize_annotation_test(
-    per_protein_results: list[pd.DataFrame],
+    per_protein_results: Iterable[pd.DataFrame],
     n_perm: int,
     results_dir: Path,
     reference_dir: str | Path | None = None,
     cleanup_per_protein: bool = False,
+    format: str = "tsv.gz",
 ) -> pd.DataFrame:
     """Pool per-protein permutation nulls into an empirical global FDR/FWER + a BH-FDR baseline.
 
-    cleanup_per_protein: once results.parquet is written, delete the per-protein
-    `{uniprot_id}_annotation_pvals.parquet` shards (results.parquet already carries every
-    row from them, plus global FDR/FWER) and remove the now-empty per_protein/ dir.
+    per_protein_results: an in-memory list (as run_annotation_test builds it) or any other
+    iterable of per-protein dataframes, e.g. read_per_protein_shards(results_dir) to rebuild
+    results.* from disk without rerunning permutations.
+
+    format: "tsv.gz" (default) or "parquet" for the pooled results file. Per-protein shards
+    are always parquet.
+
+    cleanup_per_protein: once results.* is written, delete the per-protein
+    `{uniprot_id}_annotation_pvals.parquet` shards (results.* already carries every row
+    from them, plus global FDR/FWER) and remove the now-empty per_protein/ dir.
     """
-    all_pvals_df = pd.concat(per_protein_results, ignore_index=True)
-    null_cols = [f"null_pval_{i}" for i in range(n_perm)]
+    accumulator = NullPvalAccumulator(n_perm)
+    for pvals_df in per_protein_results:
+        accumulator.add(pvals_df)
+    df_pvals, pooled_null_pvals, min_pvals_per_sim = accumulator.finalize()
 
-    # global_fdr below is a step-down estimate and only valid computed in ascending
-    # p_value order (rank i+1 divides the pooled-null count exceeded by observed p-values
-    # up to that rank).
-    df_pvals = all_pvals_df[
-        [c for c in all_pvals_df.columns if c not in null_cols]
-    ].sort_values("p_value", ascending=True, ignore_index=True)
-    null_pvals_dict = {
-        uniprot_id: grp[null_cols].to_numpy(dtype=float)
-        for uniprot_id, grp in all_pvals_df.groupby("uniprot_id")
-    }
-    uniprot_ids = list(null_pvals_dict)
-    assert sum(len(v) for v in null_pvals_dict.values()) == len(df_pvals)
-
-    false_discoveries = _compute_false_discoveries(
-        df_pvals=df_pvals,
-        null_pvals_dict=null_pvals_dict,
-        uniprot_ids=uniprot_ids,
-        n_sims=n_perm,
-    )
+    false_discoveries = compute_global_fdr(df_pvals, pooled_null_pvals, n_perm)
     df_pvals["false_discoveries_avg"] = false_discoveries
     df_pvals["global_fdr"] = [x / (i + 1) for i, x in enumerate(false_discoveries)]
     df_pvals["global_fdr"] = df_pvals["global_fdr"][::-1].cummin()[::-1]
-    df_pvals["global_fwer"] = _compute_fwer(
-        df_pvals=df_pvals,
-        null_pvals_dict=null_pvals_dict,
-        uniprot_ids=uniprot_ids,
-        n_sims=n_perm,
-    )
+    df_pvals["global_fwer"] = compute_global_fwer(df_pvals, min_pvals_per_sim)
     df_pvals["bh_reject"], df_pvals["bh_fdr"] = fdrcorrection(
         df_pvals["p_value"].to_numpy(), alpha=0.05
     )
@@ -390,7 +450,13 @@ def summarize_annotation_test(
         ).drop_duplicates("uniprot_id")
         df_pvals = df_pvals.merge(guide, on="uniprot_id", how="left")
 
-    df_pvals.to_parquet(results_dir / "results.parquet", index=False)
+    results_path = results_dir / (
+        "results.parquet" if format == "parquet" else "results.tsv.gz"
+    )
+    if format == "parquet":
+        df_pvals.to_parquet(results_path, index=False)
+    else:
+        df_pvals.to_csv(results_path, sep="\t", index=False)
 
     if cleanup_per_protein:
         per_protein_dir = results_dir / "per_protein"
@@ -508,6 +574,7 @@ def run_annotation_test(
     n_workers: int = 1,
     results_dir: str | Path = "outputs/annotation_test",
     cleanup_per_protein: bool = False,
+    format: str = "tsv.gz",
 ) -> pd.DataFrame:
     """Run the annotation test for every protein present in both rvas_df and ann_df.
 
@@ -523,7 +590,8 @@ def run_annotation_test(
         - "wide": one row per residue, ann_id_columns selects which columns are
           themselves annotation ids (no concatenation - a column's values must already be
           ids, or become one via the {column}_{value} disambiguation when >1 column is
-          selected). See convert_wide_annotations_to_binary_matrix.
+          selected). ann_id_columns=["*"] uses every column except uniprot_id/aa_pos/
+          seq_len/length/end. See convert_wide_annotations_to_binary_matrix.
     expand_radius: if > 0, expand annotations to their 3D structural neighborhood
         (CA-CA distance within expand_radius Angstrom, + optional pae_cutoff) before
         testing. 0 (default) disables expansion entirely. Requires reference_dir.
@@ -542,12 +610,16 @@ def run_annotation_test(
         tested, see filter_proteins_by_allele_count.
     n_workers: joblib worker processes for the per-protein loop. -1 (default) uses all
         cores; 1 runs in-process (no joblib), useful for debugging/profiling.
-    cleanup_per_protein: delete the per-protein parquet shards once results.parquet is
+    cleanup_per_protein: delete the per-protein parquet shards once results.* is
         written, see summarize_annotation_test.
+    format: "tsv.gz" (default) or "parquet" for the pooled results file. Per-protein
+        shards are always parquet.
 
     Writes one `{uniprot_id}_annotation_pvals.parquet` per protein plus a pooled
-    `results.parquet` (global_fdr, global_fwer, bh_fdr) to results_dir, and returns the
-    latter.
+    `results.tsv.gz` or `results.parquet` (global_fdr, global_fwer, bh_fdr) to results_dir,
+    and returns the latter. Proteins with an existing shard in results_dir/per_protein (same
+    n_perm) are reused, so a crashed run resumes; use a fresh results_dir after changing
+    other parameters.
     """
     results_dir = Path(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -558,7 +630,11 @@ def run_annotation_test(
     rvas_df = filter_variants(rvas_df, df_include, mode="include")
     rvas_df = filter_variants(rvas_df, df_filter, mode="exclude")
     tested_proteins = set(filter_proteins_by_allele_count(rvas_df, min_alleles))
-    uniprot_ids = sorted(tested_proteins & set(ann_df["uniprot_id"]))
+    uniprot_ids = sorted(tested_proteins & set(ann_df["uniprot_id"].unique()))
+    
+    # Filter the dataframes to only include tested proteins.
+    rvas_df = rvas_df[rvas_df["uniprot_id"].isin(uniprot_ids)]
+    ann_df = ann_df[ann_df["uniprot_id"].isin(uniprot_ids)]
 
     protein_lengths = load_protein_lengths(reference_dir) if reference_dir else {}
 
@@ -567,7 +643,15 @@ def run_annotation_test(
     rvas_by_protein = dict(tuple(rvas_df.groupby("uniprot_id", sort=False)))
     ann_by_protein = dict(tuple(ann_df.groupby("uniprot_id", sort=False)))
 
+    shard_dir = results_dir / "per_protein"
+
     def _call(uniprot_id: str) -> pd.DataFrame | None:
+        shard = shard_dir / f"{uniprot_id}_annotation_pvals.parquet"
+        # ponytail: only n_perm is checked; a changed radius/annotation set in the same results_dir reuses stale shards - use a fresh results_dir
+        if shard.exists():
+            cached = pd.read_parquet(shard)
+            if sum(c.startswith("null_pval_") for c in cached.columns) == n_perm:
+                return cached
         return process_protein(
             uniprot_id,
             rvas_by_protein[uniprot_id],
@@ -584,25 +668,32 @@ def run_annotation_test(
             results_dir=results_dir,
         )
 
-    logger.info(f"Running annotation test on {len(uniprot_ids)} proteins")
+    n_resumed = sum(
+        (shard_dir / f"{uid}_annotation_pvals.parquet").exists() for uid in uniprot_ids
+    )
+    logger.info(
+        f"Running annotation test on {len(uniprot_ids)} proteins ({n_resumed} existing shards)"
+    )
     if n_workers == 1:
-        per_protein_results = [_call(uid) for uid in tqdm(uniprot_ids)]
+        results = (_call(uid) for uid in tqdm(uniprot_ids))
     else:
-        per_protein_results = Parallel(n_jobs=n_workers, backend="threading")(
-            delayed(_call)(uid) for uid in tqdm(uniprot_ids)
+        results = tqdm(
+            Parallel(
+                n_jobs=n_workers, backend="threading", return_as="generator_unordered"
+            )(delayed(_call)(uid) for uid in uniprot_ids),
+            total=len(uniprot_ids),
         )
-    per_protein_results = [r for r in per_protein_results if r is not None]
-
     return summarize_annotation_test(
-        per_protein_results,
+        (r for r in results if r is not None),
         n_perm,
         results_dir,
         reference_dir,
         cleanup_per_protein=cleanup_per_protein,
+        format=format,
     )
 
 
-def _read_table(path: Path) -> pd.DataFrame:
+def read_table(path: Path) -> pd.DataFrame:
     return (
         pd.read_parquet(path)
         if path.suffix == ".parquet"
@@ -635,7 +726,8 @@ def _parse_args() -> argparse.Namespace:
         default="concept_type,concept_value",
         help="Long format: comma-separated columns joined into the annotation id, e.g. "
         "'cluster_col,cluster_id' for a cluster table. Wide format: comma-separated "
-        "columns to use as annotation ids directly (no concatenation).",
+        "columns to use as annotation ids directly (no concatenation), or '*' for every "
+        "column except uniprot_id/aa_pos/seq_len/length/end.",
     )
     parser.add_argument(
         "--ann-include",
@@ -705,7 +797,13 @@ def _parse_args() -> argparse.Namespace:
         "--cleanup-per-protein",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Delete per-protein parquet shards once results.parquet is written",
+        help="Delete per-protein parquet shards once results.* is written",
+    )
+    parser.add_argument(
+        "--format",
+        default="tsv.gz",
+        choices=["tsv.gz", "parquet"],
+        help="Pooled results format (per-protein shards are always parquet)",
     )
     return parser.parse_args()
 
@@ -713,8 +811,8 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     run_annotation_test(
-        _read_table(args.rvas_path),
-        _read_table(args.ann_path),
+        read_table(args.rvas_path),
+        read_table(args.ann_path),
         ann_format=args.ann_format,
         ann_include=args.ann_include.split(",") if args.ann_include else None,
         ann_id_columns=tuple(args.ann_id_columns.split(",")),
@@ -722,13 +820,14 @@ def main() -> None:
         expand_radius=args.expand_radius,
         pae_cutoff=args.pae_cutoff,
         reference_dir=args.reference_dir,
-        df_filter=_read_table(args.df_filter_path) if args.df_filter_path else None,
-        df_include=_read_table(args.df_include_path) if args.df_include_path else None,
+        df_filter=read_table(args.df_filter_path) if args.df_filter_path else None,
+        df_include=read_table(args.df_include_path) if args.df_include_path else None,
         min_alleles=args.min_alleles,
         n_perm=args.n_perm,
         n_workers=args.n_workers,
         results_dir=args.results_dir,
         cleanup_per_protein=args.cleanup_per_protein,
+        format=args.format,
     )
 
 
