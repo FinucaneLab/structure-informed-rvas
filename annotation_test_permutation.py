@@ -280,6 +280,7 @@ def test_protein_annotations(
     row_meta: dict,
     seq_len: int,
     n_perm: int,
+    seed: int = 0,
 ) -> pd.DataFrame:
     """Permutation test for one protein's annotations.
 
@@ -290,7 +291,7 @@ def test_protein_annotations(
     permutation, giving local_fdr/local_fwer within this protein.
     """
     case_ac_matrix, ctrl_ac_matrix = get_case_control_ac_matrix(
-        prot_rvas_df, n_res=seq_len, n_sim=n_perm, seed=protein_seed(uniprot_id)
+        prot_rvas_df, n_res=seq_len, n_sim=n_perm, seed=protein_seed(uniprot_id, seed)
     )
     case_ac_matrix = case_ac_matrix.astype(int)
     ctrl_ac_matrix = ctrl_ac_matrix.astype(int)
@@ -507,6 +508,7 @@ def process_protein(
     reference_dir: str | Path | None,
     n_perm: int,
     results_dir: Path,
+    seed: int = 0,
 ) -> pd.DataFrame | None:
     """Build the label matrix, run the permutation test, and write the per-protein parquet."""
     seq_len = seq_len or fallback_seq_len(prot_rvas_df, prot_ann_df)
@@ -543,7 +545,7 @@ def process_protein(
             )
 
     pvals_df = test_protein_annotations(
-        uniprot_id, prot_rvas_df, label_matrix, row_meta, seq_len, n_perm
+        uniprot_id, prot_rvas_df, label_matrix, row_meta, seq_len, n_perm, seed
     )
     per_protein_dir = results_dir / "per_protein"
     per_protein_dir.mkdir(exist_ok=True)
@@ -571,6 +573,7 @@ def run_annotation_test(
     df_include: pd.DataFrame | None = None,
     min_alleles: int = 5,
     n_perm: int = 1000,
+    seed: int = 0,
     n_workers: int = 1,
     results_dir: str | Path = "outputs/annotation_test",
     cleanup_per_protein: bool = False,
@@ -647,7 +650,7 @@ def run_annotation_test(
 
     def _call(uniprot_id: str) -> pd.DataFrame | None:
         shard = shard_dir / f"{uniprot_id}_annotation_pvals.parquet"
-        # ponytail: only n_perm is checked; a changed radius/annotation set in the same results_dir reuses stale shards - use a fresh results_dir
+        # ponytail: only n_perm is checked; a changed seed/radius/annotation set in the same results_dir reuses stale shards - use a fresh results_dir
         if shard.exists():
             cached = pd.read_parquet(shard)
             if sum(c.startswith("null_pval_") for c in cached.columns) == n_perm:
@@ -666,6 +669,7 @@ def run_annotation_test(
             reference_dir=reference_dir,
             n_perm=n_perm,
             results_dir=results_dir,
+            seed=seed,
         )
 
     n_resumed = sum(
@@ -782,6 +786,12 @@ def _parse_args() -> argparse.Namespace:
         help="Number of permutations for the empirical null",
     )
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Base seed for the permutations (combined with a per-protein hash)",
+    )
+    parser.add_argument(
         "--n-workers",
         type=int,
         default=1,
@@ -824,6 +834,7 @@ def main() -> None:
         df_include=read_table(args.df_include_path) if args.df_include_path else None,
         min_alleles=args.min_alleles,
         n_perm=args.n_perm,
+        seed=args.seed,
         n_workers=args.n_workers,
         results_dir=args.results_dir,
         cleanup_per_protein=args.cleanup_per_protein,

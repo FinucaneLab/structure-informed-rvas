@@ -260,6 +260,8 @@ a = get_case_control_ac_matrix(demo, 10, 20, seed=protein_seed("P1"))
 b = get_case_control_ac_matrix(demo, 10, 20, seed=protein_seed("P1"))
 c = get_case_control_ac_matrix(demo, 10, 20, seed=protein_seed("P2"))
 assert (a[0] == b[0]).all() and not (a[0] == c[0]).all()
+d = get_case_control_ac_matrix(demo, 10, 20, seed=protein_seed("P1", 1))
+assert not (a[0] == d[0]).all()
 
 rv = pd.concat([demo.assign(uniprot_id=u) for u in ("P1", "P2")])
 an = pd.DataFrame(

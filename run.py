@@ -106,7 +106,6 @@ def map_and_filter_rvas(
                 next_fdr_filter = read_filter_file(f)
                 df_filter = pd.merge(df_filter, next_fdr_filter)
         uniprots_from_fdr_filter = list(df_filter[['uniprot_id']].drop_duplicates().values.flatten())
-        print(df_filter.columns)
     else:
         df_filter = None
 
@@ -518,7 +517,7 @@ if __name__ == '__main__':
         help='Amino acid residue position in --uniprot-id for center of desired neighborhood'
     )
     parser.add_argument(
-        '--annotation_file',
+        '--annotation-file',
         type=str,
         default=None,
         help='perform a burden test using this annotation',
@@ -535,11 +534,11 @@ if __name__ == '__main__':
         help="comma-separated annotation-id prefixes to expand to their 3D neighborhood using --neighborhood-radius/--pae-cutoff (e.g. 'Binding site,Active site'), or 'all'. Without it there is no expansion.",
     )
     parser.add_argument(
-        '--annotation_id',
+        '--annotation-id',
         type=str,
         default=None,
         help='''
-        Used with --annotation_file. Long format: the columns joined into
+        Used with --annotation-file. Long format: the columns joined into
         the annotation id (default concept_type,concept_value). Wide format:
         the columns used as ids (default all).
         '''
@@ -786,6 +785,7 @@ if __name__ == '__main__':
             reference_dir=args.reference_dir,
             df_include=df_filter[['uniprot_id']].drop_duplicates() if df_filter is not None else None,
             n_perm=args.n_sims,
+            seed=args.seed,
             results_dir=Path(args.results_dir) / 'annotation_test',
             cleanup_per_protein=True,
         )
@@ -816,8 +816,6 @@ if __name__ == '__main__':
         else:
             nbhd_radius = args.neighborhood_radius
         nbhd, cases, cntrls = get_nbhd_info(df_rvas, args.uniprot_id, args.aa_pos, args.reference_dir, nbhd_radius, args.pae_cutoff)
-        df_nbhd = pd.concat([cases, cntrls], ignore_index=True)
-        df_nbhd.to_csv(f'{args.uniprot_id}_{args.aa_pos}_nbhd_variants.tsv', sep='\t', index=False)
         print('Residues in neighborhood:')
         print(nbhd)
         print('Case Variants in neighborhood:')

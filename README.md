@@ -253,18 +253,18 @@ This writes two files to `results_epi25/neighborhoods/`:
 ### Annotation test
 
 Permutation test of annotation sets (UniProt features, domains, clusters) for case/control burden. The annotation file is either:
-- long: one row per annotation interval (`uniprot_id, concept_type, concept_value, start, end`) or per annotated residue (`uniprot_id, aa_pos, <columns>`). `--annotation_id` lists the columns joined into the annotation id (default `concept_type,concept_value`).
-- wide (`--annotation-format wide`): one row per residue, one column per annotation. `--annotation_id` lists the columns used as ids (default all).
+- long: one row per annotation interval (`uniprot_id, concept_type, concept_value, start, end`) or per annotated residue (`uniprot_id, aa_pos, <columns>`). `--annotation-id` lists the columns joined into the annotation id (default `concept_type,concept_value`).
+- wide (`--annotation-format wide`): one row per residue, one column per annotation. `--annotation-id` lists the columns used as ids (default all).
 
 ```
 # long, binding/active sites expanded to their 3D neighborhood
 python run.py --pre-mapped-rvas rvas.mapped.parquet --reference-dir sir-reference-data/ \
-  --annotation_file annotations.parquet --annotation-expand 'Binding site,Active site' \
+  --annotation-file annotations.parquet --annotation-expand 'Binding site,Active site' \
   --neighborhood-radius 15 --pae-cutoff 15 --results-dir results/
 
 # wide, testing only the cluster_id column
 python run.py --pre-mapped-rvas rvas.mapped.parquet --reference-dir sir-reference-data/ \
-  --annotation_file clusters.parquet --annotation-format wide --annotation_id cluster_id \
+  --annotation-file clusters.parquet --annotation-format wide --annotation-id cluster_id \
   --results-dir results/
 ```
 
