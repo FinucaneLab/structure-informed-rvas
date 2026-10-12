@@ -94,10 +94,7 @@ def map_and_filter_rvas(
         filter_files = df_filter.split(',')
         def read_filter_file(f):
             df_filter = pd.read_csv(f, sep='\t')
-            if 'aa_pos' in df_filter.columns:
-                df_filter = df_filter[['uniprot_id', 'aa_pos']]
-            else:
-                df_filter = df_filter[['uniprot_id']]
+            df_filter = df_filter[[c for c in ['uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt'] if c in df_filter.columns]]
             df_filter = df_filter.drop_duplicates()
             return df_filter
         df_filter = read_filter_file(filter_files[0])
@@ -362,7 +359,9 @@ if __name__ == '__main__':
         To consider only a subset of results and compute FDR for this subset, 
         use this flag to specify the path to a tsv with the proteins or specific
         amino acids to filter to during fdr computation. The tsv must have a 
-        column called uniprot_id and can also have an aa_pos column.
+        column called uniprot_id and can also have aa_pos, aa_ref and aa_alt
+        columns. With --annotation-file, the RVAS data is restricted to these
+        proteins/positions/variants before the test.
         '''
     )
     parser.add_argument(
@@ -783,7 +782,7 @@ if __name__ == '__main__':
             expand_include=None if expand in (None, 'all') else expand.split(','),
             pae_cutoff=args.pae_cutoff,
             reference_dir=args.reference_dir,
-            df_include=df_filter[['uniprot_id']].drop_duplicates() if df_filter is not None else None,
+            df_include=df_filter,
             n_perm=args.n_sims,
             seed=args.seed,
             results_dir=Path(args.results_dir) / 'annotation_test',

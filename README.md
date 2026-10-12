@@ -268,7 +268,7 @@ python run.py --pre-mapped-rvas rvas.mapped.parquet --reference-dir sir-referenc
   --results-dir results/
 ```
 
-`--annotation-expand` takes id prefixes or `all`; without it nothing is expanded. Output is `results/annotation_test/results.tsv.gz` with `p_value`, `local_fdr`/`local_fwer`, `global_fdr`/`global_fwer` and `bh_fdr`. `--df-filter` restricts to proteins only. A crashed run resumes from `per_protein/` shards if rerun with the same `--results-dir` and `--n-sims`.
+`--annotation-expand` takes id prefixes or `all`; without it nothing is expanded. Output is `results/annotation_test/results.tsv.gz` with `p_value`, `local_fdr`/`local_fwer`, `global_fdr`/`global_fwer` and `bh_fdr`. `--df-filter` (columns `uniprot_id`, optionally `aa_pos`, `aa_ref`, `aa_alt`) restricts the RVAS data to those proteins/positions/variants before the test, which also changes the null. A crashed run resumes from `per_protein/` shards if rerun with the same `--results-dir` and `--n-sims`.
 
 ### Full Pipeline (run_all)
 
