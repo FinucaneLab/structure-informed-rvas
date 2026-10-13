@@ -5,7 +5,7 @@ import os
 import h5py
 import glob
 from pathlib import Path
-from scan_test import scan_test, _preprocess_scan_data
+from scan_test import scan_test
 from scan_test_cmh import scan_test_cmh, DEFAULT_SCREEN_CHI2
 from read_data import map_to_protein, filter_by_total_ac
 from pymol_code import make_movie_from_pse
@@ -849,6 +849,8 @@ if __name__ == '__main__':
     
     elif args.annotation_file is not None:
         logger.info('Starting annotation test analysis')
+        if args.ignore_ac:
+            raise ValueError("--ignore-ac is not supported with --annotation-file")
         expand = args.annotation_expand
         if expand and isinstance(args.neighborhood_radius, str):
             raise ValueError('--annotation-expand needs a numeric --neighborhood-radius')
@@ -857,7 +859,7 @@ if __name__ == '__main__':
         else:
             ann_id_columns = ('*',) if args.annotation_format == 'wide' else ('concept_type', 'concept_value')
         run_annotation_test(
-            _preprocess_scan_data(df_rvas, args.ignore_ac),
+            df_rvas,
             read_table(Path(args.annotation_file)),
             ann_format=args.annotation_format,
             ann_id_columns=ann_id_columns,
