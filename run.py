@@ -5,7 +5,8 @@ import os
 import h5py
 import glob
 from scan_test import scan_test
-from read_data import map_to_protein
+from scan_test_cmh import scan_test_cmh, DEFAULT_SCREEN_CHI2
+from read_data import map_to_protein, filter_by_total_ac
 from pymol_code import make_movie_from_pse
 from logger_config import get_logger
 from utils import get_nbhd_info
@@ -25,6 +26,7 @@ def map_and_filter_rvas(
         ac_filter,
         dont_remove_common,
         include_lcr,
+        stratum_col,
         mu_col=None,
         mu_file=None,
 ):
@@ -41,6 +43,7 @@ def map_and_filter_rvas(
             reference_dir,
             uniprot_id,
             genome_build,
+            stratum_col=stratum_col,
             mu_col=mu_col,
             mu_file=mu_file,
         )
@@ -56,7 +59,11 @@ def map_and_filter_rvas(
         if mutation_rate_mode:
             df_rvas = df_rvas[df_rvas.ac_case < ac_filter]
         else:
-            df_rvas = df_rvas[df_rvas.ac_case + df_rvas.ac_control < ac_filter]
+            df_rvas = filter_by_total_ac(
+                df_rvas,
+                ac_filter,
+                stratum_col=stratum_col,
+            )
         if not dont_remove_common:
             logger.info("Removing common variants from RVAS data")
             keys = ['uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt']
@@ -284,8 +291,8 @@ if __name__ == '__main__':
         type=int,
         default=None,
         help='''
-        Random seed for the null simulations, making a run reproducible. Applies to both
-        the standard and the mutation-rate tests. Each protein is given its own derived
+        Random seed for the null simulations, making a run reproducible. Applies to the
+        standard, mutation-rate, and CMH tests. Each protein is given its own derived
         stream, so the null draws stay independent across proteins. The stream is derived
         from the protein's position in the gene list, so reproducing a run means re-running
         the same gene set in the same order; splitting the genes across jobs differently
@@ -308,6 +315,24 @@ if __name__ == '__main__':
         action='store_true',
         default=False,
         help = 'perform the 3D neighborhood test',
+    )
+    parser.add_argument(
+        '--test-method',
+        choices=['fisher','cmh'],
+        default='fisher',
+        help = 'association test used by 3DNT. Default: fisher',
+    )
+    parser.add_argument(
+        '--stratum-col',
+        type=str,
+        default=None,
+        help = 'categorical stratum column used by CMH',
+    )
+    parser.add_argument(
+        '--cmh-screen-threshold',
+        type=float,
+        default=DEFAULT_SCREEN_CHI2,
+        help = 'CMH chi-square threshold for cursory screening',
     )
     parser.add_argument(
         '--neighborhood-radius',
@@ -551,9 +576,29 @@ if __name__ == '__main__':
     if args.ac_filter <= 0:
         raise ValueError(f"AC filter must be positive, got {args.ac_filter}")
     
+    if args.cmh_screen_threshold < 0:
+        raise ValueError(f"CMH screen threshold must be non-negative, got {args.cmh_screen_threshold}")
+            
     if not (0 < args.fdr_cutoff < 1):
         raise ValueError(f"FDR cutoff must be between 0 and 1, got {args.fdr_cutoff}")
-    
+
+    if args.run_3dnt and args.test_method == 'cmh' and not args.fdr_only:
+        if args.stratum_col is None:
+            raise ValueError("--test-method cmh requires --stratum-col")
+        if args.neighborhood_radius in ('multiple-small', 'multiple-big'):
+            raise ValueError(
+                "--test-method cmh currently supports one numeric "
+                "--neighborhood-radius"
+            )
+        if args.ignore_ac:
+            raise ValueError(
+                "--ignore-ac is not currently supported with --test-method cmh"
+            )
+        if args.mu_col is not None or args.mu_file is not None:
+            raise ValueError(
+                "--test-method cmh cannot be combined with --mu-col/--mu-file"
+            )
+
     # Check required directories exist
 
     if args.reference_dir and not os.path.exists(args.reference_dir):
@@ -626,11 +671,26 @@ if __name__ == '__main__':
         args.ac_filter,
         args.dont_remove_common,
         args.include_lcr,
+        args.stratum_col,
         args.mu_col,
         args.mu_file,
     )
 
-
+    if (
+        args.run_3dnt
+        and args.test_method == 'cmh'
+        and not args.fdr_only
+        and df_rvas is not None
+    ):
+        if args.stratum_col not in df_rvas.columns:
+            raise KeyError(
+                f"Mapped RVAS data do not contain stratum column '{args.stratum_col}'"
+            )
+        if df_rvas[args.stratum_col].isna().any():
+            raise ValueError(
+                f"Mapped RVAS data contain missing values in '{args.stratum_col}'"
+            )
+                
     did_nothing = True
 
     if args.save_df_rvas is not None:
@@ -712,6 +772,29 @@ if __name__ == '__main__':
             args.max_residues,
             args.simulate_null_from_mu,
             args.test_direction,
+        )
+        did_nothing = False
+
+    elif args.run_3dnt and args.test_method == 'cmh':
+        logger.info("Starting scan test analysis with CMH")
+        scan_test_cmh(
+            df_rvas,
+            args.reference_dir,
+            args.neighborhood_radius,
+            args.pae_cutoff,
+            args.results_dir,
+            args.n_sims,
+            args.no_fdr,
+            args.fdr_only,
+            args.fdr_cutoff,
+            df_filter,
+            args.ignore_ac,
+            args.fdr_file,
+            args.pval_file,
+            args.remove_nbhd,
+            args.stratum_col,
+            args.cmh_screen_threshold,
+            args.seed,
         )
         did_nothing = False
 

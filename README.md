@@ -428,3 +428,93 @@ Combining warns if the chunks disagree on `lambda_hat`.
 - FDR control over the *intersection* of two rejection sets is not guaranteed by the two
   marginal FDRs as a theorem. It is conservative in practice, since an intersection can
   only remove discoveries, and the simulations above measure it directly.
+
+## Stratified 3DNT with exact CMH
+
+The default 3D neighborhood test uses Fisher's exact test after pooling all
+case and control allele counts for a protein.  For datasets assembled from
+multiple cohorts, ancestry groups, sequencing batches, or other finite strata,
+3DNT can instead use an exact Cochran-Mantel-Haenszel (CMH) test.
+
+For protein `g`, neighborhood `r`, and stratum `k`, define:
+
+- `N_gk`: total case + control allele count in the protein;
+- `A_gk`: total case allele count in the protein;
+- `M_rgk`: total allele count inside the neighborhood;
+- `a_rgk`: case allele count inside the neighborhood.
+
+Under the stratified null,
+
+```text
+a_rgk | N_gk, A_gk, M_rgk ~ Hypergeom(N_gk, A_gk, M_rgk)
+```
+
+and the exact CMH statistic is `S_rg = sum_k a_rgk`.  Its null distribution is
+computed by convolving the stratum-specific hypergeometric distributions.  With
+one stratum, this reduces to the ordinary two-sided Fisher exact test.
+
+### Input format
+
+CMH input is long-form: a variant may appear once in every stratum in which it
+has a nonzero case or control count.  For example:
+
+```text
+Variant ID          stratum          ac_case    ac_control
+chr1-100-A-G        EUR_batch1       2          0
+chr1-100-A-G        AFR_batch2       0          1
+chr1-250-C-T        EUR_batch1       1          0
+```
+
+There must be one count vector per `Variant ID x stratum`.  The column name is
+specified by `--stratum-col`.
+
+The allele-count filter is applied to each variant's **total AC across all
+strata**.  For example, with `--ac-filter 6`, a variant with AC 4 in one stratum
+and AC 4 in another is removed because its total AC is 8.
+
+### Run CMH 3DNT
+
+```bash
+python structure-informed-rvas/run.py \
+  --rvas-data-to-map input/stratified_data.tsv.gz \
+  --reference-dir sir-reference-data/ \
+  --results-dir results_cmh/ \
+  --run-3dnt \
+  --test-method cmh \
+  --stratum-col stratum \
+  --neighborhood-radius 15 \
+  --n-sims 1000 \
+  --fdr-file all_proteins.cmh.fdr.tsv
+```
+
+The ordinary Fisher test remains the default, so existing commands without
+`--test-method cmh` are unchanged.
+
+### Null simulations
+
+The empirical FDR/FWER null also preserves strata.  For each protein and
+stratum, the simulation keeps fixed:
+
+1. total allele count at every residue
+2. total case allele count in that protein-stratum
+
+Case labels are redistributed across residues drawn from a multivariate
+hypergeometric distribution.  This is the resampling analogue of the margins conditioned
+on by the exact CMH test.
+
+CMH writes the same core HDF5 datasets as the ordinary 3DNT, so the existing
+`empirical_fdr.py`, p-value-file combination workflow, and visualization code
+can be reused unchanged.
+
+### Current limitations
+
+The initial CMH implementation supports one numeric neighborhood radius.  The
+`multiple-small` and `multiple-big` harmonic-mean radius modes are not yet
+implemented for CMH.  `--ignore-ac` is also disabled for CMH because collapsing
+a variant to a single presence/absence observation is ambiguous when the same
+variant occurs in multiple strata.
+
+The stratum should define a group within which case/control labels are
+exchangeable under the null.  Examples include ancestry x cohort or ancestry x
+sequencing batch.  CMH conditions on the protein-wide case burden separately in
+each stratum; it does not estimate a parametric covariate effect.
