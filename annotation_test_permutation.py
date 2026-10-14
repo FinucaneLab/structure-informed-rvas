@@ -7,6 +7,9 @@ annotation against a per-residue permutation null that fixes the total (case+con
 allele count at each residue and redraws case/control labels (multivariate
 hypergeometric). Local FDR/FWER come from that per-protein null; global_fdr/global_fwer
 pool the null p-values across all tested proteins.
+
+With stratum_col, the null is redrawn within each stratum and the statistic is the
+Cochran-Mantel-Haenszel sum of case alleles inside the annotation (exact conditional p).
 """
 
 import argparse
@@ -18,13 +21,25 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
-from scipy.stats import fisher_exact
+from scipy.sparse import csr_matrix
+from scipy.stats import chi2, fisher_exact
 from statsmodels.stats.multitest import fdrcorrection
 from tqdm.auto import tqdm
 
+from cmh import (
+    cmh_expected_variance,
+    mantel_haenszel_or,
+    screen_and_exact_pvalues,
+    summarize_strata,
+)
 from logger_config import get_logger
-from scan_test import get_case_control_ac_matrix
-from utils import get_adjacency_matrix, get_chi2_pvals_case_control
+from utils import (
+    DEFAULT_SCREEN_CHI2,
+    get_adjacency_matrix,
+    get_case_control_ac_matrix,
+    get_chi2_pvals_case_control,
+    get_stratified_case_ac_matrix,
+)
 
 logger = get_logger(__name__)
 
@@ -273,6 +288,12 @@ def expand_annotations_neighborhood(
     return expanded
 
 
+def local_fwer_fdr(observed_pvals: np.ndarray, null_pvals: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    local_fwer = (null_pvals.min(axis=0)[None, :] <= observed_pvals[:, None]).mean(axis=1)
+    local_fdr = (null_pvals <= observed_pvals[:, None]).mean(axis=1)
+    return local_fwer, local_fdr
+
+
 def test_protein_annotations(
     uniprot_id: str,
     prot_rvas_df: pd.DataFrame,
@@ -296,8 +317,11 @@ def test_protein_annotations(
     case_ac_matrix = case_ac_matrix.astype(int)
     ctrl_ac_matrix = ctrl_ac_matrix.astype(int)
 
-    ac_in_case = label_matrix @ case_ac_matrix  # (n_annotations, 1 + n_perm)
-    ac_in_ctrl = label_matrix @ ctrl_ac_matrix
+    # only residues with alleles matter; sparse int8 labels avoid numpy's slow integer matmul
+    cols = np.flatnonzero(case_ac_matrix.sum(1) + ctrl_ac_matrix.sum(1))
+    labels = csr_matrix(label_matrix[:, cols].astype(np.int8))
+    ac_in_case = np.asarray(labels @ case_ac_matrix[cols])  # (n_annotations, 1 + n_perm)
+    ac_in_ctrl = np.asarray(labels @ ctrl_ac_matrix[cols])
 
     total_ac_case = int(case_ac_matrix[:, 0].sum())
     total_ac_ctrl = int(ctrl_ac_matrix[:, 0].sum())
@@ -323,10 +347,7 @@ def test_protein_annotations(
 
     observed_pvals = pvalues[:, 0]
     null_pvals = pvalues[:, 1:]
-    local_fwer = (null_pvals.min(axis=0)[None, :] <= observed_pvals[:, None]).mean(
-        axis=1
-    )
-    local_fdr = (null_pvals <= observed_pvals[:, None]).mean(axis=1)
+    local_fwer, local_fdr = local_fwer_fdr(observed_pvals, null_pvals)
 
     pvals_df = pd.DataFrame(
         {
@@ -340,8 +361,76 @@ def test_protein_annotations(
             "ac_in_ctrl": ac_in_ctrl[:, 0],
         }
     )
-    pvals_df.loc[:, [f"null_pval_{i}" for i in range(n_perm)]] = null_pvals
-    return pvals_df
+    null_df = pd.DataFrame(null_pvals, columns=[f"null_pval_{i}" for i in range(n_perm)])
+    return pd.concat([pvals_df, null_df], axis=1)
+
+
+def test_protein_annotations_cmh(
+    uniprot_id: str,
+    prot_rvas_df: pd.DataFrame,
+    label_matrix: np.ndarray,
+    row_meta: dict,
+    n_perm: int,
+    stratum_col: str,
+    seed: int = 0,
+    screen_chi2: float = DEFAULT_SCREEN_CHI2,
+) -> pd.DataFrame:
+    """CMH-adjusted version of test_protein_annotations.
+
+    Case/control labels are redrawn within each stratum (only on residues carrying alleles);
+    the statistic per annotation is the sum over strata of case alleles inside it, with an
+    exact conditional p-value where chi2 > screen_chi2 and the chi2 p-value elsewhere (not
+    1.0, to avoid a point mass). Strata with no case/control variation inside the protein
+    carry no information.
+    """
+    case_ac_matrix, case_by_stratum, total_by_stratum = get_stratified_case_ac_matrix(
+        prot_rvas_df, stratum_col, label_matrix.shape[1], n_perm, protein_seed(uniprot_id, seed)
+    )
+    cols = np.flatnonzero(total_by_stratum.sum(1))
+    labels = csr_matrix(label_matrix[:, cols].astype(np.int8))
+    inside_totals = np.asarray(labels @ total_by_stratum[cols], dtype=np.int64)
+    inside_case = np.asarray(labels @ case_by_stratum[cols], dtype=np.int64)
+    case_totals, stratum_totals = case_by_stratum.sum(0), total_by_stratum.sum(0)
+    expected, variance = cmh_expected_variance(inside_totals, case_totals, stratum_totals)
+    cmh = {
+        "s_case_inside": np.asarray(labels @ case_ac_matrix[cols], dtype=np.int64),
+        "expected_sum": expected,
+        "variance_sum": variance,
+        "inside_totals_by_stratum": inside_totals,
+        "inside_case_by_stratum": inside_case,
+        "case_totals": case_totals,
+        "stratum_totals": stratum_totals,
+    }
+
+    pvals, stat = screen_and_exact_pvalues(cmh, screen_chi2)
+    pvals = np.where(stat > screen_chi2, pvals, chi2.sf(stat, 1))
+    local_fwer, local_fdr = local_fwer_fdr(pvals[:, 0], pvals[:, 1:])
+
+    inside_totals = cmh["inside_totals_by_stratum"]
+    case_totals, stratum_totals = cmh["case_totals"], cmh["stratum_totals"]
+    informative = (case_totals > 0) & (case_totals < stratum_totals)
+    ac_in_case = cmh["s_case_inside"][:, 0]
+
+    pvals_df = pd.DataFrame(
+        {
+            "uniprot_id": uniprot_id,
+            "annotation_id": ["|".join(row_meta[i]) for i in range(len(row_meta))],
+            "p_value": pvals[:, 0],
+            "local_fwer": local_fwer,
+            "local_fdr": local_fdr,
+            "odds_ratio": mantel_haenszel_or(
+                cmh["inside_case_by_stratum"], inside_totals, case_totals, stratum_totals
+            ),
+            "ac_in_case": ac_in_case,
+            "ac_in_ctrl": inside_totals.sum(axis=1) - ac_in_case,
+            "cmh_chisq": stat[:, 0],
+            "cmh_variance": cmh["variance_sum"],
+            "n_informative_strata": int(informative.sum()),
+            "frac_ac_informative": stratum_totals[informative].sum() / max(stratum_totals.sum(), 1),
+        }
+    )
+    null_df = pd.DataFrame(pvals[:, 1:], columns=[f"null_pval_{i}" for i in range(n_perm)])
+    return pd.concat([pvals_df, null_df], axis=1)
 
 
 class NullPvalAccumulator:
@@ -509,6 +598,7 @@ def process_protein(
     n_perm: int,
     results_dir: Path,
     seed: int = 0,
+    stratum_col: str | None = None,
 ) -> pd.DataFrame | None:
     """Build the label matrix, run the permutation test, and write the per-protein parquet."""
     seq_len = seq_len or fallback_seq_len(prot_rvas_df, prot_ann_df)
@@ -544,9 +634,14 @@ def process_protein(
                 label_matrix, adjacency_matrix, expand_rows
             )
 
-    pvals_df = test_protein_annotations(
-        uniprot_id, prot_rvas_df, label_matrix, row_meta, seq_len, n_perm, seed
-    )
+    if stratum_col is None:
+        pvals_df = test_protein_annotations(
+            uniprot_id, prot_rvas_df, label_matrix, row_meta, seq_len, n_perm, seed
+        )
+    else:
+        pvals_df = test_protein_annotations_cmh(
+            uniprot_id, prot_rvas_df, label_matrix, row_meta, n_perm, stratum_col, seed
+        )
     per_protein_dir = results_dir / "per_protein"
     per_protein_dir.mkdir(exist_ok=True)
     pvals_df.to_parquet(
@@ -578,6 +673,7 @@ def run_annotation_test(
     results_dir: str | Path = "outputs/annotation_test",
     cleanup_per_protein: bool = False,
     format: str = "tsv.gz",
+    stratum_col: str | None = None,
 ) -> pd.DataFrame:
     """Run the annotation test for every protein present in both rvas_df and ann_df.
 
@@ -611,6 +707,8 @@ def run_annotation_test(
         gene panel) - applied together with df_filter, not instead of it.
     min_alleles: proteins need more than this many total case AND control alleles to be
         tested, see filter_proteins_by_allele_count.
+    stratum_col: if set, CMH-adjust for this rvas_df column (e.g. ancestry/sex strata): null
+        redrawn within strata, see test_protein_annotations_cmh. None (default) = unadjusted.
     n_workers: joblib worker processes for the per-protein loop. -1 (default) uses all
         cores; 1 runs in-process (no joblib), useful for debugging/profiling.
     cleanup_per_protein: delete the per-protein parquet shards once results.* is
@@ -632,6 +730,8 @@ def run_annotation_test(
 
     rvas_df = filter_variants(rvas_df, df_include, mode="include")
     rvas_df = filter_variants(rvas_df, df_filter, mode="exclude")
+    if stratum_col is not None:
+        summarize_strata(rvas_df, stratum_col)
     tested_proteins = set(filter_proteins_by_allele_count(rvas_df, min_alleles))
     uniprot_ids = sorted(tested_proteins & set(ann_df["uniprot_id"].unique()))
     
@@ -670,6 +770,7 @@ def run_annotation_test(
             n_perm=n_perm,
             results_dir=results_dir,
             seed=seed,
+            stratum_col=stratum_col,
         )
 
     n_resumed = sum(
@@ -815,6 +916,11 @@ def _parse_args() -> argparse.Namespace:
         choices=["tsv.gz", "parquet"],
         help="Pooled results format (per-protein shards are always parquet)",
     )
+    parser.add_argument(
+        "--stratum-col",
+        default=None,
+        help="rvas column defining CMH strata; adjusts the test for stratum-dependent case fraction",
+    )
     return parser.parse_args()
 
 
@@ -839,6 +945,7 @@ def main() -> None:
         results_dir=args.results_dir,
         cleanup_per_protein=args.cleanup_per_protein,
         format=args.format,
+        stratum_col=args.stratum_col,
     )
 
 

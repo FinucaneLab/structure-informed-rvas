@@ -252,7 +252,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 
 # seeding + resume
-from scan_test import get_case_control_ac_matrix
+from utils import get_case_control_ac_matrix
 from annotation_test_permutation import protein_seed, run_annotation_test
 
 demo = pd.DataFrame({"aa_pos": [1, 3, 5, 8], "ac_case": [3, 1, 2, 2], "ac_control": [1, 2, 1, 3]})
@@ -278,5 +278,102 @@ with tempfile.TemporaryDirectory() as d:
     assert (res.loc[res.uniprot_id == "P1", "p_value"] == 0.123).all()
     res = run_annotation_test(rv, an, n_perm=6, **kw)
     assert not (res["p_value"] == 0.123).any()
+
+# CMH: with one stratum, the CMH p-value is the pooled Fisher exact p wherever the chi2 screen passes.
+from scipy.sparse import csr_matrix
+from scipy.stats import fisher_exact
+from utils import get_stratified_case_ac_matrix
+from cmh import cmh_expected_variance, mantel_haenszel_or, screen_and_exact_pvalues, summarize_strata
+
+rng = np.random.default_rng(0)
+L = 30
+one = pd.DataFrame(
+    {"aa_pos": rng.integers(1, L + 1, 60), "ac_case": rng.poisson(1.5, 60), "ac_control": rng.poisson(1.5, 60)}
+)
+one["stratum"] = "s"
+labels = np.zeros((4, L), dtype=bool)
+for i, (lo, hi) in enumerate([(0, 8), (5, 15), (10, 11), (20, 30)]):
+    labels[i, lo:hi] = True
+case_ac, case_k, tot_k = get_stratified_case_ac_matrix(one, "stratum", L, 50, protein_seed("P1"))
+lab1 = csr_matrix(labels.astype(np.int8))
+inside_tot, inside_case = np.asarray(lab1 @ tot_k), np.asarray(lab1 @ case_k)
+e1, v1 = cmh_expected_variance(inside_tot, case_k.sum(0), tot_k.sum(0))
+cmh = {
+    "s_case_inside": np.asarray(lab1 @ case_ac), "expected_sum": e1, "variance_sum": v1,
+    "inside_totals_by_stratum": inside_tot, "case_totals": case_k.sum(0), "stratum_totals": tot_k.sum(0),
+}
+pv, stat = screen_and_exact_pvalues(cmh, 0.0)  # screen off: every informative row gets an exact p
+tot_case, tot_ctrl = int(case_k.sum()), int(tot_k.sum() - case_k.sum())
+a = cmh["s_case_inside"]
+b = inside_tot.sum(1)[:, None] - a
+for r, c in [(0, 0), (1, 0), (2, 0), (3, 0), (0, 1), (1, 7)]:
+    if stat[r, c] > 0:
+        _, ref = fisher_exact([[a[r, c], tot_case - a[r, c]], [b[r, c], tot_ctrl - b[r, c]]])
+        assert abs(pv[r, c] - ref) < 1e-9, (r, c, pv[r, c], ref)
+
+# CMH: two strata with opposite case fractions and opposite inside/outside coverage, but
+# case fraction identical inside vs outside within each stratum -> pure confounding.
+def toy_rows(stratum, inside, outside):
+    return [
+        dict(stratum=stratum, aa_pos=pos, ac_case=case, ac_control=ctrl)
+        for pos, (case, ctrl) in ((1, inside), (10, outside))
+    ]
+
+conf = pd.DataFrame(toy_rows("H", (72, 18), (8, 2)) + toy_rows("L", (2, 8), (18, 72))).assign(uniprot_id="P1")
+conf_ann = pd.DataFrame(
+    {"uniprot_id": ["P1"], "concept_type": "Site", "concept_value": "x", "start": 1, "end": 5}
+)
+with tempfile.TemporaryDirectory() as d:
+    kw = dict(n_perm=200, min_alleles=0, cleanup_per_protein=False)
+    unadj = run_annotation_test(conf, conf_ann, results_dir=Path(d) / "u", **kw)
+    adj = run_annotation_test(conf, conf_ann, results_dir=Path(d) / "a", stratum_col="stratum", **kw)
+assert unadj["p_value"].iloc[0] < 1e-6
+assert adj["p_value"].iloc[0] > 0.1 and abs(adj["odds_ratio"].iloc[0] - 1) < 1e-9
+assert adj["n_informative_strata"].iloc[0] == 2 and adj["frac_ac_informative"].iloc[0] == 1.0
+
+# mantel_haenszel_or: stratum 1 (a,b,c,d)=(3,1,1,3), stratum 2 (1,1,2,4)
+mh = mantel_haenszel_or(np.array([[3, 1]]), np.array([[4, 2]]), np.array([4, 3]), np.array([8, 8]))
+assert np.isclose(mh[0], (9 / 8 + 4 / 8) / (1 / 8 + 2 / 8))
+
+strata = summarize_strata(pd.DataFrame({"stratum": ["a", "a", "b"], "ac_case": [1, 2, 0], "ac_control": [1, 0, 3]}), "stratum")
+assert strata.loc["a", "n_variants"] == 2 and strata.loc["b", "case_frac"] == 0
+
+# CMH annotation test: observed counts are consistent; null has the right moments.
+from annotation_test_permutation import test_protein_annotations_cmh
+
+rng = np.random.default_rng(1)
+L = 40
+multi = pd.DataFrame(
+    {
+        "aa_pos": rng.integers(1, L + 1, 120),
+        "ac_case": rng.poisson(1.0, 120),
+        "ac_control": rng.poisson(1.5, 120),
+        "stratum": rng.choice(["a", "b", "c", "d"], 120, p=[0.5, 0.3, 0.19, 0.01]),
+    }
+)
+multi.loc[multi["stratum"] == "d", ["ac_case", "ac_control"]] = [1, 0]  # single-allele stratum
+multi = pd.concat([multi, pd.DataFrame({"aa_pos": [3], "ac_case": [0], "ac_control": [0], "stratum": ["e"]})])  # empty stratum
+labels = np.zeros((5, L), dtype=bool)
+for i, (lo, hi) in enumerate([(0, 8), (5, 15), (10, 11), (20, 40), (30, 33)]):
+    labels[i, lo:hi] = True
+meta = {i: (f"a{i}",) for i in range(len(labels))}
+args = ("P1", multi, labels, meta, 4000, "stratum")
+res = test_protein_annotations_cmh(*args)
+obs_case = labels @ multi.groupby("aa_pos")["ac_case"].sum().reindex(range(1, L + 1), fill_value=0).to_numpy()
+obs_total = labels @ (multi.groupby("aa_pos")[["ac_case", "ac_control"]].sum().sum(axis=1)).reindex(range(1, L + 1), fill_value=0).to_numpy()
+assert (res["ac_in_case"] == obs_case).all() and (res["ac_in_case"] + res["ac_in_ctrl"] == obs_total).all()
+
+case_ac, case_k, tot_k = get_stratified_case_ac_matrix(multi, "stratum", L, 4000, protein_seed("P1"))
+lab = csr_matrix(labels.astype(np.int8))
+s_null = np.asarray(lab @ case_ac)[:, 1:]
+exp, var = cmh_expected_variance(np.asarray(lab @ tot_k), case_k.sum(0), tot_k.sum(0))
+for r in np.flatnonzero(var > 0):
+    assert abs(s_null[r].mean() - exp[r]) < 5 * np.sqrt(var[r] / s_null.shape[1]), r
+    assert 0.85 < s_null[r].var() / var[r] < 1.15, r
+
+conf_res = test_protein_annotations_cmh(
+    "P1", conf, np.isin(np.arange(1, 11), range(1, 6))[None, :], {0: ("x",)}, 200, "stratum"
+)
+assert conf_res["p_value"].iloc[0] > 0.1 and abs(conf_res["odds_ratio"].iloc[0] - 1) < 1e-9
 
 print("ok")

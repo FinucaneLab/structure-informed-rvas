@@ -6,7 +6,7 @@ import bisect
 import h5py
 from scipy.stats import fisher_exact, binom
 from scipy import special
-from utils import get_adjacency_matrix, valid_for_fisher, write_dataset, read_p_values
+from utils import DEFAULT_SCREEN_CHI2, get_adjacency_matrix, valid_for_fisher, write_dataset, read_p_values, get_case_control_ac_matrix
 from logger_config import get_logger
 from empirical_fdr import compute_fdr
 
@@ -65,11 +65,7 @@ def get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_
         ((d - expected_d)**2 / np.maximum(1e-10, expected_d))
     )
     
-    # Use a more lenient threshold for chi-square to catch all potential p < 0.05
-    # chi2_threshold corresponds to p-value slightly higher than 0.05 (e.g., 0.1)
-    # For df=1, chi2 value of 2.706 corresponds to p=0.1
-    chi2_threshold = 2.706
-    potential_significant = (chi2 > chi2_threshold) & valid_mask
+    potential_significant = (chi2 > DEFAULT_SCREEN_CHI2) & valid_mask
     
     # Second pass: Calculate exact p-values only for potentially significant cells
     indices = np.where(potential_significant)
@@ -92,31 +88,6 @@ def get_nbhd_counts(adjacency_matrix, ac_per_residue):
     nbhd_counts = adjacency_matrix @ ac_per_residue
     nbhd_counts = nbhd_counts.astype(int)
     return nbhd_counts
-
-def get_ac_per_residue(df, colname, n_res):
-    case_ac_per_residue = np.zeros((n_res, 1))
-    ac_by_pos = df.groupby('aa_pos')[colname].sum().reset_index()
-    case_ac_per_residue[ac_by_pos.aa_pos - 1, 0] = ac_by_pos[colname]
-    return case_ac_per_residue
-
-def get_random_ac_per_residue(case_ac_per_residue, total_ac_per_residue, n_sim, seed=None):
-    # seed is passed straight to default_rng: a previous version called np.random.seed(),
-    # which seeds the legacy global RNG and has no effect on default_rng(), so the seed
-    # was silently ignored and runs were not reproducible.
-    n_alleles = int(  case_ac_per_residue.sum()  )
-    gen = np.random.default_rng(seed)
-    null_ac_per_residue = gen.multivariate_hypergeometric(total_ac_per_residue.astype(int), n_alleles, n_sim).T
-    return null_ac_per_residue
-
-def get_case_control_ac_matrix(df, n_res, n_sim, seed=None):
-    case_ac_per_residue = get_ac_per_residue(df, 'ac_case', n_res)
-    control_ac_per_residue = get_ac_per_residue(df, 'ac_control', n_res)
-    total_ac_per_residue = (case_ac_per_residue + control_ac_per_residue).flatten()
-    null_case_ac_per_residue = get_random_ac_per_residue(case_ac_per_residue, total_ac_per_residue, n_sim, seed)
-    null_control_ac_per_residue = total_ac_per_residue[:, np.newaxis] - null_case_ac_per_residue
-    case_ac_matrix = np.hstack([case_ac_per_residue, null_case_ac_per_residue])
-    control_ac_matrix = np.hstack([control_ac_per_residue, null_control_ac_per_residue])
-    return case_ac_matrix, control_ac_matrix
 
 def compute_all_pvals(
         df,

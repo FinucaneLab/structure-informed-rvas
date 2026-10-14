@@ -3,6 +3,11 @@ from __future__ import annotations
 import numpy as np
 from scipy.stats import hypergeom
 
+from logger_config import get_logger
+from utils import DEFAULT_SCREEN_CHI2
+
+logger = get_logger(__name__)
+
 
 REL_ERR = 1.0 + 1e-7
 
@@ -155,3 +160,86 @@ def exact_cmh_pvalue(
             f"[{support[0]}, {support[-1]}]"
         )
     return float(pvals[observed - support[0]])
+
+
+def screen_and_exact_pvalues(cmh, screen_chi2=DEFAULT_SCREEN_CHI2):
+    s = cmh["s_case_inside"]
+    e = cmh["expected_sum"]
+    v = cmh["variance_sum"]
+
+    stat = cmh_chisq_stat(s, e, v)
+    informative = v > 0
+
+    candidate = (stat > float(screen_chi2)) & informative[:, None]
+    pvals = np.ones_like(stat, dtype=np.float64)
+
+    inside_by_k = cmh["inside_totals_by_stratum"]
+    case_totals = cmh["case_totals"]
+    totals = cmh["stratum_totals"]
+
+    cache = {}
+    rows = np.where(candidate.any(axis=1))[0]
+
+    for r in rows:
+        cols = np.where(candidate[r])[0]
+        inside = inside_by_k[r, :]
+        key = inside.tobytes()
+
+        if key not in cache:
+            support, p_lookup = exact_cmh_minlike_lookup(
+                inside,
+                case_totals,
+                totals,
+            )
+            cache[key] = (int(support[0]), int(support[-1]), p_lookup)
+
+        lo, hi, p_lookup = cache[key]
+        sval = s[r, cols].astype(np.int64)
+        if np.any(sval < lo) or np.any(sval > hi):
+            raise RuntimeError(
+                f"CMH sufficient statistic outside exact support at residue {r + 1}"
+            )
+        pvals[r, cols] = p_lookup[sval - lo]
+
+    return pvals, stat
+
+
+def mantel_haenszel_or(inside_case_by_stratum, inside_totals_by_stratum, case_totals, stratum_totals):
+    """
+    Mantel-Haenszel common odds ratio of "case vs control" for inside vs outside, per row.
+    Per stratum k: a=case inside, b=ctrl inside, c=case outside, d=ctrl outside;
+    OR = sum(a*d/n) / sum(b*c/n). inf when only the denominator is 0, nan when both are.
+    """
+    a = np.asarray(inside_case_by_stratum, dtype=np.float64)
+    b = np.asarray(inside_totals_by_stratum, dtype=np.float64) - a
+    case = np.asarray(case_totals, dtype=np.float64)
+    n = np.asarray(stratum_totals, dtype=np.float64)
+    keep = n > 0
+    a, b, case, n = a[:, keep], b[:, keep], case[keep], n[keep]
+    c = case - a
+    d = (n - case) - b
+    num = (a * d / n).sum(axis=1)
+    den = (b * c / n).sum(axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return num / den
+
+
+def summarize_strata(rvas_df, stratum_col):
+    """Per-stratum allele counts; warns once about strata with no cases or no controls."""
+    if stratum_col not in rvas_df.columns:
+        raise KeyError(f"Missing stratum column '{stratum_col}'")
+    if rvas_df[stratum_col].isna().any():
+        raise ValueError(f"Missing values found in stratum column '{stratum_col}'")
+    summary = rvas_df.groupby(stratum_col).agg(
+        n_variants=("ac_case", "size"),
+        ac_case=("ac_case", "sum"),
+        ac_control=("ac_control", "sum"),
+    )
+    summary["case_frac"] = summary["ac_case"] / (summary["ac_case"] + summary["ac_control"])
+    empty = summary.index[(summary["ac_case"] == 0) | (summary["ac_control"] == 0)]
+    if len(empty):
+        logger.warning(
+            f"{len(empty)}/{len(summary)} strata have no cases or no controls and carry "
+            f"no CMH information: {list(empty)}"
+        )
+    return summary
