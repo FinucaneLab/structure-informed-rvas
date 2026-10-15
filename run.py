@@ -8,7 +8,6 @@ from pathlib import Path
 from scan_test import scan_test
 from scan_test_cmh import scan_test_cmh, DEFAULT_SCREEN_CHI2
 from read_data import map_to_protein, filter_by_total_ac
-from pymol_code import make_movie_from_pse
 from logger_config import get_logger
 from utils import get_nbhd_info
 from annotation_test_permutation import run_annotation_test, read_table
@@ -881,6 +880,7 @@ if __name__ == '__main__':
     elif args.make_movie:
         if not (args.pse and args.results_dir):
             raise ValueError("For making a movie, you must provide --pse and --results_dir")
+        from pymol_code import make_movie_from_pse  # pymol is only needed here
         make_movie_from_pse(args.results_dir, args.pse)
         did_nothing = False
 
