@@ -250,6 +250,26 @@ This writes two files to `results_epi25/neighborhoods/`:
 - `KCNA1_Q09470_378_nbhd.tsv`: per-residue case and control allele counts within the neighborhood
 - `KCNA1_Q09470_378_nbhd_features.tsv`: overlap of each functional feature with the neighborhood, sorted by fraction of case-only mutations
 
+### Annotation test
+
+Permutation test of annotation sets (UniProt features, domains, clusters) for case/control burden. The annotation file is either:
+- long: one row per annotation interval (`uniprot_id, concept_type, concept_value, start, end`) or per annotated residue (`uniprot_id, aa_pos, <columns>`). `--annotation-id` lists the columns joined into the annotation id (default `concept_type,concept_value`).
+- wide (`--annotation-format wide`): one row per residue, one column per annotation. `--annotation-id` lists the columns used as ids (default all).
+
+```
+# long, binding/active sites expanded to their 3D neighborhood
+python run.py --pre-mapped-rvas rvas.mapped.parquet --reference-dir sir-reference-data/ \
+  --annotation-file annotations.parquet --annotation-expand 'Binding site,Active site' \
+  --neighborhood-radius 15 --pae-cutoff 15 --results-dir results/
+
+# wide, testing only the cluster_id column
+python run.py --pre-mapped-rvas rvas.mapped.parquet --reference-dir sir-reference-data/ \
+  --annotation-file clusters.parquet --annotation-format wide --annotation-id cluster_id \
+  --results-dir results/
+```
+
+`--annotation-expand` takes id prefixes or `all`; without it nothing is expanded. Output is `results/annotation_test/results.tsv.gz` with `p_value`, `local_fdr`/`local_fwer`, `global_fdr`/`global_fwer` and `bh_fdr`. `--df-filter` (columns `uniprot_id`, optionally `aa_pos`, `aa_ref`, `aa_alt`) restricts the RVAS data to those proteins/positions/variants before the test, which also changes the null. A crashed run resumes from `per_protein/` shards if rerun with the same `--results-dir` and `--n-sims`.
+
 ### Full Pipeline (run_all)
 
 The `run_all` subcommand runs visualization, annotation, and neighborhood feature tables for every significant protein in an FDR results file in a single command:

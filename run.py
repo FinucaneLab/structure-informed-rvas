@@ -4,12 +4,14 @@ import numpy as np
 import os
 import h5py
 import glob
+from pathlib import Path
 from scan_test import scan_test
 from scan_test_cmh import scan_test_cmh, DEFAULT_SCREEN_CHI2
 from read_data import map_to_protein, filter_by_total_ac
 from pymol_code import make_movie_from_pse
 from logger_config import get_logger
 from utils import get_nbhd_info
+from annotation_test_permutation import run_annotation_test, read_table
 
 logger = get_logger(__name__)
 
@@ -33,7 +35,7 @@ def map_and_filter_rvas(
 
     if pre_mapped_rvas is not None:
         logger.info(f"Loading pre-mapped RVAS dataframe from {pre_mapped_rvas}")
-        df_rvas = pd.read_csv(pre_mapped_rvas, sep='\t')
+        df_rvas = read_table(Path(pre_mapped_rvas))
     elif rvas_data_to_map is not None:
         df_rvas = map_to_protein(
             rvas_data_to_map,
@@ -99,10 +101,7 @@ def map_and_filter_rvas(
         filter_files = df_filter.split(',')
         def read_filter_file(f):
             df_filter = pd.read_csv(f, sep='\t')
-            if 'aa_pos' in df_filter.columns:
-                df_filter = df_filter[['uniprot_id', 'aa_pos']]
-            else:
-                df_filter = df_filter[['uniprot_id']]
+            df_filter = df_filter[[c for c in ['uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt'] if c in df_filter.columns]]
             df_filter = df_filter.drop_duplicates()
             return df_filter
         df_filter = read_filter_file(filter_files[0])
@@ -385,7 +384,9 @@ if __name__ == '__main__':
         To consider only a subset of results and compute FDR for this subset, 
         use this flag to specify the path to a tsv with the proteins or specific
         amino acids to filter to during fdr computation. The tsv must have a 
-        column called uniprot_id and can also have an aa_pos column.
+        column called uniprot_id and can also have aa_pos, aa_ref and aa_alt
+        columns. With --annotation-file, the RVAS data is restricted to these
+        proteins/positions/variants before the test.
         '''
     )
     parser.add_argument(
@@ -538,6 +539,33 @@ if __name__ == '__main__':
         type=str,
         default=None,
         help='Amino acid residue position in --uniprot-id for center of desired neighborhood'
+    )
+    parser.add_argument(
+        '--annotation-file',
+        type=str,
+        default=None,
+        help='perform a burden test using this annotation',
+    )
+    parser.add_argument(
+        '--annotation-format',
+        choices=['long', 'wide'],
+        default='long',
+        help='long = one row per annotation-position/interval (concept_type, concept_value, start, end, or aa_pos); wide = one row per residue',
+    )
+    parser.add_argument(
+        '--annotation-expand',
+        default=None,
+        help="comma-separated annotation-id prefixes to expand to their 3D neighborhood using --neighborhood-radius/--pae-cutoff (e.g. 'Binding site,Active site'), or 'all'. Without it there is no expansion.",
+    )
+    parser.add_argument(
+        '--annotation-id',
+        type=str,
+        default=None,
+        help='''
+        Used with --annotation-file. Long format: the columns joined into
+        the annotation id (default concept_type,concept_value). Wide format:
+        the columns used as ids (default all).
+        '''
     )
     args = parser.parse_args()
 
@@ -816,6 +844,34 @@ if __name__ == '__main__':
             args.pval_file,
             args.remove_nbhd,
             args.seed,
+        )
+        did_nothing = False
+    
+    elif args.annotation_file is not None:
+        logger.info('Starting annotation test analysis')
+        if args.ignore_ac:
+            raise ValueError("--ignore-ac is not supported with --annotation-file")
+        expand = args.annotation_expand
+        if expand and isinstance(args.neighborhood_radius, str):
+            raise ValueError('--annotation-expand needs a numeric --neighborhood-radius')
+        if args.annotation_id:
+            ann_id_columns = tuple(args.annotation_id.split(','))
+        else:
+            ann_id_columns = ('*',) if args.annotation_format == 'wide' else ('concept_type', 'concept_value')
+        run_annotation_test(
+            df_rvas,
+            read_table(Path(args.annotation_file)),
+            ann_format=args.annotation_format,
+            ann_id_columns=ann_id_columns,
+            expand_radius=args.neighborhood_radius if expand else 0,
+            expand_include=None if expand in (None, 'all') else expand.split(','),
+            pae_cutoff=args.pae_cutoff,
+            reference_dir=args.reference_dir,
+            df_include=df_filter,
+            n_perm=args.n_sims,
+            seed=args.seed,
+            results_dir=Path(args.results_dir) / 'annotation_test',
+            cleanup_per_protein=True,
         )
         did_nothing = False
 

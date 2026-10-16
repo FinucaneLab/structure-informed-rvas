@@ -8,6 +8,7 @@ import os
 import re
 import json
 import warnings
+from scipy.stats import chi2 as chi2_dist
 from logger_config import get_logger
 
 logger = get_logger(__name__)
@@ -191,6 +192,64 @@ def get_adjacency_matrix(pdb_pae_file_pos_guide, pdb_dir, pae_dir, uniprot_id, r
     adj_mat = dist_thresh & pae_thresh
     logger.debug(f"Adjacency matrix computed: {np.sum(adj_mat)} edges from {adj_mat.shape[0]} positions")
     return adj_mat
+def get_chi2_pvals_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_ctrl):
+    """Chi-square p-value lookup table over every (case_ac, ctrl_ac) pair in a neighborhood.
+
+    Vectorized 1-df chi-square approximation to the Fisher's exact p-value for every
+    possible 2x2 table with margins (n_case, n_ctrl); callers should only run the exact
+    Fisher test afterwards for the (a, b) pairs this flags as borderline - avoids calling
+    scipy.stats.fisher_exact per cell/permutation, which dominates runtime at scale.
+    Used by annotation_test_permutation.
+
+    Returns:
+        pvals: (max_a+1, max_b+1) chi-square p-values.
+        potential_significant: same-shape mask, True where the exact test should be used.
+    """
+    max_n_case_nbhd = int(np.max(n_case_nbhd_mat))
+    max_n_control_nbhd = int(np.max(n_control_nbhd_mat))
+
+    case_nbhd_range = np.arange(max_n_case_nbhd + 1)
+    ctrl_nbhd_range = np.arange(max_n_control_nbhd + 1)
+    n_case_grid, n_ctrl_grid = np.meshgrid(
+        case_nbhd_range, ctrl_nbhd_range, indexing="ij"
+    )
+
+    a, b = n_case_grid, n_ctrl_grid
+    c, d = n_case - a, n_ctrl - b
+
+    col1_sum, col2_sum = a + c, b + d
+    row1_sum, row2_sum = a + b, c + d
+    valid_mask = (
+        (col1_sum > 0)
+        & (col2_sum > 0)
+        & (row1_sum > 0)
+        & (row2_sum > 0)
+        & (a >= 0)
+        & (b >= 0)
+        & (c >= 0)
+        & (d >= 0)
+    )
+
+    n_total = n_case + n_ctrl
+    expected_a = row1_sum * col1_sum / n_total
+    expected_b = row1_sum * col2_sum / n_total
+    expected_c = row2_sum * col1_sum / n_total
+    expected_d = row2_sum * col2_sum / n_total
+
+    valid_array = valid_mask.astype(float)
+    chi2_stat = valid_array * (
+        ((a - expected_a) ** 2 / np.maximum(1e-10, expected_a))
+        + ((b - expected_b) ** 2 / np.maximum(1e-10, expected_b))
+        + ((c - expected_c) ** 2 / np.maximum(1e-10, expected_c))
+        + ((d - expected_d) ** 2 / np.maximum(1e-10, expected_d))
+    )
+
+    pvals = np.where(valid_mask, chi2_dist.sf(chi2_stat, df=1), 1.0)
+    # chi2 = 2.706 (df=1) corresponds to p~0.1: a lenient pre-filter so no p<0.05 case is missed.
+    potential_significant = (chi2_stat > 2.706) & valid_mask
+    return pvals, potential_significant
+
+
 def valid_for_fisher(contingency_table):
     valid_columns = np.all(np.sum(contingency_table, axis=0) > 0)
     valid_rows = np.all(np.sum(contingency_table, axis=1) > 0)
