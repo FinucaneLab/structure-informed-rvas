@@ -60,3 +60,5 @@ Thumbs.db
 # Examples and documentation artifacts
 examples/
 docs/_build/
+all_missense_variants_gr38.h5
+UKBB_phenocode_30120_variants_AC5_to-map.tsv
