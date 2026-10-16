@@ -160,8 +160,11 @@ def _q_apply_corrections(df_stats, false_discoveries, fwer):
     
     # Add FWER
     df_stats['fwer'] = fwer
-    
-    return df_stats[['uniprot_id', 'aa_pos', 'n_a_tstat', 'fdr', 'fwer', 'mean_betahat', 'n_betahat']]
+
+    output_cols = ['uniprot_id', 'aa_pos', 'n_a_tstat', 'fdr', 'fwer', 'mean_betahat', 'n_betahat']
+    if 'radius' in df_stats.columns:
+        output_cols.append('radius')
+    return df_stats[output_cols]
 
 
 def summarize_results(df_results, fdr_cutoff, fwer_cutoff=0.05):
