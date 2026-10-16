@@ -8,7 +8,6 @@ from pathlib import Path
 from scan_test import scan_test
 from scan_test_cmh import scan_test_cmh, DEFAULT_SCREEN_CHI2
 from read_data import map_to_protein, filter_by_total_ac
-from pymol_code import make_movie_from_pse
 from logger_config import get_logger
 from utils import get_nbhd_info
 from annotation_test_permutation import run_annotation_test, read_table
@@ -610,6 +609,10 @@ if __name__ == '__main__':
     if not (0 < args.fdr_cutoff < 1):
         raise ValueError(f"FDR cutoff must be between 0 and 1, got {args.fdr_cutoff}")
 
+    annotation_cmh = args.annotation_file is not None and args.test_method == 'cmh'
+    if annotation_cmh and args.stratum_col is None:
+        raise ValueError("--test-method cmh requires --stratum-col")
+
     if args.run_3dnt and args.test_method == 'cmh' and not args.fdr_only:
         if args.stratum_col is None:
             raise ValueError("--test-method cmh requires --stratum-col")
@@ -705,9 +708,7 @@ if __name__ == '__main__':
     )
 
     if (
-        args.run_3dnt
-        and args.test_method == 'cmh'
-        and not args.fdr_only
+        (args.run_3dnt and args.test_method == 'cmh' and not args.fdr_only or annotation_cmh)
         and df_rvas is not None
     ):
         if args.stratum_col not in df_rvas.columns:
@@ -872,12 +873,14 @@ if __name__ == '__main__':
             seed=args.seed,
             results_dir=Path(args.results_dir) / 'annotation_test',
             cleanup_per_protein=True,
+            stratum_col=args.stratum_col if annotation_cmh else None,
         )
         did_nothing = False
 
     elif args.make_movie:
         if not (args.pse and args.results_dir):
             raise ValueError("For making a movie, you must provide --pse and --results_dir")
+        from pymol_code import make_movie_from_pse  # pymol is only needed here
         make_movie_from_pse(args.results_dir, args.pse)
         did_nothing = False
 

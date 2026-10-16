@@ -8,15 +8,13 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix
 
-from cmh import cmh_chisq_stat, cmh_expected_variance, exact_cmh_minlike_lookup
+from cmh import cmh_expected_variance, screen_and_exact_pvalues
 from empirical_fdr import compute_fdr
 from logger_config import get_logger
-from utils import get_adjacency_matrix, write_dataset
+from utils import DEFAULT_SCREEN_CHI2, draw_stratified_null_cases, get_adjacency_matrix, write_dataset
 
 
 logger = get_logger(__name__)
-
-DEFAULT_SCREEN_CHI2 = 2.706
 
 
 def _protein_seed(base_seed, uniprot_id):
@@ -44,32 +42,6 @@ def _per_residue_counts(df_s, n_res):
     case[pos] = agg["ac_case"].to_numpy(dtype=np.int64)
     control[pos] = agg["ac_control"].to_numpy(dtype=np.int64)
     return case, control
-
-
-def _draw_stratified_null_cases(total_per_residue, n_case, n_sims, rng):
-    total_per_residue = np.asarray(total_per_residue, dtype=np.int64)
-    n_total = int(total_per_residue.sum())
-    n_case = int(n_case)
-
-    if n_case < 0 or n_case > n_total:
-        raise ValueError("Invalid case total for multivariate hypergeometric draw")
-    if n_sims <= 0:
-        return np.empty((len(total_per_residue), 0), dtype=np.int32)
-    if n_case == 0:
-        return np.zeros((len(total_per_residue), n_sims), dtype=np.int32)
-    if n_case == n_total:
-        return np.repeat(
-            total_per_residue[:, None].astype(np.int32),
-            n_sims,
-            axis=1,
-        )
-
-    draws = rng.multivariate_hypergeometric(
-        total_per_residue,
-        n_case,
-        size=n_sims,
-    )
-    return draws.T.astype(np.int32, copy=False)
 
 
 def _build_cmh_inputs(df, adjacency_matrix, n_sims, stratum_col, seed):
@@ -125,7 +97,7 @@ def _build_cmh_inputs(df, adjacency_matrix, n_sims, stratum_col, seed):
         total_inside_all += inside_total
         s_case_inside[:, 0] += inside_case_obs.astype(np.int32)
 
-        null_case_per_residue = _draw_stratified_null_cases(
+        null_case_per_residue = draw_stratified_null_cases(
             total,
             n_case,
             n_sims,
@@ -160,48 +132,6 @@ def _build_cmh_inputs(df, adjacency_matrix, n_sims, stratum_col, seed):
         "original_case": original_case_all,
         "original_control": original_control_all,
     }
-
-
-def _screen_and_exact_pvalues(cmh, screen_chi2=DEFAULT_SCREEN_CHI2):
-    s = cmh["s_case_inside"]
-    e = cmh["expected_sum"]
-    v = cmh["variance_sum"]
-
-    stat = cmh_chisq_stat(s, e, v)
-    informative = v > 0
-
-    candidate = (stat > float(screen_chi2)) & informative[:, None]
-    pvals = np.ones_like(stat, dtype=np.float64)
-
-    inside_by_k = cmh["inside_totals_by_stratum"]
-    case_totals = cmh["case_totals"]
-    totals = cmh["stratum_totals"]
-
-    cache = {}
-    rows = np.where(candidate.any(axis=1))[0]
-
-    for r in rows:
-        cols = np.where(candidate[r])[0]
-        inside = inside_by_k[r, :]
-        key = inside.tobytes()
-
-        if key not in cache:
-            support, p_lookup = exact_cmh_minlike_lookup(
-                inside,
-                case_totals,
-                totals,
-            )
-            cache[key] = (int(support[0]), int(support[-1]), p_lookup)
-
-        lo, hi, p_lookup = cache[key]
-        sval = s[r, cols].astype(np.int64)
-        if np.any(sval < lo) or np.any(sval > hi):
-            raise RuntimeError(
-                f"CMH sufficient statistic outside exact support at residue {r + 1}"
-            )
-        pvals[r, cols] = p_lookup[sval - lo]
-
-    return pvals, stat
 
 
 def compute_all_cmh_pvals(
@@ -241,7 +171,7 @@ def compute_all_cmh_pvals(
         stratum_col=stratum_col,
         seed=_protein_seed(seed, uniprot_id),
     )
-    pval_matrix, cmh_stat_matrix = _screen_and_exact_pvalues(
+    pval_matrix, cmh_stat_matrix = screen_and_exact_pvalues(
         cmh,
         screen_chi2=screen_chi2,
     )
