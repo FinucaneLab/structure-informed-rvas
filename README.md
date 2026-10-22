@@ -497,7 +497,9 @@ python structure-informed-rvas/precompute_mu_per_residue.py \
   --reference-dir sir-reference-data/
 ```
 
-This writes `sir-reference-data/mu_per_residue.parquet` (11.1M residues, 19,576 genes).
+This writes `sir-reference-data/mu_per_residue_gnomad.parquet` (11.1M residues,
+19,576 genes, chrX included). Point `--mu-file` at the Roulette parquet and `--out`
+at `mu_per_residue.parquet` to build the Roulette-derived table instead.
 
 ### Running it
 
