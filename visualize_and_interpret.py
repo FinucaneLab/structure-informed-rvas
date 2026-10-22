@@ -19,6 +19,7 @@ Usage:
 import argparse
 import csv
 import os
+import re
 import sys
 import numpy as np
 import pandas as pd
@@ -74,6 +75,19 @@ from uniprot_annotation import (aggregate_annotations_across_family,
 # Annotation transfer logic
 # ---------------------------------------------------------------------------
 
+
+
+def safe_name(name):
+    """
+    Make a gene name safe to put in a filename.
+
+    compute_fdr joins the gene names of a shared accession with '/' -- HBA1/HBA2, and
+    the histone clusters -- so the name is no longer a bare identifier. Interpolated
+    into a path it reads as a directory separator, and the write fails on a directory
+    that was never created. Collapse anything that is not filename-safe.
+    """
+    cleaned = re.sub(r'[^A-Za-z0-9._-]+', '_', str(name)).strip('_')
+    return cleaned or 'unnamed'
 
 
 def _load_gene_map(reference_dir):
@@ -345,7 +359,7 @@ def cmd_nbhd_features(args):
 
     # Save neighborhood residue file
     second_col = 'mu' if mu_mode else 'ac_control'
-    nbhd_path = os.path.join(nbhd_dir, f'{gene_name}_{args.uniprot}_{center}_nbhd.tsv')
+    nbhd_path = os.path.join(nbhd_dir, f'{safe_name(gene_name)}_{args.uniprot}_{center}_nbhd.tsv')
     df_mut[df_mut['aa_pos'].isin(nbhd)][['aa_pos', 'ac_case', second_col]].to_csv(
         nbhd_path, sep='\t', index=False
     )
@@ -357,7 +371,7 @@ def cmd_nbhd_features(args):
         print("No features overlap with this neighborhood.")
 
     out_path = args.output or os.path.join(
-        nbhd_dir, f'{gene_name}_{args.uniprot}_{center}_nbhd_features.tsv'
+        nbhd_dir, f'{safe_name(gene_name)}_{args.uniprot}_{center}_nbhd_features.tsv'
     )
     out_dir = os.path.dirname(out_path)
     if out_dir and not os.path.exists(out_dir):
@@ -527,8 +541,12 @@ def _units_from_components(components_file, gene_map):
         )
 
     units = []
-    for row in df.sort_values(['round', 'lead_p'] if 'lead_p' in df.columns
-                              else ['round']).itertuples():
+    # Sort by whichever of these the file actually has. `round` is written by
+    # conditional_scan but a hand-made components file need not carry it, and both
+    # branches of the old expression used it unconditionally.
+    sort_cols = [c for c in ('round', 'lead_p') if c in df.columns]
+    ordered = df.sort_values(sort_cols) if sort_cols else df
+    for row in ordered.itertuples():
         uniprot_id = row.uniprot_id
         gene_name = getattr(row, 'gene_name', None) or gene_map.get(uniprot_id, uniprot_id)
         residues = parse_pymol_positions(row.residues_pymol)
@@ -740,7 +758,7 @@ def cmd_analyze(args):
 
         # 5. Per-residue table for the region
         second_col = 'mu' if mu_mode else 'ac_control'
-        stem = f'{gene_name}_{uniprot_id}_{unit["label"]}'
+        stem = f'{safe_name(gene_name)}_{uniprot_id}_{unit["label"]}'
         suffix = 'component' if kind == 'component' else 'nbhd'
         res_path = os.path.join(nbhd_dir, f'{stem}_{suffix}.tsv')
         df_mut[df_mut['aa_pos'].isin(nbhd)][['aa_pos', 'ac_case', second_col]].to_csv(

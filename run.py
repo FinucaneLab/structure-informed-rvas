@@ -549,9 +549,11 @@ def build_parser():
         type=str,
         default='best',
         help='''
-        radius in Angstroms of the neighborhood removed around each called position.
-        'best' (default) uses the radius that position's scan actually chose, which is
-        the only sensible option under --neighborhood-radius multiple-small/multiple-big.
+        radius in Angstroms of the neighborhood removed around each position given to
+        --remove-nbhd. 'best' (default) uses the radius that position's scan actually
+        chose, which is the only sensible option under --neighborhood-radius
+        multiple-small/multiple-big. Conditional analysis does not use this: it masks a
+        component's own residue set, recorded in the components file.
         '''
     )
     parser.add_argument(
@@ -730,6 +732,17 @@ def validate_args(args):
         incompatible = 'it re-runs the scan each round, so it cannot be combined with --fdr-only'
     elif args.remove_nbhd is not None:
         incompatible = 'it chooses what to condition on, so it cannot be combined with --remove-nbhd'
+    elif args.test_method == 'cmh':
+        # conditional_scan drives scan_test or mutation_rate_scan_test; there is no CMH
+        # backend. Without this the conditional branch -- which precedes the CMH branch
+        # and is now on by default -- would silently run the unstratified Fisher scan
+        # for a command that asked for CMH.
+        incompatible = 'there is no CMH backend for it, so --test-method cmh would silently run the unstratified test'
+    elif args.no_fdr:
+        # Each round needs the corrected p-values to decide what to condition on next,
+        # so --no-fdr would leave it nothing to work from. The plain --run-3dnt branch
+        # honours --no-fdr; conditional analysis cannot.
+        incompatible = 'it needs each round\'s FDR to choose what to condition on, so it cannot be combined with --no-fdr'
 
     if incompatible is not None:
         if conditional_requested:
@@ -907,7 +920,7 @@ def main(argv=None):
         df_results.to_csv(f'{args.results_dir}/{args.fdr_file}', sep='\t', index=False)
         did_nothing = False
 
-    elif args.run_3dnt and args.conditional:
+    elif args.run_3dnt and args.conditional and args.test_method != 'cmh':
         from conditional_scan import conditional_scan
         mu_kwargs = None
         if mutation_rate_mode:
@@ -941,7 +954,6 @@ def main(argv=None):
             criterion=args.conditional_criterion,
             cutoff=args.conditional_cutoff,
             min_retained=args.conditional_min_retained,
-            conditioning_radius=args.conditional_radius,
             ignore_ac=args.ignore_ac,
             include_depletion=args.include_depletion,
             min_alleles=args.min_alleles,

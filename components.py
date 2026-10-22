@@ -267,6 +267,15 @@ def components_for_genes(
     for uniprot_id in sorted(genes):
         g = df_results[(df_results.uniprot_id == uniprot_id) &
                        (df_results[fdr_col] < member_cutoff)]
+        if len(g) == 0:
+            # The gene gate and the member gate are separate cutoffs, so a gene can
+            # clear the first with nothing clearing the second -- which happens
+            # whenever --fdr-cutoff is tighter than --conditional-gene-cutoff. Reading
+            # gene_name off the empty frame below used to raise IndexError and take the
+            # whole run down.
+            logger.info(f'{uniprot_id}: passes the gene gate but no neighborhood passes '
+                        f'the member gate ({fdr_col} < {member_cutoff}); no component')
+            continue
         # One row per position. Results tables written before the gene_name merge was
         # collapsed carry a row per paralogous gene name, which would otherwise put the
         # same centre in the component twice and make the lead lookup ambiguous.
@@ -307,12 +316,20 @@ def components_for_genes(
                     break
             centers.append((int(row.aa_pos), radius))
 
+        def _adjacency(radius, uniprot_id=uniprot_id):
+            adj = get_adjacency_matrix(pdb_guide, pdb_dir, pae_dir, uniprot_id,
+                                       radius, pae_cutoff)
+            if adj is None:
+                # It returns None rather than raising for a protein absent from the
+                # position guide, and np.asarray(None) is a 0-d object array, so without
+                # this the failure surfaced much later and outside this try/except as a
+                # confusing IndexError.
+                raise FileNotFoundError(
+                    f'no structure for {uniprot_id} at radius {radius}')
+            return np.asarray(adj)
+
         try:
-            adj_by_radius = {
-                r: np.asarray(get_adjacency_matrix(pdb_guide, pdb_dir, pae_dir,
-                                                   uniprot_id, r, pae_cutoff))
-                for r in sorted({r for _, r in centers})
-            }
+            adj_by_radius = {r: _adjacency(r) for r in sorted({r for _, r in centers})}
         except Exception as e:
             logger.warning(f'{uniprot_id}: could not build components - {e}')
             continue

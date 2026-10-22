@@ -46,6 +46,27 @@ def _rejects(argv, needle):
         return (needle.lower() in str(e).lower()), str(e)[:70]
 
 
+def _dispatch_branch(args):
+    """
+    Which branch of main()'s if/elif chain this namespace selects.
+
+    Mirrors the conditions in main() rather than calling it, so the test can assert
+    which analysis would run without running one. Keep in step with main().
+    """
+    mutation_rate_mode = (args.mu_col is not None) or (args.mu_file is not None)
+    if args.fdr_only and not args.run_3dnt:
+        return 'fdr_only'
+    if args.run_3dnt and args.conditional and args.test_method != 'cmh':
+        return 'conditional'
+    if args.run_3dnt and mutation_rate_mode:
+        return 'mutation_rate'
+    if args.run_3dnt and args.test_method == 'cmh':
+        return 'cmh'
+    if args.run_3dnt:
+        return 'scan'
+    return 'none'
+
+
 # Enough to get past the required-argument checks without touching the filesystem.
 BASE = ['--results-dir', '/tmp', '--reference-dir', '/tmp', '--fdr-file', 'x.fdr.tsv']
 
@@ -103,12 +124,20 @@ def test_cmh_validation():
     ok, msg = _rejects(cmh + ['--stratum-col', 's', '--mu-file'], 'mu-col/--mu-file')
     check('cmh with a mutation-rate null is refused', ok, msg)
 
-    # and the valid combination must get through
-    try:
-        a = _args(cmh + ['--stratum-col', 'ancestry'])
-        check('cmh with --stratum-col is accepted', a.test_method == 'cmh')
-    except Exception as e:
-        check('cmh with --stratum-col is accepted', False, f'{type(e).__name__}: {e}')
+    # Accepting the arguments is not the same as running the test, and asserting only
+    # the former is how the dispatch bug got past this file: conditional analysis
+    # became the default, its branch precedes the CMH branch, and `--test-method cmh`
+    # silently ran the unstratified Fisher scan while this test stayed green.
+    a = _args(cmh + ['--stratum-col', 'ancestry'])
+    check('cmh with --stratum-col is accepted', a.test_method == 'cmh')
+    check('cmh turns conditional analysis off rather than being swallowed by it',
+          a.conditional is False, f'conditional={a.conditional}')
+    check('so the CMH dispatch branch is the one that matches',
+          _dispatch_branch(a) == 'cmh', _dispatch_branch(a))
+
+    # and asking for both explicitly is a contradiction, not a silent downgrade
+    ok, msg = _rejects(cmh + ['--stratum-col', 's', '--conditional'], 'cmh')
+    check('explicit --conditional with cmh is refused', ok, msg)
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +160,26 @@ def test_conditional_defaulting():
 
     ok, msg = _rejects(quiet + ['--conditional'], 'cannot be used here')
     check('explicit --conditional with --fdr-only is refused', ok, msg)
+
+    # --no-fdr leaves conditional analysis nothing to choose hits from
+    nofdr = _args(scan + ['--no-fdr'])
+    check('--no-fdr turns conditional analysis off', nofdr.conditional is False)
+    check('and routes to the plain scan', _dispatch_branch(nofdr) == 'scan',
+          _dispatch_branch(nofdr))
+    ok, msg = _rejects(scan + ['--no-fdr', '--conditional'], 'no-fdr')
+    check('explicit --conditional with --no-fdr is refused', ok, msg)
+
+    # each remaining branch routes where it should
+    for argv, want in (
+        (scan, 'conditional'),
+        (scan + ['--no-conditional'], 'scan'),
+        # --mu-col sets the mutation-rate mode without needing a rate file on disk
+        (scan + ['--no-conditional', '--mu-col', 'mu'], 'mutation_rate'),
+        (BASE + ['--fdr-only'], 'fdr_only'),
+    ):
+        got = _dispatch_branch(_args(argv))
+        check(f'{" ".join(a for a in argv if a.startswith("--"))[:46]} -> {want}',
+              got == want, f'got {got}')
 
 
 # ---------------------------------------------------------------------------

@@ -440,6 +440,13 @@ the scan selected for it, and that radius is used when rebuilding the neighborho
 The tool looks for clusters of **case** variants. A neighborhood carrying fewer case
 variants than expected gets `p = 1` and is never called.
 
+What this does *not* do is compute one-sided p-values. The cells that survive keep the
+two-sided value `fisher_exact` returns, so enriched p-values are identical to a
+two-sided run -- the two modes stay directly comparable, and the retained values are
+conservative relative to a true one-sided test. Because significance here is empirical,
+with observed and null p-values passing through the same lookup, that monotone
+difference cancels and the discovery set is what a one-sided test would give.
+
 For the standard case/control 3DNT this is applied where Fisher's exact p-values are
 built: the p-value lookup is a grid indexed by (cases in neighborhood, controls in
 neighborhood), and cells with odds ratio < 1 keep `p = 1` without `fisher_exact` ever
@@ -782,7 +789,7 @@ one cluster of de novos is one component.
 
 **Enriched neighborhoods only.** Components describe clusters of case variants, so
 neighborhoods carrying fewer case variants than expected are excluded and the count is
-logged. Since the scan is one-sided by default (see Direction below) this is a no-op on
+logged. Since the scan is enrichment-only by default (see Direction below) this is a no-op on
 fresh runs; it matters when reading results files produced with `--include-depletion` or
 before that default existed. Enrichment is judged the way the test judges it -- observed
 against expected at fixed margins, i.e. odds ratio >= 1 -- not by the reported `ratio`
@@ -798,7 +805,7 @@ do with. The count excluded is logged. On the ClinVar results this matters a lot
 clustering everything gave 1,440 "components" of which 81% were lone neighborhoods
 holding no case variant at all, against 211 real ones. Clustering depletion would need a
 rule based on the controls rather than the cases, which is not implemented. The
-mutation-rate scan is one-sided by default, so the filter is a no-op there.
+mutation-rate scan tests enrichment only, so the filter is a no-op there.
 
 Two different gates:
 

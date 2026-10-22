@@ -24,11 +24,17 @@ def _load_gene_name(uniprot_id, reference_directory):
     return uniprot_id  # fall back to UniProt ID if not found
 
 
+def _safe(name):
+    """Filename-safe gene name; see safe_name in visualize_and_interpret."""
+    cleaned = re.sub(r'[^A-Za-z0-9._-]+', '_', str(name)).strip('_')
+    return cleaned or 'unnamed'
+
+
 def _pse_base(pdb_filename, gene_name, uniprot_id):
     """Return the base name for PSE files: {gene_name}_{uniprot_id}[_FN]."""
     match = re.search(r'-F(\d+)-', pdb_filename)
     frag = f'_F{match.group(1)}' if match else ''
-    return f'{gene_name}_{uniprot_id}{frag}'
+    return f'{_safe(gene_name)}_{uniprot_id}{frag}'
 
 
 def get_pdb_filename(annot_df, info_df):
@@ -200,20 +206,28 @@ def show_mutation_spheres(df_mut, mu_mode, scope='', pos_col='aa_pos'):
     return created
 
 
-def apply_effect_coloring(positions, effect, mu_mode, selection):
+def apply_effect_coloring(positions, effect, mu_mode, selection, vmax=None):
     """
     Colour `selection` by per-residue effect size, via the B-factor column.
 
     Mutation-rate mode uses observed/expected on a diverging scale pinned at 1 (see
-    _obs_exp_to_b); case/control uses the regularized ratio normalized to its own
-    maximum, which has no meaningful anchor and so is left auto-ranged.
+    _obs_exp_to_b); case/control uses the regularized ratio normalized to `vmax`, which
+    has no meaningful anchor of its own.
+
+    `vmax` must be the maximum over the WHOLE protein. The caller colours one PDB
+    fragment at a time, and taking the maximum within each fragment would normalize
+    every fragment to its own brightest residue -- so two fragments of one protein would
+    use different scales, and a fragment whose strongest signal is weak would be
+    coloured as though it were strong. Defaults to the maximum of what it is given,
+    which is correct only when that is the whole protein.
     """
     if mu_mode:
         b_values = _obs_exp_to_b(np.asarray(effect, dtype=float))
         palette, spectrum_range = "ratio_blue white ratio_red", {'minimum': 0.0, 'maximum': 1.0}
     else:
         effect = np.asarray(effect, dtype=float)
-        b_values = (effect / (effect.max() or 1.0)) ** 2
+        scale = float(vmax) if vmax is not None else float(effect.max() or 1.0)
+        b_values = (effect / (scale or 1.0)) ** 2
         palette, spectrum_range = "ratio_blue ratio_red", {}
 
     for pos, b in zip(positions, b_values):
@@ -364,13 +378,16 @@ def pymol_scan_test(uniprot_id, reference_directory, results_directory, pval_fil
             lambda x: os.path.join(pymol_dir, _pse_base(x, gene_name, uniprot_id) + '.pse')
         )
         effect_col = 'obs_exp' if mu_mode else 'ratio'
+        # Protein-wide, before the per-fragment loop below.
+        vmax = float(tmp_df[effect_col].max())
 
         for v in set(tmp_df['visual_filename']):
             cmd.reinitialize()
             cmd.load(f"{v.split('.')[0]}_gray.pse")
             objects = cmd.get_names('objects')[-1]
             sub = tmp_df[tmp_df['visual_filename'] == v]
-            apply_effect_coloring(sub['aa_pos'], sub[effect_col], mu_mode, objects)
+            apply_effect_coloring(sub['aa_pos'], sub[effect_col], mu_mode, objects,
+                                  vmax=vmax)
             cmd.show("cartoon", objects)
             cmd.hide("lines", objects)
             cmd.set("specular", 0.0)
@@ -456,7 +473,7 @@ def pymol_component(uniprot_id, reference_directory, results_directory, pval_fil
         cmd.set("cartoon_loop_radius", 0.4)
         cmd.deselect()
 
-        out = os.path.join(pymol_dir, f"{gene_name}_{uniprot_id}_{label}_component.pse")
+        out = os.path.join(pymol_dir, f"{_safe(gene_name)}_{uniprot_id}_{label}_component.pse")
         cmd.save(out)
         print(f"  Saved component PSE: {out}")
 

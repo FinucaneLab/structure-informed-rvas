@@ -59,13 +59,21 @@ def get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_
     """
     Fisher p-value for every (cases in neighborhood, controls in neighborhood) pair.
 
-    One-sided by default: a neighborhood with fewer case variants than expected gets
-    p = 1 and is never called. The tool is for finding clusters of case variants, and
-    spending multiple-testing burden on the opposite direction costs power -- on the
+    Enrichment only by default: a neighborhood with fewer case variants than expected
+    gets p = 1 and is never called. The tool is for finding clusters of case variants,
+    and spending multiple-testing burden on the opposite direction costs power -- on the
     ClinVar results 56% of significant neighborhoods were depleted. Pass
-    include_depletion=True for the old two-sided behaviour.
+    include_depletion=True to test both directions.
 
-    The one-sided rule is applied HERE, to the lookup grid, for two reasons.
+    Note what this is NOT. The cells that survive keep the p-value fisher_exact returns
+    by default, which is the TWO-SIDED one; this does not compute a one-sided p-value
+    and is not equivalent to alternative='greater'. Enriched p-values are therefore
+    unchanged from the two-sided run, which makes the two modes directly comparable, and
+    the retained values are conservative relative to a true one-sided test. Significance
+    here is empirical -- observed and null go through this same grid -- so the monotone
+    difference cancels and the discovery set is what a one-sided test would give.
+
+    The rule is applied HERE, to the lookup grid, for two reasons.
 
     It is where the null gets it for free. This grid is indexed into by the observed
     column and by all --n-sims null columns alike, so transforming it transforms the
@@ -498,7 +506,7 @@ def scan_test(
     with h5py.File(os.path.join(results_dir, pval_file), 'a') as fid:
         # Record how this file was made. resolve_pval_node keys off test_type, and
         # include_depletion is not recoverable from the p-values themselves -- without it
-        # a one-sided file is indistinguishable from a two-sided one after the fact.
+        # an enrichment-only file is indistinguishable from a two-sided one afterwards.
         fid.attrs['test_type'] = 'case_control'
         fid.attrs['n_sims'] = n_sims
         fid.attrs['include_depletion'] = bool(include_depletion)

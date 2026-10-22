@@ -432,6 +432,64 @@ def test_one_sided_lookup():
           bool((g[~depleted] < 1.0).any()))
 
 
+# ---------------------------------------------------------------------------
+def test_degenerate_inputs():
+    """
+    Things that should skip a gene, not take down the run.
+
+    All three come from a PR review. Each produced an exception far from its cause,
+    which is the kind of failure that makes a long exome-wide run unusable.
+    """
+    print('\n10. Degenerate inputs skip the gene')
+    from components import components_for_genes
+    from visualize_and_interpret import safe_name
+
+    base = dict(reference_dir='../sir-reference-data', pae_cutoff=15.0,
+                p_col='p_value', fdr_col='fdr', fwer_col='fwer',
+                radius_cols=('radius',), mu_mode=False)
+    df = pd.DataFrame({'uniprot_id': ['P1'], 'gene_name': ['G1'], 'aa_pos': [10],
+                       'p_value': [1e-9], 'fdr': [0.04], 'fwer': [0.01],
+                       'nbhd_case': [5], 'nbhd_control': [1]})
+
+    # The gene gate and member gate are separate cutoffs, so --fdr-cutoff tighter than
+    # --conditional-gene-cutoff leaves a gated gene with no members at all.
+    out = components_for_genes(df, {'P1'}, read_mut=lambda u: pd.DataFrame(),
+                               member_cutoff=0.01, **base)
+    check('a gene with no member passing the member gate is skipped', len(out) == 0,
+          f'{len(out)} components')
+
+    # get_adjacency_matrix returns None, not an exception, for an unknown protein.
+    df2 = df.assign(uniprot_id='NOT_A_PROTEIN', fdr=0.001)
+    mut = pd.DataFrame({'aa_pos': [10], 'ac_case': [2], 'ac_control': [0]})
+    out2 = components_for_genes(df2, {'NOT_A_PROTEIN'}, read_mut=lambda u: mut,
+                                member_cutoff=0.05, **base)
+    check('a gene with no structure is skipped', len(out2) == 0, f'{len(out2)} components')
+
+    # compute_fdr joins the gene names of a shared accession with '/', and that name is
+    # interpolated into output filenames.
+    check('a slashed gene name cannot become a path separator',
+          '/' not in safe_name('HBA1/HBA2'), safe_name('HBA1/HBA2'))
+    check('and it stays readable', safe_name('HBA1/HBA2') == 'HBA1_HBA2',
+          safe_name('HBA1/HBA2'))
+    check('an ordinary name is untouched', safe_name('CDK13') == 'CDK13')
+
+
+# ---------------------------------------------------------------------------
+def test_components_file_without_round():
+    """A components file lacking the optional `round` column must still be readable."""
+    print('\n11. Components file without a round column')
+    from visualize_and_interpret import _units_from_components
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'c.tsv')
+        pd.DataFrame([{'uniprot_id': 'P1', 'gene_name': 'G1', 'component_id': 1,
+                       'lead_aa_pos': 20, 'residues_pymol': '15-25',
+                       'n_case_alleles': 3}]).to_csv(path, sep='\t', index=False)
+        units = _units_from_components(path, {})
+    check('reads without `round`', len(units) == 1, f'{len(units)} units')
+    check('and defaults the round to 0', '(round 0)' in units[0]['info'], units[0]['info'])
+
+
 if __name__ == '__main__':
     test_shared_mutation_connects()
     test_overlap_without_mutation_does_not_connect()
@@ -442,5 +500,7 @@ if __name__ == '__main__':
     test_sphere_thinning()
     test_enriched_only()
     test_one_sided_lookup()
+    test_degenerate_inputs()
+    test_components_file_without_round()
     print('\n' + ('ALL TESTS PASSED' if not FAILURES else f'FAILURES: {FAILURES}'))
     sys.exit(1 if FAILURES else 0)

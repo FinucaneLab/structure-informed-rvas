@@ -43,18 +43,28 @@ def load_ref_for_chrom(path, chrom, pos_filter):
     return df
 
 
-# Rate column names, most preferred first. gnomAD is the default rate model, so its
-# column is checked before Roulette's; `mu_snp` matches neither a 'rate' substring nor a
-# bare 'mu', so without naming it explicitly the gnomAD file is unreadable.
-KNOWN_RATE_COLUMNS = ('mu_snp', 'roulette_rate', 'mu')
+# Rate column names, most preferred first. roulette_rate stays ahead of mu_snp because
+# that was the precedence before these were collected into one list, and a file carrying
+# both columns must keep resolving the way it used to -- changing which column such a
+# file is read from would silently change a rate model. No shipped file has both; this
+# is about not moving behaviour that nothing asked to move.
+KNOWN_RATE_COLUMNS = ('roulette_rate', 'mu_snp', 'mu')
 
 
 def identify_rate_column(schema_names, path=''):
-    """Pick the mutation-rate column of a rate reference file."""
+    """
+    Pick the mutation-rate column of a rate reference file.
+
+    Named columns first, then the pattern fallback for custom files: anything
+    containing 'rate', a bare 'mu' or 'u', or a 'mu_' prefix -- the last of which is
+    what lets an unlisted mu_<something> column work.
+    """
     for name in KNOWN_RATE_COLUMNS:
         if name in schema_names:
             return name
-    candidates = [c for c in schema_names if 'rate' in c.lower() or c.lower() in ('mu', 'u')]
+    candidates = [c for c in schema_names
+                  if 'rate' in c.lower() or c.lower() in ('mu', 'u')
+                  or c.lower().startswith('mu_')]
     if len(candidates) != 1:
         raise ValueError(
             f'Could not identify a mutation rate column in {path}. '

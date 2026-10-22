@@ -135,7 +135,6 @@ def conditional_scan(
     criterion='fdr',
     cutoff=None,
     min_retained=DEFAULT_MIN_RETAINED,
-    conditioning_radius='best',
     ignore_ac=False,
     include_depletion=False,
     min_alleles=5,
@@ -182,14 +181,31 @@ def conditional_scan(
             node, mu_mode = resolve_pval_node(fid, test or 'binomial')
             return read_original_mutation_data(node, uniprot_id, mu_mode=mu_mode)
 
-    def remaining_denovo(uniprot_id, masked):
-        """De novos left in a gene once `masked` residues are conditioned out."""
+    def gene_is_exhausted(uniprot_id, masked):
+        """
+        Has conditioning taken this gene below the bar it had to clear to be analysed?
+
+        The bar differs by null, so the check has to as well. The mutation-rate scan
+        admits a gene on --min-denovo de novos; the case/control scan admits it on
+        --min-alleles case AND control alleles. Counting only cases in case/control mode
+        would let a gene through while its controls had been masked away, leaving the
+        Fisher test nothing to compare against.
+
+        Returns (exhausted, description); exhausted is None when the counts cannot be
+        read, which is not the same as "has enough left".
+        """
         try:
             df_mut = read_mut(uniprot_id)
         except Exception as e:
-            logger.warning(f'{uniprot_id}: could not count remaining de novos - {e}')
-            return None
-        return int(df_mut.loc[~df_mut.aa_pos.isin(masked), 'ac_case'].sum())
+            logger.warning(f'{uniprot_id}: could not count remaining alleles - {e}')
+            return None, None
+        left = df_mut.loc[~df_mut.aa_pos.isin(masked)]
+        n_case = int(left['ac_case'].sum())
+        if mutation_rate_mode:
+            return n_case < min_denovo, f'{n_case} de novos'
+        n_control = int(left['ac_control'].sum())
+        return (n_case < min_alleles or n_control < min_alleles,
+                f'{n_case} case / {n_control} control alleles')
 
     # ---------------- round 0: the ordinary scan ----------------
     logger.info('Conditional analysis, round 0: unconditioned scan')
@@ -288,14 +304,14 @@ def conditional_scan(
         # significance. Drop those before paying for a re-scan.
         exhausted = []
         for uid in list(active):
-            left = remaining_denovo(uid, conditioning.get(uid, set()))
-            if left is not None and left < min_denovo:
-                exhausted.append((uid, left))
+            spent, detail = gene_is_exhausted(uid, conditioning.get(uid, set()))
+            if spent:
+                exhausted.append((uid, detail))
         if exhausted:
             logger.info(
-                f'Round {round_idx}: {len(exhausted)} genes have fewer than {min_denovo} '
-                f'de novos left after conditioning and are not re-scanned '
-                f'({", ".join(f"{u}:{n}" for u, n in exhausted[:8])}'
+                f'Round {round_idx}: {len(exhausted)} genes fall below the bar they had '
+                f'to clear to enter the analysis, and are not re-scanned '
+                f'({", ".join(f"{u} has {n}" for u, n in exhausted[:8])}'
                 f'{", ..." if len(exhausted) > 8 else ""})'
             )
             drop = {u for u, _ in exhausted}
