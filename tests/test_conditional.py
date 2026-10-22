@@ -491,10 +491,9 @@ def test_round_carries_the_whole_null_pool():
 
 
 def test_driver_helpers():
-    """Round file naming, criterion columns, and hit selection."""
+    """Round file naming and criterion columns."""
     print('\n9. Driver bookkeeping')
-    from conditional_scan import (_round_path, _criterion_column, _radius_columns,
-                                  _top_hits)
+    from conditional_scan import _round_path, _criterion_column, _radius_columns
 
     check('p-value file is versioned per round',
           _round_path('all_proteins.pvals.h5', 2) == 'all_proteins.pvals.round2.h5')
@@ -511,22 +510,6 @@ def test_driver_helpers():
     check('mutation-rate mode conditions on the Test B radius first',
           _radius_columns(True)[0] == 'radius_binomial')
     check('standard mode has a single radius column', _radius_columns(False) == ('radius',))
-
-    df = pd.DataFrame({
-        'uniprot_id': ['A', 'A', 'B', 'B', 'C'],
-        'aa_pos':     [1, 2, 1, 2, 1],
-        'fdr':        [0.2, 0.01, 0.9, 0.8, 0.001],
-    })
-    hits = _top_hits(df, ['A', 'B', 'C'], 'fdr', 0.05)
-    check('one hit per gene, the best one',
-          list(hits.uniprot_id) == ['C', 'A'] and list(hits.aa_pos) == [1, 2])
-    check('genes below the cutoff are dropped', 'B' not in set(hits.uniprot_id))
-    check('inactive genes are never selected',
-          set(_top_hits(df, ['A'], 'fdr', 0.05).uniprot_id) == {'A'})
-    check('an empty active set yields no hits', len(_top_hits(df, [], 'fdr', 0.05)) == 0)
-    check('nan criteria are ignored',
-          len(_top_hits(pd.DataFrame({'uniprot_id': ['A'], 'aa_pos': [1],
-                                      'fdr': [np.nan]}), ['A'], 'fdr', 0.05)) == 0)
 
 
 def test_position_filter_survives_the_rounds():

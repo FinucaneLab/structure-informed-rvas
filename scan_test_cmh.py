@@ -11,6 +11,7 @@ from scipy.sparse import csr_matrix
 from cmh import cmh_chisq_stat, cmh_expected_variance, exact_cmh_minlike_lookup
 from empirical_fdr import compute_fdr
 from logger_config import get_logger
+from scan_test import DEFAULT_MIN_ALLELES
 from utils import get_adjacency_matrix, write_dataset
 
 
@@ -289,7 +290,7 @@ def write_cmh_pvals(results_dir, uniprot_id, df_pvals, pval_file):
         write_dataset(fid, f"{uniprot_id}_cmh_variance", df_pvals[["cmh_variance"]])
 
 
-def _filter_proteins(df_rvas, df_fdr_filter=None, min_alleles=5):
+def _filter_proteins(df_rvas, df_fdr_filter=None, min_alleles=DEFAULT_MIN_ALLELES):
     grouped = df_rvas.groupby("uniprot_id")[["ac_case", "ac_control"]].sum()
     keep = grouped[
         (grouped["ac_case"] >= min_alleles)
@@ -335,7 +336,7 @@ def scan_test_cmh(
     stratum_col,
     screen_chi2=DEFAULT_SCREEN_CHI2,
     seed=1,
-    min_alleles=5,
+    min_alleles=DEFAULT_MIN_ALLELES,
 ):
     if fdr_only:
         df_results = compute_fdr(
@@ -407,7 +408,8 @@ def scan_test_cmh(
                     uniprot_id,
                 )
 
-            if (df["ac_case"].sum() < 5) or (df["ac_control"].sum() < 5):
+            if (df["ac_case"].sum() < min_alleles) or (
+                    df["ac_control"].sum() < min_alleles):
                 logger.warning(
                     f"{uniprot_id}: needs at least {min_alleles} case and "
                     f"{min_alleles} control alleles. Skipping."

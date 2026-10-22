@@ -49,8 +49,7 @@ import numpy as np
 import pandas as pd
 
 from logger_config import get_logger
-from utils import (best_radius_for_hit, parse_pymol_positions,
-                   positions_to_pymol_notation)
+from utils import parse_pymol_positions, positions_to_pymol_notation
 from components import components_for_genes, top_component
 from empirical_fdr import compute_fdr
 from scan_test import scan_test, DEFAULT_MIN_RETAINED
@@ -123,16 +122,6 @@ def _genes_passing_gate(df_results, active_genes, gate_col, gate_cutoff):
     df = df_results[df_results['uniprot_id'].isin(active_genes)]
     df = df[df[gate_col].notna() & (df[gate_col] < gate_cutoff)]
     return sorted(df['uniprot_id'].unique())
-
-
-def _top_hits(df_results, active_genes, crit_col, cutoff):
-    """The best remaining position in each active gene, if it clears the cutoff."""
-    df = df_results[df_results['uniprot_id'].isin(active_genes)]
-    df = df[df[crit_col].notna()]
-    if len(df) == 0:
-        return df.head(0)
-    best = df.loc[df.groupby('uniprot_id')[crit_col].idxmin()]
-    return best[best[crit_col] < cutoff].sort_values(by=crit_col)
 
 
 def conditional_scan(
@@ -288,6 +277,10 @@ def conditional_scan(
     comps = _components(df_results, gated, 0)
     component_tables.append(comps)
 
+    # radius_cols[0] is the column this mode's results carry the chosen radius in
+    # ('radius', or 'radius_binomial' under the mutation-rate null). Recording it under
+    # that name is what lets `run_all --fdr-file <stem>.conditional.tsv` rebuild each
+    # neighborhood at the radius the scan picked instead of falling back to --radius.
     for uid in gated:
         comp = top_component(comps, uid)
         if comp is None:
@@ -296,6 +289,7 @@ def conditional_scan(
                'round': 0, 'conditioned_on': '', 'n_conditioned_residues': 0,
                'component_id': comp.component_id, 'n_centers': comp.n_centers,
                'n_residues': comp.n_residues, 'n_case_alleles': comp.n_case_alleles,
+               radius_cols[0]: float(comp.radius),
                crit_col: comp.lead_fdr, gate_col: comp.lead_fwer, p_col: comp.lead_p}
         accepted_rows.append(rec)
 
@@ -324,7 +318,10 @@ def conditional_scan(
         exhausted = []
         for uid in list(active):
             spent, detail = gene_is_exhausted(uid, conditioning.get(uid, set()))
-            if spent:
+            # None means the counts were unreadable, not that the gene is spent.
+            # Re-scan it: the warning is already logged, and dropping a gene on a
+            # transient read failure would silently shorten the analysis.
+            if spent is True:
                 exhausted.append((uid, detail))
         if exhausted:
             logger.info(
@@ -412,6 +409,7 @@ def conditional_scan(
                    'component_id': comp.component_id, 'n_centers': comp.n_centers,
                    'n_residues': comp.n_residues, 'n_case_alleles': comp.n_case_alleles,
                    'n_residues_overlapping_mask': overlap,
+                   radius_cols[0]: float(comp.radius),
                    crit_col: comp.lead_fdr, gate_col: comp.lead_fwer,
                    p_col: comp.lead_p}
             accepted_rows.append(rec)

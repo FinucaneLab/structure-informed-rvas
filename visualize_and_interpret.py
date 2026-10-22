@@ -27,6 +27,11 @@ from collections import defaultdict
 
 from uniprot_annotation import (aggregate_annotations_across_family,
                                 generate_simple_feature_table, resolve_family_members)
+# Re-exported rather than redefined: this module used to carry its own copies, and the
+# positions_to_pymol_notation one lacked the None guard and the int() coercion, so it
+# raised on a Series or ndarray and emitted "1.0-2.0" for float input. Tests import
+# both names from here, which is why they stay in this namespace.
+from utils import parse_pymol_positions, positions_to_pymol_notation
 
 
 # ---------------------------------------------------------------------------
@@ -242,47 +247,6 @@ def _annotate_and_save(uniprot_id, features_path, cache_dir, confidence_threshol
     features_df.to_csv(features_path, sep='\t', index=False)
     print(f"  Saved features to {features_path}")
     return features_df
-
-
-def parse_pymol_positions(pymol_str):
-    """Parse PyMOL residue notation like '10+20-25+30' back to a set of integer positions."""
-    if not pymol_str:
-        return set()
-    positions = set()
-    for part in str(pymol_str).split('+'):
-        part = part.strip()
-        if not part:
-            continue
-        if '-' in part:
-            start, end = part.split('-', 1)
-            positions.update(range(int(start), int(end) + 1))
-        else:
-            positions.add(int(part))
-    return positions
-
-
-def positions_to_pymol_notation(positions):
-    """
-    Encode a collection of integer positions as a compact PyMOL selection string
-    using run-length range syntax, e.g. [1,2,3,5,6] -> "1-3+5-6".
-    """
-    if not positions:
-        return ""
-    positions = sorted(set(positions))
-    ranges = []
-    start = end = positions[0]
-    for pos in positions[1:]:
-        if pos == end + 1:
-            end = pos
-        else:
-            ranges.append(str(start) if start == end else f"{start}-{end}")
-            start = end = pos
-    ranges.append(str(start) if start == end else f"{start}-{end}")
-    return "+".join(ranges)
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -528,10 +492,15 @@ def _units_from_components(components_file, gene_map):
     this path needs no structures at all.
     """
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from utils import parse_pymol_positions
     from components import parse_centers_detail
 
-    df = pd.read_csv(components_file, sep='\t')
+    try:
+        df = pd.read_csv(components_file, sep='\t')
+    except pd.errors.EmptyDataError:
+        raise ValueError(
+            f'{components_file} is empty: the conditional run found no gene passing '
+            'the gene gate, so there are no components to annotate.'
+        ) from None
     required = {'uniprot_id', 'component_id', 'residues_pymol', 'lead_aa_pos'}
     missing = required - set(df.columns)
     if missing:

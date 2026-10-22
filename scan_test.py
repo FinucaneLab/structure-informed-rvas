@@ -413,9 +413,19 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
                     logger.info(f'{uniprot_id}: conditioning out {what} '
                                 f'({n_removed} residues)')
 
-            if (sum(df.ac_case) < min_alleles) or (sum(df.ac_control) < min_alleles):
+            # Count what the scan will actually see. Conditioning masks residues
+            # rather than dropping rows, so an unmasked count would let a gene whose
+            # conditioned-out component carried nearly all of its alleles through on
+            # almost nothing -- with n_case reaching 0, read_p_values divides by it.
+            df_counted = df
+            if keep_residues is not None:
+                kept_pos = np.flatnonzero(keep_residues) + 1
+                df_counted = df[df.aa_pos.isin(kept_pos)]
+            if (sum(df_counted.ac_case) < min_alleles) or (
+                    sum(df_counted.ac_control) < min_alleles):
+                extra = '' if keep_residues is None else ' after conditioning'
                 logger.warning(f'{uniprot_id}: needs at least {min_alleles} case and '
-                               f'{min_alleles} control alleles. Skipping.')
+                               f'{min_alleles} control alleles{extra}. Skipping.')
                 continue
             
             # Each protein gets its own derived stream. A single shared seed would

@@ -509,12 +509,11 @@ def _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage
     if missing:
         logger.warning(f'{len(missing)} genes are absent from the rate table and are skipped')
     if zero_rate:
-        n_x = sum(1 for u in zero_rate if u in mu_lookup)
         logger.warning(
-            f'{len(zero_rate)} genes have zero total mutation rate and are skipped '
-            f'({n_x} present in the table but with no rate anywhere). If these are chrX '
-            'genes, the rate table was probably built from Roulette, which covers '
-            'autosomes only; the default gnomAD rate file includes chrX.'
+            f'{len(zero_rate)} genes are present in the rate table but have zero total '
+            'mutation rate, and are skipped. If these are chrX genes, the rate table was '
+            'probably built from Roulette, which covers autosomes only; the default '
+            'gnomAD rate file includes chrX.'
         )
     skip = set(missing) | set(zero_rate)
     uniprot_id_list = [u for u in uniprot_id_list if u not in skip]

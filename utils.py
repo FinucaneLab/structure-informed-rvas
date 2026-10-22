@@ -581,10 +581,12 @@ def structure_length(pdb_file_pos_guide, uniprot_id):
     """
     Number of residues in a protein's structure, read from the position guide.
 
-    This is the same n_res the adjacency matrix has -- get_distance_matrix_structure
-    sizes itself by the maximum end of pos_covered -- so a mask built against it will
-    pass check_keep_mask. Reading the guide is cached because conditioning calls this
-    once per gene per round.
+    For a multi-fragment structure this is exactly the n_res the adjacency matrix has,
+    since get_distance_matrix_structure sizes that branch by the maximum end of
+    pos_covered. The single-file branch instead sizes by CA-atom count; the two agree
+    for AlphaFold models, and a mismatch surfaces as a check_keep_mask ValueError that
+    drops the gene from the round rather than misaligning it. Reading the guide is
+    cached because conditioning calls this once per gene per round.
     """
     guide = _STRUCT_LEN_CACHE.get(pdb_file_pos_guide)
     if guide is None:

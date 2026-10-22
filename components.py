@@ -233,7 +233,7 @@ def component_table(
 
     out = pd.DataFrame(rows)
     if len(out):
-        out = out.sort_values('lead_p').reset_index(drop=True)
+        out = out.sort_values(['lead_fwer', 'lead_p']).reset_index(drop=True)
     out.attrs['n_caseless'] = n_caseless
     return out
 
@@ -408,6 +408,13 @@ def top_component(df_components, uniprot_id):
     """
     The component holding a gene's best-scoring neighborhood, or None.
 
+    Ranked by lead_fwer -- the column the gene gate is judged on -- rather than by
+    lead_p. Under the mutation-rate null the gate is fwer_max, the max over both tests,
+    while lead_p is p_binomial alone, so the two can disagree. Ranking by p_binomial
+    could then report and mask a component that never cleared the gate, leaving the one
+    that did to resurface in the next round looking like a second independent signal.
+    lead_p breaks ties, which are common because FWER saturates.
+
     Handles an empty frame, which components_for_genes returns when no gene produced a
     component at all -- an empty DataFrame has no uniprot_id column, so the lookup
     would raise AttributeError rather than simply finding nothing.
@@ -417,4 +424,4 @@ def top_component(df_components, uniprot_id):
     g = df_components[df_components.uniprot_id == uniprot_id]
     if len(g) == 0:
         return None
-    return g.loc[g.lead_p.idxmin()]
+    return g.sort_values(['lead_fwer', 'lead_p']).iloc[0]

@@ -10,6 +10,9 @@ statsmodels>=0.13.0
 # Bioinformatics
 biopython>=1.79
 
+# UniProt annotation lookups
+requests>=2.25.0
+
 # Data storage and compression
 h5py>=3.6.0
 hdf5plugin>=3.0.0
