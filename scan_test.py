@@ -247,6 +247,8 @@ def compute_all_pvals(
         pval_mats = []
         nbhd_counts = {}
         dead_any = np.zeros(n_res, dtype=bool) if keep is not None else None
+        # Intersection across radii, for the log only -- see the comment below.
+        dead_all = None
         for r in radii:
             pval_mat, n_case_nbhd, n_ctrl_nbhd = _compute_pval_matrix_for_radius(
                 adj_matrices[r], case_ac_matrix, control_ac_matrix, n_case, n_control,
@@ -259,6 +261,11 @@ def compute_all_pvals(
             if dead_r is not None:
                 pval_mat = _neutralize(pval_mat, dead_r)
                 dead_any |= dead_r
+                # Only a centre dead at every radius is actually neutralized in the
+                # combined p-value; dead_any is the union, so reporting it would count
+                # centres the harmonic mean still rests on. Tracked separately for the
+                # log rather than narrowing dead_any, which drives nothing here.
+                dead_all = dead_r if dead_all is None else (dead_all & dead_r)
             pval_mats.append(pval_mat)
             nbhd_counts[r] = (n_case_nbhd, n_ctrl_nbhd)
 
@@ -297,6 +304,7 @@ def compute_all_pvals(
                                                    include_depletion)
         pval_matrix = pval_lookup[n_case_nbhd_mat, n_control_nbhd_mat]
         dead_any = neutralized_positions(adjacency_matrix, keep, min_retained)
+        dead_all = dead_any      # one radius: the union and the intersection coincide
         pval_matrix = _neutralize(pval_matrix, dead_any)
         radius_col = float(radius)
 
@@ -310,9 +318,10 @@ def compute_all_pvals(
     df_pvals['original_control'] = control_ac_matrix[:,0]
     df_pvals = df_pvals[['nbhd_case', 'nbhd_control', 'radius', 'original_case', 'original_control'] + pval_columns]
     if dead_any is not None:
+        n_dead = int(dead_all.sum()) if dead_all is not None else int(dead_any.sum())
         logger.info(
             f'{uniprot_id}: conditioning masks {int((~keep).sum())} of {n_res} residues; '
-            f'{int(dead_any.sum())} centres not re-tested'
+            f'{n_dead} centres not re-tested'
         )
     return df_pvals
 

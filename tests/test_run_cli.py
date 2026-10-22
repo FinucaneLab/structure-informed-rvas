@@ -100,7 +100,7 @@ def test_flags_present():
     # Deliberately removed. If one comes back, someone has reverted a decision rather
     # than a line of code, and should know.
     for gone, why in (('--permute', 'moved to the manuscript scripts'),
-                      ('--make-movie', 'superseded by pse_to_png'),
+                      ('--make_movie', 'superseded by pse_to_png'),
                       ('--test-direction', 'the mutation-rate null is enrichment-only')):
         check(f'{gone} stays removed ({why})', gone not in options)
 

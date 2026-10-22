@@ -929,7 +929,7 @@ carries three independent 3D signals.
 | `--conditional-max-rounds` | stop after this many rounds beyond round 0 (default 5) |
 | `--conditional-criterion` | `fdr` (default) or `fwer`; with a mutation-rate null these read `fdr_max` / `fwer_max`, which require both tests to pass |
 | `--conditional-cutoff` | threshold for that criterion; defaults to `--fdr-cutoff` |
-| `--conditional-radius` | radius of the removed neighborhood. `best` (default) uses the radius that position's own scan chose, which is the only sensible option under a multi-radius run |
+| `--conditional-radius` | radius of the removed neighborhood for `--remove-nbhd`. `best` (default) takes it from `--neighborhood-radius`; the mask predates the scan, so no per-position radius exists yet, and under a multi-radius run `best` falls back to 15 with a warning -- set this flag explicitly there |
 | `--conditional-min-retained` | fraction of a neighborhood that must survive for its centre to be re-tested (default 0.5) |
 
 ### Conditioning by hand: --remove-nbhd

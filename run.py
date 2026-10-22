@@ -550,10 +550,12 @@ def build_parser():
         default='best',
         help='''
         radius in Angstroms of the neighborhood removed around each position given to
-        --remove-nbhd. 'best' (default) uses the radius that position's scan actually
-        chose, which is the only sensible option under --neighborhood-radius
-        multiple-small/multiple-big. Conditional analysis does not use this: it masks a
-        component's own residue set, recorded in the components file.
+        --remove-nbhd. 'best' (default) takes the radius from --neighborhood-radius.
+        The mask is built before any scan has run, so there is no per-position chosen
+        radius to use: under --neighborhood-radius multiple-small/multiple-big, 'best'
+        falls back to 15 with a warning, and you should set this flag explicitly.
+        Conditional analysis does not use this: it masks a component's own residue set,
+        recorded in the components file.
         '''
     )
     parser.add_argument(

@@ -65,7 +65,15 @@ def get_pairwise_alignment(seq1, seq2):
     return alignments[0]
 
 def alignment_to_strings(alignment):
-    """Convert a Biopython Alignment object to two equal-length strings with '-' for gaps."""
+    """
+    Convert a Biopython Alignment object to two equal-length strings with '-' for gaps.
+
+    An (aligned_seq1, aligned_seq2) pair passes straight through, so a cached alignment
+    loaded from disk can be handed to the same helpers as a freshly computed one.
+    """
+    if (isinstance(alignment, tuple) and len(alignment) == 2
+            and all(isinstance(s, str) for s in alignment)):
+        return alignment
     coords = alignment.coordinates
     seq1 = alignment.sequences[0]
     seq2 = alignment.sequences[1]
@@ -178,14 +186,20 @@ def get_aligned_position(alignment, query_pos):
     target_pos = sum(1 for i in range(align_pos + 1) if aligned_seq2[i] != '-')
     return target_pos
 
-def transfer_all_annotations(query_seq, target_seq, target_annotations):
+def transfer_all_annotations(query_seq, target_seq, target_annotations, aligned=None):
     """
     Align query to target and transfer every annotation in `target_annotations`
     to the corresponding query position. Each returned record includes the
     alignment confidence score so low-quality transfers can be filtered later.
     `target_annotations` is a dict mapping str(position) -> list of annotation dicts.
+
+    `aligned` is an optional (aligned_seq1, aligned_seq2) pair to use instead of
+    aligning here -- what the caller's alignment cache holds. Without it this function
+    re-aligned even when the caller had just loaded the pair from disk, which is what
+    made the cache cost rather than save work.
     """
-    alignment = get_pairwise_alignment(query_seq, target_seq)
+    alignment = aligned if aligned is not None else get_pairwise_alignment(query_seq,
+                                                                          target_seq)
     transferred = []
 
     for query_pos in range(1, len(query_seq) + 1):
@@ -492,15 +506,16 @@ def aggregate_annotations_across_family(query_id, family_members, cache_dir, con
             cached_alignment = load_alignment_cache(query_id, target_id, alignment_cache)
             if cached_alignment:
                 print("  Using cached alignment")
-                alignment = get_pairwise_alignment(query_seq, target_seq)
-                aligned_seq1, aligned_seq2 = alignment_to_strings(alignment)
+                aligned_seq1 = cached_alignment['seqA']
+                aligned_seq2 = cached_alignment['seqB']
             else:
                 print("  Computing alignment...")
                 alignment = get_pairwise_alignment(query_seq, target_seq)
                 aligned_seq1, aligned_seq2 = alignment_to_strings(alignment)
                 save_alignment_cache(query_id, target_id, aligned_seq1, aligned_seq2, alignment_cache)
 
-            transferred = transfer_all_annotations(query_seq, target_seq, target_annotations)
+            transferred = transfer_all_annotations(query_seq, target_seq, target_annotations,
+                                                   aligned=(aligned_seq1, aligned_seq2))
             print(f"  Transferred: {len(transferred)} annotations")
 
             for item in transferred:
