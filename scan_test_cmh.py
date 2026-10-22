@@ -292,8 +292,8 @@ def write_cmh_pvals(results_dir, uniprot_id, df_pvals, pval_file):
 def _filter_proteins(df_rvas, df_fdr_filter=None, min_alleles=5):
     grouped = df_rvas.groupby("uniprot_id")[["ac_case", "ac_control"]].sum()
     keep = grouped[
-        (grouped["ac_case"] > min_alleles)
-        & (grouped["ac_control"] > min_alleles)
+        (grouped["ac_case"] >= min_alleles)
+        & (grouped["ac_control"] >= min_alleles)
     ].index.to_numpy()
 
     if df_fdr_filter is not None:
@@ -335,6 +335,7 @@ def scan_test_cmh(
     stratum_col,
     screen_chi2=DEFAULT_SCREEN_CHI2,
     seed=1,
+    min_alleles=5,
 ):
     if fdr_only:
         df_results = compute_fdr(
@@ -374,7 +375,7 @@ def scan_test_cmh(
     pdb_dir = os.path.join(reference_dir, "pdb_files")
     pae_dir = os.path.join(reference_dir, "pae_files")
 
-    uniprot_ids = _filter_proteins(df_rvas, df_fdr_filter)
+    uniprot_ids = _filter_proteins(df_rvas, df_fdr_filter, min_alleles)
     logger.info(
         f"Selected {len(uniprot_ids)} proteins for stratified CMH analysis"
     )
@@ -408,7 +409,8 @@ def scan_test_cmh(
 
             if (df["ac_case"].sum() < 5) or (df["ac_control"].sum() < 5):
                 logger.warning(
-                    f"{uniprot_id}: There must be at least 5 case and 5 control alleles. Skipping."
+                    f"{uniprot_id}: needs at least {min_alleles} case and "
+                    f"{min_alleles} control alleles. Skipping."
                 )
                 continue
 

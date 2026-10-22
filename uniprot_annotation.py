@@ -17,11 +17,14 @@ the same family costs nothing.
 
 import json
 import os
+import re
 import time
 from collections import defaultdict
 
 import pandas as pd
 from Bio.Align import PairwiseAligner
+
+from utils import positions_to_pymol_notation
 
 try:
     import requests

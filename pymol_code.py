@@ -286,6 +286,15 @@ def pymol_rvas(uniprot_id, reference_directory, results_directory, pval_file, ge
 
         if 'aa_pos_file' not in df_rvas:
             df_rvas['aa_pos_file'] = df_rvas['aa_pos']
+        # Residues covered by no fragment get None from get_pdb_filename. Drop them
+        # rather than letting None reach a filename.
+        n_unmapped = int(df_rvas['pdb_filename'].isna().sum())
+        if n_unmapped:
+            print(f"  {n_unmapped} residues map to no PDB fragment and are not shown")
+            df_rvas = df_rvas[df_rvas['pdb_filename'].notna()]
+        if df_rvas.empty:
+            print(f"  Skipping {gene_name} ({uniprot_id}): no residue maps to a fragment")
+            return
         pdbs = set(df_rvas['pdb_filename'].tolist())
         if len(pdbs) > 1:
             print(f"  Skipping {gene_name} ({uniprot_id}): protein spans multiple PDB chunks ({len(pdbs)} files)")
@@ -372,6 +381,13 @@ def pymol_scan_test(uniprot_id, reference_directory, results_directory, pval_fil
         tmp_info = info_df[info_df['uniprot_id'] == uniprot_id]
         tmp_df = df_results[df_results['uniprot_id'] == uniprot_id]
         tmp_df = get_pdb_filename(tmp_df, tmp_info)
+        n_unmapped = int(tmp_df['pdb_filename'].isna().sum())
+        if n_unmapped:
+            print(f"  {n_unmapped} residues map to no PDB fragment and are not coloured")
+            tmp_df = tmp_df[tmp_df['pdb_filename'].notna()]
+        if tmp_df.empty:
+            print(f"  Skipping {gene_name} ({uniprot_id}): no residue maps to a fragment")
+            return
         print(f"  Processing scan test results for {gene_name} ({uniprot_id}): {len(tmp_df)} positions")
 
         tmp_df['visual_filename'] = tmp_df['pdb_filename'].apply(

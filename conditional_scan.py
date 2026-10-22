@@ -82,6 +82,24 @@ def _radius_columns(mutation_rate_mode):
     return ('radius_binomial', 'radius_poisson') if mutation_rate_mode else ('radius',)
 
 
+def _carry_gene_totals(df_results, df_round0):
+    """
+    Give a later round's table the per-gene columns round 0 has.
+
+    mutation_rate_scan_test merges n_denovo_gene, mu_gene and mu_coverage on after
+    computing the corrections; the conditional rounds call _compute_both_fdrs directly
+    and so would omit them, leaving the round tables a different shape from round 0 for
+    anything reading them side by side. They describe the gene, not the round, so
+    round 0's values carry over.
+    """
+    totals = [c for c in ('n_denovo_gene', 'mu_gene', 'mu_coverage')
+              if c in df_round0.columns and c not in df_results.columns]
+    if not totals:
+        return df_results
+    per_gene = df_round0[['uniprot_id'] + totals].drop_duplicates(subset='uniprot_id')
+    return df_results.merge(per_gene, on='uniprot_id', how='left')
+
+
 def _gene_gate_column(criterion, mutation_rate_mode):
     """The column the GENE gate is judged on (default FWER), as opposed to members."""
     if mutation_rate_mode:
@@ -223,6 +241,7 @@ def conditional_scan(
         )
 
     df_results = pd.read_csv(os.path.join(results_dir, fdr_file), sep='\t')
+    round0_results = df_results
     if crit_col not in df_results.columns:
         raise ValueError(
             f'{fdr_file} has no column {crit_col}; --conditional-criterion '
@@ -344,6 +363,10 @@ def conditional_scan(
             )
             df_results = _compute_both_fdrs(results_dir, fdr_cutoff, round_filter,
                                             reference_dir, current_pval_file)
+            # Round 0 goes through mutation_rate_scan_test, which merges the per-gene
+            # totals on afterwards; calling _compute_both_fdrs directly skips that, so
+            # the round tables would be ragged against round 0. Carry them across.
+            df_results = _carry_gene_totals(df_results, round0_results)
         else:
             scan_test(
                 df_rvas, reference_dir, radius, pae_cutoff, results_dir, n_sims,

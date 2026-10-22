@@ -1016,6 +1016,7 @@ def main(argv=None):
             args.stratum_col,
             args.cmh_screen_threshold,
             args.seed,
+            args.min_alleles,
         )
         did_nothing = False
 

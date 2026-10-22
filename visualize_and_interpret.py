@@ -548,7 +548,11 @@ def _units_from_components(components_file, gene_map):
     ordered = df.sort_values(sort_cols) if sort_cols else df
     for row in ordered.itertuples():
         uniprot_id = row.uniprot_id
-        gene_name = getattr(row, 'gene_name', None) or gene_map.get(uniprot_id, uniprot_id)
+        # `or` is not enough: a missing gene_name arrives as NaN, which is truthy, so
+        # it would flow straight into the output filenames.
+        gene_name = getattr(row, 'gene_name', None)
+        if gene_name is None or pd.isna(gene_name) or str(gene_name).strip() == '':
+            gene_name = gene_map.get(uniprot_id, uniprot_id)
         residues = parse_pymol_positions(row.residues_pymol)
         lead = int(row.lead_aa_pos)
         rnd = int(getattr(row, 'round', 0))

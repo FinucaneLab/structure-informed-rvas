@@ -128,9 +128,17 @@ def enriched_mask(g, df_mut, mu_mode):
     caller cannot tell and should keep everything.
     """
     if mu_mode:
-        exp_col = next((c for c in ('exp_binomial', 'nbhd_expected', 'exp_poisson')
-                        if c in g.columns), None)
-        return g['nbhd_case'] > g[exp_col] if exp_col else None
+        # obs_exp_<test> is computed inside that test's own table, so observed and
+        # expected are both at the radius that test chose. The merged table keeps
+        # nbhd_case only from the Poisson side, so comparing it against exp_binomial
+        # mixes two radii under --neighborhood-radius multiple-*.
+        for col in ('obs_exp_binomial', 'obs_exp_poisson', 'obs_exp'):
+            if col in g.columns:
+                return g[col] > 1
+        # A single-test table carries matched columns, so the direct comparison is safe.
+        if {'nbhd_case', 'nbhd_expected'} <= set(g.columns):
+            return g['nbhd_case'] > g['nbhd_expected']
+        return None
     if {'nbhd_case', 'nbhd_control'} <= set(g.columns):
         n_case = float(df_mut['ac_case'].sum())
         n_ctrl = float(df_mut['ac_control'].sum())
@@ -397,7 +405,15 @@ def parse_centers_detail(row, default_radius=15.0):
 
 
 def top_component(df_components, uniprot_id):
-    """The component holding a gene's best-scoring neighborhood, or None."""
+    """
+    The component holding a gene's best-scoring neighborhood, or None.
+
+    Handles an empty frame, which components_for_genes returns when no gene produced a
+    component at all -- an empty DataFrame has no uniprot_id column, so the lookup
+    would raise AttributeError rather than simply finding nothing.
+    """
+    if df_components is None or len(df_components) == 0:
+        return None
     g = df_components[df_components.uniprot_id == uniprot_id]
     if len(g) == 0:
         return None
