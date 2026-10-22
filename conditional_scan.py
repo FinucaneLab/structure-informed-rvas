@@ -81,22 +81,32 @@ def _radius_columns(mutation_rate_mode):
     return ('radius_binomial', 'radius_poisson') if mutation_rate_mode else ('radius',)
 
 
-def _carry_gene_totals(df_results, df_round0):
+def _carry_gene_totals(df_results, gene_totals):
     """
     Give a later round's table the per-gene columns round 0 has.
 
     mutation_rate_scan_test merges n_denovo_gene, mu_gene and mu_coverage on after
     computing the corrections; the conditional rounds call _compute_both_fdrs directly
     and so would omit them, leaving the round tables a different shape from round 0 for
-    anything reading them side by side. They describe the gene, not the round, so
-    round 0's values carry over.
+    anything reading them side by side.
+
+    `gene_totals` must be THIS round's, as returned by mutation_rate_scan_test: these
+    are not constants of the gene. Conditioning masks residues out of original_case and
+    original_mu, and Test B's binomial null uses the masked n_g and m_g -- so carrying
+    round 0's values forward would print a 40-de-novo gene total beside p-values
+    computed against the 10 that survived the mask.
     """
-    totals = [c for c in ('n_denovo_gene', 'mu_gene', 'mu_coverage')
-              if c in df_round0.columns and c not in df_results.columns]
-    if not totals:
+    if not gene_totals:
         return df_results
-    per_gene = df_round0[['uniprot_id'] + totals].drop_duplicates(subset='uniprot_id')
-    return df_results.merge(per_gene, on='uniprot_id', how='left')
+    df_totals = pd.DataFrame(
+        [(uid, n_g, m_g, cov) for uid, (n_g, m_g, cov) in gene_totals.items()],
+        columns=['uniprot_id', 'n_denovo_gene', 'mu_gene', 'mu_coverage'],
+    )
+    keep = [c for c in df_totals.columns
+            if c == 'uniprot_id' or c not in df_results.columns]
+    if keep == ['uniprot_id']:
+        return df_results
+    return df_results.merge(df_totals[keep], on='uniprot_id', how='left')
 
 
 def _gene_gate_column(criterion, mutation_rate_mode):
@@ -230,7 +240,6 @@ def conditional_scan(
         )
 
     df_results = pd.read_csv(os.path.join(results_dir, fdr_file), sep='\t')
-    round0_results = df_results
     if crit_col not in df_results.columns:
         raise ValueError(
             f'{fdr_file} has no column {crit_col}; --conditional-criterion '
@@ -352,7 +361,7 @@ def conditional_scan(
                     f'{sum(len(conditioning[g]) for g in active)} residues in total')
 
         if mutation_rate_mode:
-            mutation_rate_scan_test(
+            round_totals = mutation_rate_scan_test(
                 df_rvas, reference_dir, radius, pae_cutoff, results_dir, n_sims,
                 True, False, fdr_cutoff, df_filter, round_fdr_file, current_pval_file,
                 conditioning=conditioning, min_retained=min_retained,
@@ -362,8 +371,9 @@ def conditional_scan(
                                             reference_dir, current_pval_file)
             # Round 0 goes through mutation_rate_scan_test, which merges the per-gene
             # totals on afterwards; calling _compute_both_fdrs directly skips that, so
-            # the round tables would be ragged against round 0. Carry them across.
-            df_results = _carry_gene_totals(df_results, round0_results)
+            # the round tables would be ragged against round 0. These are this round's
+            # own totals, computed from the conditioned arrays.
+            df_results = _carry_gene_totals(df_results, round_totals)
         else:
             scan_test(
                 df_rvas, reference_dir, radius, pae_cutoff, results_dir, n_sims,

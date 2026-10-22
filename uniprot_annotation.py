@@ -369,7 +369,12 @@ def get_functional_sites_detailed(uniprot_id, cache_dir=None):
         time.sleep(0.1)
 
     except Exception as e:
-        print(f"Warning: Error fetching data for {uniprot_id}: {e}")
+        # Do not cache: an empty result written here is indistinguishable on disk from
+        # a protein that genuinely has no functional sites, so one timeout during a
+        # run_all would silently suppress this protein's annotations in every later
+        # run -- the cache-hit path prints nothing.
+        print(f"Warning: Error fetching data for {uniprot_id}, not cached: {e}")
+        return functional_sites
 
     if cache_dir:
         with open(cache_file, 'w') as f:

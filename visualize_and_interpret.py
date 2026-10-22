@@ -100,6 +100,10 @@ def _load_gene_map(reference_dir):
     path = os.path.join(reference_dir, 'protein_sequence_guide.tsv')
     try:
         df = pd.read_csv(path, sep='\t')
+        # First row wins: 67 accessions carry several gene names, and plain zip() would
+        # keep the last, disagreeing with pymol_code._load_gene_name and scattering one
+        # protein's artefacts across two filename stems.
+        df = df.drop_duplicates(subset='uniprot_id', keep='first')
         return dict(zip(df['uniprot_id'], df['gene_name']))
     except Exception:
         return {}
@@ -670,7 +674,8 @@ def cmd_analyze(args):
                     from pymol_code import run_all
                     run_all(uniprot_id, args.results_dir, args.reference_dir,
                             pval_file=pval_path, test=args.test,
-                            components=components_by_protein.get(uniprot_id))
+                            components=components_by_protein.get(uniprot_id),
+                            gene_name=gene_name)
                     print("  Visualization done.")
                 except Exception as e:
                     print(f"  Warning: visualization failed: {e}")

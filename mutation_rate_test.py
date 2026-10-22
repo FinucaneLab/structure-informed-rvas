@@ -784,7 +784,10 @@ def mutation_rate_scan_test(
             fid.attrs['seed'] = seed
 
     if no_fdr:
-        return
+        # Returned rather than dropped: these totals are computed from the conditioned
+        # arrays, so a conditional round needs them to report the n_g and m_g its own
+        # p-values were actually computed against.
+        return gene_totals
 
     fdr_filter = df_fdr_filter
     if fdr_filter is None:
@@ -800,3 +803,4 @@ def mutation_rate_scan_test(
 
     summarize_mu_results(df_results, fdr_cutoff)
     df_results.to_csv(f'{results_dir}/{fdr_file}', sep='\t', index=False)
+    return gene_totals

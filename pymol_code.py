@@ -18,6 +18,8 @@ def _load_gene_name(uniprot_id, reference_directory):
         df = pd.read_csv(path, sep='\t')
         match = df[df['uniprot_id'] == uniprot_id]
         if not match.empty:
+            # First row wins, matching _load_gene_map in visualize_and_interpret, so
+            # the two resolvers cannot disagree for a duplicated accession.
             return match.iloc[0]['gene_name']
     except Exception:
         pass
@@ -220,7 +222,16 @@ def apply_effect_coloring(positions, effect, mu_mode, selection, vmax=None):
     use different scales, and a fragment whose strongest signal is weak would be
     coloured as though it were strong. Defaults to the maximum of what it is given,
     which is correct only when that is the whole protein.
+
+    Residues not in `positions` are reset to the scale's neutral value first. They keep
+    the structure's pLDDT B-factor otherwise (0-100), and cmd.spectrum colours the whole
+    selection -- so against the mu-mode scale pinned to [0, 1] every unmeasured residue
+    would clamp to maximum enrichment. pymol_scan_test drops residues falling outside
+    the position guide's pos_covered, so this is reachable whenever the guide is shorter
+    than the structure.
     """
+    cmd.alter(selection, f"b={0.5 if mu_mode else 0.0}")
+
     if mu_mode:
         b_values = _obs_exp_to_b(np.asarray(effect, dtype=float))
         palette, spectrum_range = "ratio_blue white ratio_red", {'minimum': 0.0, 'maximum': 1.0}
@@ -498,14 +509,20 @@ def pymol_component(uniprot_id, reference_directory, results_directory, pval_fil
 
 
 def run_all(uniprot_id, results_directory, reference_directory, pval_file, test='binomial',
-            components=None):
+            components=None, gene_name=None):
     """
     Run the full PyMOL visualization pipeline for a single protein.
 
     `test` selects which mutation-rate null the pictures are drawn against, and is
     ignored for a standard 3DNT p-value file.
+
+    `gene_name` overrides the guide lookup. Pass the caller's name: 67 accessions map to
+    several gene names (HBA1/HBA2, the histone clusters), and re-deriving one here would
+    put the whole-chain PSE under a different stem from the component PSE and TSVs that
+    the same run writes for the same protein.
     """
-    gene_name = _load_gene_name(uniprot_id, reference_directory)
+    if gene_name is None:
+        gene_name = _load_gene_name(uniprot_id, reference_directory)
     pymol_rvas(uniprot_id, reference_directory, results_directory, pval_file,
                gene_name=gene_name, test=test, components=components)
     pymol_scan_test(uniprot_id, reference_directory, results_directory, pval_file,

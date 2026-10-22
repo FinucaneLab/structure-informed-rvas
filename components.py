@@ -194,6 +194,14 @@ def component_table(
         lead = min(member_centers, key=lambda p: by_pos.loc[p, p_col])
         lead_row = by_pos.loc[lead]
 
+        # The component's own best gate value, minimised over its members rather than
+        # read off the lead. The lead is chosen by p_col, and under the mutation-rate
+        # null the gate column (fwer_max/fdr_max, a max over both tests) is not monotone
+        # in p_binomial -- so the lead's gate value can be far worse than some other
+        # member's, and ordering components by it would mask the wrong component and let
+        # the one that actually cleared the gene gate resurface next round.
+        best_gate = float(min(by_pos.loc[p, fwer_col] for p in member_centers))
+
         rec = {
             'uniprot_id': uniprot_id,
             'gene_name': gene_name,
@@ -204,6 +212,7 @@ def component_table(
             'lead_p': float(lead_row[p_col]),
             'lead_fdr': float(lead_row[fdr_col]),
             'lead_fwer': float(lead_row[fwer_col]),
+            'best_gate': best_gate,
             'radius': float(dict(centers)[lead]),
             'n_residues': len(residues),
             'seq_span_aa': _seq_span(centers, labels, comp),
@@ -233,7 +242,7 @@ def component_table(
 
     out = pd.DataFrame(rows)
     if len(out):
-        out = out.sort_values(['lead_fwer', 'lead_p']).reset_index(drop=True)
+        out = out.sort_values(['best_gate', 'lead_p']).reset_index(drop=True)
     out.attrs['n_caseless'] = n_caseless
     return out
 
@@ -408,12 +417,15 @@ def top_component(df_components, uniprot_id):
     """
     The component holding a gene's best-scoring neighborhood, or None.
 
-    Ranked by lead_fwer -- the column the gene gate is judged on -- rather than by
-    lead_p. Under the mutation-rate null the gate is fwer_max, the max over both tests,
-    while lead_p is p_binomial alone, so the two can disagree. Ranking by p_binomial
-    could then report and mask a component that never cleared the gate, leaving the one
-    that did to resurface in the next round looking like a second independent signal.
-    lead_p breaks ties, which are common because FWER saturates.
+    Ranked by best_gate -- the component's own minimum over the column the gene gate is
+    judged on -- rather than by lead_p or by the lead's gate value. Under the
+    mutation-rate null the gate is fwer_max, a max over both tests, which is not
+    monotone in the p_binomial that picks the lead; ordering on either of those could
+    report and mask a component that never cleared the gate, leaving the one that did to
+    resurface in the next round looking like a second independent signal. lead_p breaks
+    ties, which are common because FWER saturates.
+
+    Falls back to lead_fwer for a components file written before best_gate existed.
 
     Handles an empty frame, which components_for_genes returns when no gene produced a
     component at all -- an empty DataFrame has no uniprot_id column, so the lookup
@@ -424,4 +436,5 @@ def top_component(df_components, uniprot_id):
     g = df_components[df_components.uniprot_id == uniprot_id]
     if len(g) == 0:
         return None
-    return g.sort_values(['lead_fwer', 'lead_p']).iloc[0]
+    gate = 'best_gate' if 'best_gate' in g.columns else 'lead_fwer'
+    return g.sort_values([gate, 'lead_p']).iloc[0]

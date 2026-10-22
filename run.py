@@ -765,14 +765,32 @@ def validate_args(args):
         if not (0 <= args.conditional_min_retained <= 1):
             raise ValueError(f"--conditional-min-retained must be between 0 and 1, got "
                              f"{args.conditional_min_retained}")
-        if args.conditional_radius != 'best':
-            try:
-                args.conditional_radius = float(args.conditional_radius)
-            except ValueError:
-                raise ValueError(f"--conditional-radius must be 'best' or a number, got "
-                                 f"{args.conditional_radius}")
-            if args.conditional_radius <= 0:
-                raise ValueError("--conditional-radius must be positive")
+
+    # Outside the --conditional block on purpose: --remove-nbhd sets args.conditional
+    # False above and is the only other consumer of --conditional-radius, so validating
+    # it there would leave the flag unchecked on the one path that still reads it.
+    if args.conditional_radius != 'best':
+        try:
+            args.conditional_radius = float(args.conditional_radius)
+        except (TypeError, ValueError):
+            raise ValueError(f"--conditional-radius must be 'best' or a number, got "
+                             f"{args.conditional_radius}")
+        if args.conditional_radius <= 0:
+            raise ValueError("--conditional-radius must be positive")
+
+    # Fail before map_and_filter_rvas reads and maps the whole input file: these are
+    # argument errors, and remove_nbhd_conditioning is not reached until main().
+    if args.remove_nbhd is not None:
+        if args.uniprot_id is None:
+            raise ValueError('--remove-nbhd requires --uniprot-id: the positions are '
+                             'residue numbers in one specific protein')
+        if os.path.exists(args.uniprot_id):
+            n_proteins = len([x for x in open(args.uniprot_id).readlines() if x.strip()])
+        else:
+            n_proteins = len(args.uniprot_id.split(','))
+        if n_proteins != 1:
+            raise ValueError(f'--remove-nbhd applies to a single protein, but '
+                             f'--uniprot-id names {n_proteins}')
 
     if args.run_3dnt and args.test_method == 'cmh' and not args.fdr_only:
         if args.stratum_col is None:
