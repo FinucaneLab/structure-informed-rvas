@@ -280,6 +280,26 @@ This writes two files to `results_epi25/neighborhoods/`:
 - `KCNA1_Q09470_378_nbhd.tsv`: per-residue case and control allele counts within the neighborhood
 - `KCNA1_Q09470_378_nbhd_features.tsv`: overlap of each functional feature with the neighborhood, sorted by fraction of case-only mutations
 
+### Annotation test
+
+Permutation test of annotation sets (UniProt features, domains, clusters) for case/control burden. The annotation file is either:
+- long: one row per annotation interval (`uniprot_id, concept_type, concept_value, start, end`) or per annotated residue (`uniprot_id, aa_pos, <columns>`). `--annotation-id` lists the columns joined into the annotation id (default `concept_type,concept_value`).
+- wide (`--annotation-format wide`): one row per residue, one column per annotation. `--annotation-id` lists the columns used as ids (default all).
+
+```
+# long, binding/active sites expanded to their 3D neighborhood
+python run.py --pre-mapped-rvas rvas.mapped.parquet --reference-dir sir-reference-data/ \
+  --annotation-file annotations.parquet --annotation-expand 'Binding site,Active site' \
+  --neighborhood-radius 15 --pae-cutoff 15 --results-dir results/
+
+# wide, testing only the cluster_id column
+python run.py --pre-mapped-rvas rvas.mapped.parquet --reference-dir sir-reference-data/ \
+  --annotation-file clusters.parquet --annotation-format wide --annotation-id cluster_id \
+  --results-dir results/
+```
+
+`--annotation-expand` takes id prefixes or `all`; without it nothing is expanded. Output is `results/annotation_test/results.tsv.gz` with `p_value`, `local_fdr`/`local_fwer`, `global_fdr`/`global_fwer` and `bh_fdr`. `--df-filter` (columns `uniprot_id`, optionally `aa_pos`, `aa_ref`, `aa_alt`) restricts the RVAS data to those proteins/positions/variants before the test, which also changes the null. A crashed run resumes from `per_protein/` shards if rerun with the same `--results-dir` and `--n-sims`.
+
 ### Full Pipeline (run_all)
 
 The `run_all` subcommand runs visualization, annotation, and neighborhood feature tables for every significant protein in an FDR results file in a single command:
@@ -633,6 +653,96 @@ Combining warns if the chunks disagree on `lambda_hat`.
 - FDR control over the *intersection* of two rejection sets is not guaranteed by the two
   marginal FDRs as a theorem. It is conservative in practice, since an intersection can
   only remove discoveries, and the simulations above measure it directly.
+
+## Stratified 3DNT with exact CMH
+
+The default 3D neighborhood test uses Fisher's exact test after pooling all
+case and control allele counts for a protein.  For datasets assembled from
+multiple cohorts, ancestry groups, sequencing batches, or other finite strata,
+3DNT can instead use an exact Cochran-Mantel-Haenszel (CMH) test.
+
+For protein `g`, neighborhood `r`, and stratum `k`, define:
+
+- `N_gk`: total case + control allele count in the protein;
+- `A_gk`: total case allele count in the protein;
+- `M_rgk`: total allele count inside the neighborhood;
+- `a_rgk`: case allele count inside the neighborhood.
+
+Under the stratified null,
+
+```text
+a_rgk | N_gk, A_gk, M_rgk ~ Hypergeom(N_gk, A_gk, M_rgk)
+```
+
+and the exact CMH statistic is `S_rg = sum_k a_rgk`.  Its null distribution is
+computed by convolving the stratum-specific hypergeometric distributions.  With
+one stratum, this reduces to the ordinary two-sided Fisher exact test.
+
+### Input format
+
+CMH input is long-form: a variant may appear once in every stratum in which it
+has a nonzero case or control count.  For example:
+
+```text
+Variant ID          stratum          ac_case    ac_control
+chr1-100-A-G        EUR_batch1       2          0
+chr1-100-A-G        AFR_batch2       0          1
+chr1-250-C-T        EUR_batch1       1          0
+```
+
+There must be one count vector per `Variant ID x stratum`.  The column name is
+specified by `--stratum-col`.
+
+The allele-count filter is applied to each variant's **total AC across all
+strata**.  For example, with `--ac-filter 6`, a variant with AC 4 in one stratum
+and AC 4 in another is removed because its total AC is 8.
+
+### Run CMH 3DNT
+
+```bash
+python structure-informed-rvas/run.py \
+  --rvas-data-to-map input/stratified_data.tsv.gz \
+  --reference-dir sir-reference-data/ \
+  --results-dir results_cmh/ \
+  --run-3dnt \
+  --test-method cmh \
+  --stratum-col stratum \
+  --neighborhood-radius 15 \
+  --n-sims 1000 \
+  --fdr-file all_proteins.cmh.fdr.tsv
+```
+
+The ordinary Fisher test remains the default, so existing commands without
+`--test-method cmh` are unchanged.
+
+### Null simulations
+
+The empirical FDR/FWER null also preserves strata.  For each protein and
+stratum, the simulation keeps fixed:
+
+1. total allele count at every residue
+2. total case allele count in that protein-stratum
+
+Case labels are redistributed across residues drawn from a multivariate
+hypergeometric distribution.  This is the resampling analogue of the margins conditioned
+on by the exact CMH test.
+
+CMH writes the same core HDF5 datasets as the ordinary 3DNT, so the existing
+`empirical_fdr.py`, p-value-file combination workflow, and visualization code
+can be reused unchanged.
+
+### Current limitations
+
+The initial CMH implementation supports one numeric neighborhood radius.  The
+`multiple-small` and `multiple-big` harmonic-mean radius modes are not yet
+implemented for CMH.  `--ignore-ac` is also disabled for CMH because collapsing
+a variant to a single presence/absence observation is ambiguous when the same
+variant occurs in multiple strata.
+
+The stratum should define a group within which case/control labels are
+exchangeable under the null.  Examples include ancestry x cohort or ancestry x
+sequencing batch.  CMH conditions on the protein-wide case burden separately in
+each stratum; it does not estimate a parametric covariate effect.
 
 ## Conditional analysis
 
