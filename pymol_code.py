@@ -33,6 +33,17 @@ def _safe(name):
     return cleaned or 'unnamed'
 
 
+def _gray_pse_path(visual_pse):
+    """
+    The grey-chain PSE sitting beside a fragment's visual PSE.
+
+    splitext rather than split('.'): this is a full path, so a results directory with
+    a dot in it (./results, /data/v1.2/out) would otherwise be truncated at the first
+    dot and the load would miss. _safe() permits dots in the stem as well.
+    """
+    return f'{os.path.splitext(visual_pse)[0]}_gray.pse'
+
+
 def _pse_base(pdb_filename, gene_name, uniprot_id):
     """Return the base name for PSE files: {gene_name}_{uniprot_id}[_FN]."""
     match = re.search(r'-F(\d+)-', pdb_filename)
@@ -411,7 +422,7 @@ def pymol_scan_test(uniprot_id, reference_directory, results_directory, pval_fil
 
         for v in set(tmp_df['visual_filename']):
             cmd.reinitialize()
-            cmd.load(f"{v.split('.')[0]}_gray.pse")
+            cmd.load(_gray_pse_path(v))
             objects = cmd.get_names('objects')[-1]
             sub = tmp_df[tmp_df['visual_filename'] == v]
             apply_effect_coloring(sub['aa_pos'], sub[effect_col], mu_mode, objects,

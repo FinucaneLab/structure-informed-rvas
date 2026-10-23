@@ -1107,9 +1107,12 @@ def main(argv=None):
             fdr_path = os.path.join(args.results_dir, args.fdr_file)
             nbhd_radius = 15.0  # fallback when the file or the row is missing
             if os.path.exists(fdr_path):
+                # int(): --aa-pos is parsed as a string, and comparing it against
+                # an int64 aa_pos column matches nothing, so the lookup silently
+                # returned the default no matter what the scan recorded.
                 nbhd_radius = best_radius_for_hit(
-                    pd.read_csv(fdr_path, sep='\t'), args.uniprot_id, args.aa_pos,
-                    default=nbhd_radius,
+                    pd.read_csv(fdr_path, sep='\t'), args.uniprot_id,
+                    int(args.aa_pos), default=nbhd_radius,
                     radius_cols=('radius', 'radius_binomial', 'radius_poisson'),
                 )
         else:

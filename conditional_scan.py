@@ -128,6 +128,38 @@ def _carry_gene_totals(df_results, gene_totals, df_round0):
     return df_results.merge(df_totals[keep], on='uniprot_id', how='left')
 
 
+def _drop_failed_rescans(active, scanned, round_filter, round_idx):
+    """
+    Remove genes whose re-scan did not happen from the round's active set and pool.
+
+    A round copies the previous round's p-value file and overwrites only the genes it
+    re-scans, so a gene the scan skipped -- too few alleles left after conditioning, a
+    missing structure, any per-gene error -- keeps its UNCONDITIONED p-values in that
+    file. Those values are small, by construction: they are why the gene was selected
+    for conditioning in the first place. Leaving them in means this round's FDR and
+    FWER are computed against a null pool containing a signal the analysis believes it
+    masked, which deflates FWER and inflates the false-discovery count for every other
+    gene in the round.
+
+    The `lead_aa_pos in masked` guard downstream catches the same genes and stops them
+    being REPORTED, but it runs after the corrections are computed, so it cannot undo
+    their effect on everyone else. Returns (active, round_filter) with them removed.
+    """
+    failed = [uid for uid in active if uid not in scanned]
+    if not failed:
+        return active, round_filter
+    logger.warning(
+        f'Round {round_idx}: {len(failed)} genes were not re-scanned and keep the '
+        f'previous round\'s unconditioned p-values; dropping them from this round so '
+        f'they do not enter its FDR and FWER pools '
+        f'({", ".join(failed[:8])}{", ..." if len(failed) > 8 else ""})'
+    )
+    kept = [uid for uid in active if uid in scanned]
+    if not kept:
+        logger.info(f'Round {round_idx}: no gene was successfully re-scanned; stopping')
+    return kept, round_filter[~round_filter['uniprot_id'].isin(failed)]
+
+
 def _genes_passing_gate(df_results, active_genes, gate_col, gate_cutoff):
     """
     Genes with at least one neighborhood clearing the gene gate.
@@ -412,7 +444,12 @@ def conditional_scan(
                 conditioning=conditioning, min_retained=min_retained,
                 seed_salt=round_idx, gene_list=active, **mu_kwargs
             )
-            df_results = _compute_both_fdrs(results_dir, fdr_cutoff, round_filter,
+            # gene_totals is keyed by the genes actually re-scanned.
+            active, this_round_filter = _drop_failed_rescans(
+                active, set(round_totals or {}), round_filter, round_idx)
+            if not active:
+                break
+            df_results = _compute_both_fdrs(results_dir, fdr_cutoff, this_round_filter,
                                             reference_dir, current_pval_file)
             # Round 0 goes through mutation_rate_scan_test, which merges the per-gene
             # totals on afterwards; calling _compute_both_fdrs directly skips that, so
@@ -420,7 +457,7 @@ def conditional_scan(
             # own totals, computed from the conditioned arrays.
             df_results = _carry_gene_totals(df_results, round_totals, round0_results)
         else:
-            scan_test(
+            scanned = scan_test(
                 df_rvas, reference_dir, radius, pae_cutoff, results_dir, n_sims,
                 True, False, fdr_cutoff, df_filter, ignore_ac, round_fdr_file,
                 current_pval_file, conditioning=conditioning, seed=seed,
@@ -428,7 +465,11 @@ def conditional_scan(
                 uniprot_id_list=active, include_depletion=include_depletion,
                 min_alleles=min_alleles,
             )
-            df_results = compute_fdr(results_dir, fdr_cutoff, round_filter,
+            active, this_round_filter = _drop_failed_rescans(
+                active, scanned, round_filter, round_idx)
+            if not active:
+                break
+            df_results = compute_fdr(results_dir, fdr_cutoff, this_round_filter,
                                      reference_dir, current_pval_file)
 
         df_results.to_csv(os.path.join(results_dir, round_fdr_file), sep='\t', index=False)

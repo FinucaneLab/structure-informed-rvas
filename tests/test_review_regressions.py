@@ -633,7 +633,7 @@ def test_empty_rate_file_explains_itself():
 
 
 # ---------------------------------------------------------------------------
-def _drive_conditional(best_gates, gate_cutoff=0.05, max_rounds=1):
+def _drive_conditional(best_gates, gate_cutoff=0.05, max_rounds=1, fails_rescan=()):
     """
     Run conditional_scan for real over a synthetic two-gene result table, with the
     scan and the component builder stubbed.
@@ -663,19 +663,30 @@ def _drive_conditional(best_gates, gate_cutoff=0.05, max_rounds=1):
         for g in genes])
 
     rescanned = []
+    pools = []          # the gene filter each round's corrections were computed over
 
     def fake_scan(*args, **kwargs):
         # Round 0 passes uniprot_id_list=None; later rounds pass the active set.
-        if kwargs.get('uniprot_id_list') is not None:
-            rescanned.append(sorted(kwargs['uniprot_id_list']))
+        asked = kwargs.get('uniprot_id_list')
+        if asked is not None:
+            rescanned.append(sorted(asked))
         fdr_name = args[11]
         df_results.to_csv(os.path.join(tmp, fdr_name), sep='\t', index=False)
         open(os.path.join(tmp, args[12]), 'a').close()   # the pval file must exist
+        # scan_test reports which genes it actually wrote. `fails_rescan` names genes
+        # the scan skips -- too few alleles after conditioning, a missing structure --
+        # which keep their previous, unconditioned p-values in the copied file.
+        if asked is None:
+            return set(genes)
+        return {g for g in asked if g not in fails_rescan}
 
     originals = (cs.scan_test, cs.components_for_genes, cs.compute_fdr)
     cs.scan_test = fake_scan
     cs.components_for_genes = lambda *a, **k: comps.assign(round=k.get('round_idx', 0))
-    cs.compute_fdr = lambda *a, **k: df_results
+    def fake_fdr(results_dir, fdr_cutoff, df_fdr_filter, *a, **k):
+        pools.append(sorted(df_fdr_filter['uniprot_id'].unique()))
+        return df_results
+    cs.compute_fdr = fake_fdr
     try:
         cs.conditional_scan(
             df_rvas=pd.DataFrame({'uniprot_id': genes, 'aa_pos': [10] * len(genes),
@@ -695,7 +706,7 @@ def _drive_conditional(best_gates, gate_cutoff=0.05, max_rounds=1):
     stem = 'r.fdr'
     rows = pd.read_csv(os.path.join(tmp, f'{stem}.conditional.tsv'), sep='\t')
     comp_rows = pd.read_csv(os.path.join(tmp, f'{stem}.components.tsv'), sep='\t')
-    return rescanned, rows, comp_rows
+    return rescanned, rows, comp_rows, pools
 
 
 def test_rejected_gene_is_not_masked_or_rescanned():
@@ -706,7 +717,7 @@ def test_rejected_gene_is_not_masked_or_rescanned():
     print('\n16. A gene the gate guard rejects is dropped entirely')
 
     # ACCEPT clears the gate; REJECT's component does not.
-    rescanned, rows, comp_rows = _drive_conditional({'ACCEPT': 0.001, 'REJECT': 0.30})
+    rescanned, rows, comp_rows, _pools = _drive_conditional({'ACCEPT': 0.001, 'REJECT': 0.30})
 
     check('only the accepted gene is reported in round 0',
           sorted(rows[rows['round'] == 0].uniprot_id) == ['ACCEPT'],
@@ -721,6 +732,21 @@ def test_rejected_gene_is_not_masked_or_rescanned():
           f'components.tsv holds {sorted(set(comp_rows.uniprot_id))}')
     check('the rejected gene appears nowhere in the conditional table',
           'REJECT' not in set(rows.uniprot_id))
+
+    # A gene that passes the gate but whose round-1 re-scan never happens must be
+    # dropped from that round rather than carried with stale p-values.
+    rescanned2, rows2, _, pools2 = _drive_conditional(
+        {'ACCEPT': 0.001, 'OTHER': 0.001}, max_rounds=2, fails_rescan={'ACCEPT'})
+    check('a gene asked for in round 1 is still asked for',
+          rescanned2 and 'ACCEPT' in rescanned2[0])
+    check('a gene whose re-scan failed is cut from that round\'s correction pool',
+          pools2 and 'ACCEPT' not in pools2[-1],
+          f'pool was {pools2[-1] if pools2 else None}; its stale p-values would '
+          'otherwise be corrected against')
+    check('the genes that were re-scanned stay in the pool',
+          pools2 and 'OTHER' in pools2[-1])
+    check('it reports no round-1 signal either',
+          'ACCEPT' not in set(rows2[rows2['round'] == 1].uniprot_id))
 
 
 # ---------------------------------------------------------------------------
@@ -941,15 +967,78 @@ def test_get_nbhd_finds_the_recorded_radius():
     check('an absent position still falls back',
           best_radius_for_hit(mu, 'P1', 99, default=15.0, radius_cols=cols) == 15.0)
 
-    # run.py must use the lookup rather than a single hardcoded column.
-    import inspect
+    # The position as argparse actually supplies it. --aa-pos is type=str, and a
+    # string never matches an int64 aa_pos column, so the lookup returned the default
+    # no matter what the table held -- the previous version of this test passed an int
+    # and so could not see that.
     import run
+    parsed = run.build_parser().parse_args(['--get-nbhd', '--aa-pos', '42'])
+    check('--aa-pos arrives as a string', isinstance(parsed.aa_pos, str))
+    row = pd.DataFrame({'uniprot_id': ['P1'], 'aa_pos': [42], 'radius_binomial': [12.0]})
+    check('the raw string finds nothing',
+          best_radius_for_hit(row, 'P1', parsed.aa_pos, default=15.0,
+                              radius_cols=cols) == 15.0,
+          'which is why the call site must coerce')
+    check('coercing it finds the recorded radius',
+          best_radius_for_hit(row, 'P1', int(parsed.aa_pos), default=15.0,
+                              radius_cols=cols) == 12.0)
+
+    # run.py must use the lookup, on a coerced position, rather than one hardcoded column.
+    import inspect
     src_main = inspect.getsource(run.main)
     branch = src_main[src_main.index('elif args.get_nbhd:'):]
     branch = branch[:branch.index('did_nothing = False')]
     check('--get-nbhd uses best_radius_for_hit', 'best_radius_for_hit' in branch)
+    check('--get-nbhd coerces the position before looking it up',
+          'int(args.aa_pos)' in branch)
     check('--get-nbhd does not test for a single radius column',
           "'radius' in df_fdr_lookup.columns" not in branch)
+
+
+# ---------------------------------------------------------------------------
+def test_failed_rescan_leaves_the_round_pool():
+    """
+    A gene whose re-scan does not happen keeps the previous round's unconditioned
+    p-values in the copied file. Those must not enter the round's FDR/FWER pool.
+    """
+    print('\n23. A failed re-scan is dropped from the round')
+    from conditional_scan import _drop_failed_rescans
+
+    round_filter = pd.DataFrame({'uniprot_id': ['A', 'B', 'C', 'D']})
+    active, kept_filter = _drop_failed_rescans(['A', 'B'], {'A'}, round_filter, 1)
+    check('a gene that was not re-scanned leaves the active set', active == ['A'])
+    check('and leaves the pool the corrections are computed over',
+          sorted(kept_filter.uniprot_id) == ['A', 'C', 'D'],
+          'B keeps unconditioned p-values, so it must not be corrected against')
+    check('genes that were never active are untouched',
+          {'C', 'D'} <= set(kept_filter.uniprot_id))
+
+    unchanged, same = _drop_failed_rescans(['A', 'B'], {'A', 'B'}, round_filter, 1)
+    check('a fully successful round is left alone',
+          unchanged == ['A', 'B'] and same is round_filter)
+
+    none_left, _ = _drop_failed_rescans(['A'], set(), round_filter, 1)
+    check('a round where nothing was re-scanned yields no active genes',
+          none_left == [])
+
+    # The grey-chain PSE path, which the same loop builds from a full path.
+    from pymol_code import _gray_pse_path
+    check('a dotted results directory keeps its path',
+          _gray_pse_path('/data/v1.2/out/HBA1_P1.pse') == '/data/v1.2/out/HBA1_P1_gray.pse',
+          "split('.') truncated this to /data/v1_gray.pse")
+    check('a relative path keeps its directory',
+          _gray_pse_path('./results/HBA1_P1.pse') == './results/HBA1_P1_gray.pse')
+    check('a plain name still works',
+          _gray_pse_path('plain.pse') == 'plain_gray.pse')
+
+    # scan_test must report what it wrote, or the caller cannot tell.
+    import inspect
+    import scan_test
+    batch = inspect.getsource(scan_test._process_proteins_batch)
+    check('the scan batch records the genes it wrote',
+          'scanned.add(uniprot_id)' in batch and batch.rstrip().endswith('return scanned'))
+    check('scan_test passes that back to its caller',
+          inspect.getsource(scan_test.scan_test).rstrip().endswith('return scanned'))
 
 
 if __name__ == '__main__':
@@ -975,5 +1064,6 @@ if __name__ == '__main__':
     test_mu_fdr_is_the_max_over_both_tests()
     test_old_results_tables_still_read()
     test_get_nbhd_finds_the_recorded_radius()
+    test_failed_rescan_leaves_the_round_pool()
     print('\n' + ('ALL TESTS PASSED' if not FAILURES else f'FAILURES: {FAILURES}'))
     sys.exit(1 if FAILURES else 0)

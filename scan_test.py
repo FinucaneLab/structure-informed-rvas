@@ -398,12 +398,20 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
     condition out for that protein. Conditioning zeroes the affected residues rather
     than deleting variant rows, so the per-residue arrays keep their length and row i
     keeps meaning residue i+1 (see the indexing contract in utils.py).
+
+    Returns the set of proteins whose p-values were actually written. A conditional
+    round copies the previous round's p-value file and overwrites only what it
+    re-scans, so a gene that is skipped here -- too few alleles after conditioning, or
+    any of the errors below -- silently keeps its UNCONDITIONED p-values. Those would
+    then enter that round's FDR and FWER pools as though the masking had happened.
+    The caller needs to know which genes to drop.
     """
     pdb_file_pos_guide = f'{reference_dir}/pdb_pae_file_pos_guide.tsv'
     pdb_dir = f'{reference_dir}/pdb_files/'
     pae_dir = f'{reference_dir}/pae_files/'
     conditioning = conditioning or {}
 
+    scanned = set()
     n_proteins = len(uniprot_id_list)
     for i, uniprot_id in enumerate(uniprot_id_list):
         logger.info(f'Processing {uniprot_id} (protein {i+1} out of {n_proteins})')
@@ -470,6 +478,7 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
                 pval_file, protein_seed, keep_residues, min_retained,
                 include_depletion
             )
+            scanned.add(uniprot_id)
         except FileNotFoundError as e:
             logger.error(f'{uniprot_id}: Required file not found - {e}')
             continue
@@ -485,6 +494,7 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
         except Exception as e:
             logger.error(f'{uniprot_id}: Unexpected error - {e}')
             continue
+    return scanned
 
 
 def scan_test(
@@ -534,8 +544,10 @@ def scan_test(
         uniprot_id_list = _filter_proteins_by_allele_count(df_processed, df_fdr_filter,
                                                           min_alleles)
     
-    # Process each protein
-    _process_proteins_batch(
+    # Process each protein. `scanned` is the subset whose p-values were actually
+    # written; a conditional round needs it to tell a successful re-scan from one that
+    # left the previous round's unconditioned values in place.
+    scanned = _process_proteins_batch(
         df_processed, uniprot_id_list, reference_dir, 
         radius, pae_cutoff, results_dir, n_sims, conditioning,
         pval_file, seed, min_retained, seed_salt, include_depletion, min_alleles
@@ -561,4 +573,5 @@ def scan_test(
             fdr_filter = pd.DataFrame({'uniprot_id': uniprot_id_list})
         df_results = compute_fdr(results_dir, fdr_cutoff, fdr_filter, reference_dir, pval_file)
         df_results.to_csv(f'{results_dir}/{fdr_file}', sep='\t', index=False)
+    return scanned
     
