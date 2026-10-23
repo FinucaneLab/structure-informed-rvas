@@ -161,6 +161,9 @@ def component_table(
     fwer_col,
     mu_mode,
     round_idx=0,
+    gate_col=None,
+    fdr_name=None,
+    fwer_name=None,
 ):
     """
     One row per component for a single gene.
@@ -168,7 +171,13 @@ def component_table(
     `df_mut` is the per-residue mutation frame from read_original_mutation_data: aa_pos
     and ac_case always, plus mu (mutation-rate mode) or ac_control (case/control).
     `centers` is a list of (aa_pos, radius).
+
+    `fdr_col` is the membership criterion and `gate_col` the gene gate (defaulting to
+    `fwer_col`); these can be the same column. `fdr_name`/`fwer_name` are the mode's
+    canonical column names, recorded separately so a row always carries both.
     """
+    fdr_name = fdr_name or fdr_col
+    fwer_name = fwer_name or fwer_col
     case_pos = set(df_mut.loc[df_mut.ac_case > 0, 'aa_pos'].astype(int))
     labels, nbhd, shared = build_components(centers, adj_by_radius, case_pos)
 
@@ -200,8 +209,14 @@ def component_table(
         # in p_binomial -- so the lead's gate value can be far worse than some other
         # member's, and ordering components by it would mask the wrong component and let
         # the one that actually cleared the gene gate resurface next round.
-        best_gate = float(min(by_pos.loc[p, fwer_col] for p in member_centers))
-        best_crit = float(min(by_pos.loc[p, fdr_col] for p in member_centers))
+        # Minima over the component's own members, not values read off the lead: the
+        # lead is picked by p_col, and under the mutation-rate null these columns are
+        # maxima over both tests and so are not monotone in it.
+        def _best(col):
+            return float(min(by_pos.loc[p, col] for p in member_centers))
+
+        best_crit = _best(fdr_col)
+        best_gate = _best(gate_col) if gate_col is not None else _best(fwer_col)
 
         rec = {
             'uniprot_id': uniprot_id,
@@ -215,6 +230,13 @@ def component_table(
             'lead_fwer': float(lead_row[fwer_col]),
             'best_gate': best_gate,
             'best_crit': best_crit,
+            # Both canonical columns, always. --conditional-criterion fwer makes the
+            # criterion and the gene gate the same column, and a rec dict keyed on the
+            # two would then carry one key and write a table with no FDR column at all
+            # -- which _fdr_schema cannot classify, so the documented --all-signals
+            # follow-up died on it.
+            'best_fdr': _best(fdr_name) if fdr_name in by_pos.columns else best_crit,
+            'best_fwer': _best(fwer_name) if fwer_name in by_pos.columns else best_gate,
             'radius': float(dict(centers)[lead]),
             'n_residues': len(residues),
             'seq_span_aa': _seq_span(centers, labels, comp),
@@ -264,6 +286,9 @@ def components_for_genes(
     round_idx=0,
     default_radius=15.0,
     enriched_only=True,
+    gate_col=None,
+    fdr_name=None,
+    fwer_name=None,
 ):
     """
     Build the component table for every gene in `genes`.
@@ -356,6 +381,7 @@ def components_for_genes(
         t = component_table(
             g, uniprot_id, gene_name, centers, adj_by_radius, df_mut,
             p_col, fdr_col, fwer_col, mu_mode, round_idx,
+            gate_col=gate_col, fdr_name=fdr_name, fwer_name=fwer_name,
         )
         n_caseless += t.attrs.get('n_caseless', 0)
         if len(t):

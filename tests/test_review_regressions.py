@@ -63,7 +63,7 @@ def check(name, cond, detail=''):
         FAILURES.append(name)
 
 
-def _two_centre_component(df_results):
+def _two_centre_component(df_results, **kwargs):
     """
     One component holding two centres, built from a 6-residue toy structure.
 
@@ -80,8 +80,10 @@ def _two_centre_component(df_results):
             adj[centre - 1, pos - 1] = 1
     df_mut = pd.DataFrame({'aa_pos': [2, 3, 4], 'ac_case': [0, 1, 0], 'mu': [1e-6] * 3})
     return component_table(df_results, 'P1', 'G1', [(2, 10.0), (4, 10.0)],
-                           {10.0: adj}, df_mut, 'p_binomial', 'fdr_max', 'fwer_max',
-                           mu_mode=True)
+                           {10.0: adj}, df_mut, 'p_binomial',
+                           kwargs.pop('fdr_col', 'fdr_max'),
+                           kwargs.pop('fwer_col', 'fwer_max'),
+                           mu_mode=True, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +457,180 @@ def test_chromosome_discovery_skips_other_keys():
               len(part) == 1 and int(part.n_variants.iloc[0]) == 2)
 
 
+# ---------------------------------------------------------------------------
+def test_component_row_always_has_both_corrections():
+    """
+    --conditional-criterion fwer makes the member criterion and the gene gate the same
+    column. Keying the row on both would write a table with no FDR column, which
+    _fdr_schema cannot classify.
+    """
+    print('\n11. A conditional row carries both corrections')
+    from conditional_scan import _criterion_column, _gene_gate_column
+    from visualize_and_interpret import _fdr_schema, MU_FDR_SCHEMA, STD_FDR_SCHEMA
+
+    t = _two_centre_component(pd.DataFrame({
+        'aa_pos':     [2,    4],
+        'p_binomial': [1e-9, 1e-5],
+        'fdr_max':    [0.30, 0.004],
+        'fwer_max':   [0.40, 0.010],
+    }))
+    row = t.iloc[0]
+    check('a component reports its best under both canonical names',
+          row.best_fdr == 0.004 and row.best_fwer == 0.010)
+
+    for mu_mode in (False, True):
+        mode = 'mutation-rate' if mu_mode else 'case/control'
+        check(f'{mode}: --conditional-criterion fwer does collide',
+              _criterion_column('fwer', mu_mode) == _gene_gate_column('fwer', mu_mode),
+              'the case this test exists for')
+
+    # Under --conditional-criterion fwer the criterion column IS the gate column, so
+    # best_crit is a FWER value. best_fdr must still come from the FDR column.
+    collided = _two_centre_component(
+        pd.DataFrame({'aa_pos': [2, 4], 'p_binomial': [1e-9, 1e-5],
+                      'fdr_max': [0.30, 0.004], 'fwer_max': [0.40, 0.010]}),
+        fdr_col='fwer_max', fwer_col='fwer_max',
+        gate_col='fwer_max', fdr_name='fdr_max', fwer_name='fwer_max').iloc[0]
+    check('with the criterion set to fwer, best_crit is a FWER value',
+          collided.best_crit == 0.010)
+    check('best_fdr still comes from the FDR column',
+          collided.best_fdr == 0.004, f'got {collided.best_fdr}')
+    check('best_fwer still comes from the FWER column', collided.best_fwer == 0.010)
+
+    # And the writer must key on those names, not on crit_col/gate_col.
+    import inspect
+    import conditional_scan
+    writer = inspect.getsource(conditional_scan.conditional_scan)
+    check('both rec dicts are keyed on the canonical names',
+          writer.count('fdr_name: float(comp.best_fdr), fwer_name: float(comp.best_fwer)') == 2)
+    check('neither rec dict is keyed on the colliding pair',
+          'crit_col: float(comp.' not in writer and 'gate_col: float(comp.' not in writer)
+
+    # A table written that way classifies in both modes.
+    for mu_mode, expected in ((False, STD_FDR_SCHEMA), (True, MU_FDR_SCHEMA)):
+        mode = 'mutation-rate' if mu_mode else 'case/control'
+        df = pd.DataFrame([{'uniprot_id': 'P1', 'aa_pos': 2, 'round': 0,
+                            _criterion_column('fdr', mu_mode): 0.004,
+                            _criterion_column('fwer', mu_mode): 0.010,
+                            ('p_binomial' if mu_mode else 'p_value'): 1e-9}])
+        check(f'{mode}: the written table is classifiable downstream',
+              _fdr_schema(df) is expected)
+
+
+# ---------------------------------------------------------------------------
+def test_gate_is_rechecked_on_the_component():
+    """
+    The gene gate admits a gene on some neighborhood, which need not belong to the
+    component that gets reported and masked.
+    """
+    print('\n12. The gene gate is re-checked on the component')
+    import inspect
+    import conditional_scan
+
+    src_cs = inspect.getsource(conditional_scan.conditional_scan)
+    check('both accept loops re-check the component against the gene gate',
+          src_cs.count('float(comp.best_gate) < gate_cutoff') == 2,
+          'one for round 0, one for later rounds')
+
+    # The predicate itself, on the values that make it matter.
+    gate_cutoff = 0.05
+    accepted = [best for best in (0.001, 0.04, 0.40) if float(best) < gate_cutoff]
+    check('a component above the gene gate is not accepted', accepted == [0.001, 0.04])
+    check('NaN is not accepted', not (float('nan') < gate_cutoff))
+
+
+# ---------------------------------------------------------------------------
+def test_allele_guard_excludes_out_of_structure_positions():
+    """
+    get_ac_per_residue drops aa_pos outside the structure with a warning rather than
+    raising, so the guard must not count those alleles as usable.
+    """
+    print('\n13. Out-of-structure positions do not satisfy --min-alleles')
+    import scan_test
+
+    tmp = tempfile.mkdtemp()
+    guide = os.path.join(tmp, 'pdb_pae_file_pos_guide.tsv')
+    # structure_length reads the maximum end of pos_covered: 4 residues here.
+    pd.DataFrame({'uniprot_id': ['P1'], 'pdb_filename': ['P1.pdb'],
+                  'pos_covered': ['[1, 4]']}).to_csv(guide, sep='\t', index=False)
+
+    # 8 case alleles on paper, but 6 of them sit past the end of the structure.
+    df = pd.DataFrame({'uniprot_id': ['P1'] * 4, 'aa_pos': [1, 2, 90, 91],
+                       'ac_case': [1, 1, 3, 3], 'ac_control': [1, 1, 3, 3]})
+    scanned = []
+    orig = scan_test.scan_test_one_protein
+    scan_test.scan_test_one_protein = lambda *a, **k: scanned.append(a[5])
+    try:
+        scan_test._process_proteins_batch(df, ['P1'], tmp, 15.0, 25.0, tmp, 10,
+                                          None, 'p.h5', seed=1, min_alleles=5)
+    finally:
+        scan_test.scan_test_one_protein = orig
+    check('a gene is judged on the alleles inside its structure',
+          scanned == [], '2 of 8 case alleles are in range, below --min-alleles 5')
+
+    # The same gene with every position in range is still scanned.
+    df_ok = df.assign(aa_pos=[1, 2, 3, 4])
+    scanned.clear()
+    scan_test.scan_test_one_protein = lambda *a, **k: scanned.append(a[5])
+    try:
+        scan_test._process_proteins_batch(df_ok, ['P1'], tmp, 15.0, 25.0, tmp, 10,
+                                          None, 'p.h5', seed=1, min_alleles=5)
+    finally:
+        scan_test.scan_test_one_protein = orig
+    check('the same alleles inside the structure pass', scanned == ['P1'])
+
+
+# ---------------------------------------------------------------------------
+def test_documented_conditional_columns_exist():
+    """The README names the columns a conditional run adds; they must be the real ones."""
+    print('\n14. README column names match the writer')
+    import inspect
+    import conditional_scan
+
+    readme = io_open_readme()
+    writer = inspect.getsource(conditional_scan.conditional_scan)
+    for col in ('n_conditioned_residues', 'conditioned_on', 'component_id',
+                'n_centers', 'n_residues', 'n_case_alleles',
+                'n_residues_overlapping_mask'):
+        check(f'README and writer agree on {col}',
+              col in readme and f"'{col}'" in writer)
+    check('the old name is gone from the README', 'n_conditioned_nbhds' not in readme)
+
+
+def io_open_readme():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, 'README.md')) as fid:
+        return fid.read()
+
+
+# ---------------------------------------------------------------------------
+def test_empty_rate_file_explains_itself():
+    """A file with no {chrom}_pos / {chrom}_uniprot_id pair must say so."""
+    print('\n15. A rate file with no chromosomes')
+    import h5py
+    import make_uniprot_genomic_coords as mugc
+
+    tmp = tempfile.mkdtemp()
+    path = os.path.join(tmp, 'all_missense_variants_gr38.h5')
+    with h5py.File(path, 'w') as fid:
+        fid.create_dataset('metadata', data=np.array([[1]]))
+
+    sys_argv = sys.argv[:]
+    sys.argv = ['make_uniprot_genomic_coords.py', '--reference-dir', tmp,
+                '--out', os.path.join(tmp, 'out.tsv')]
+    try:
+        mugc.main()
+        check('an unusable rate file raises a readable error', False, 'no error raised')
+    except ValueError as e:
+        check('an unusable rate file raises a readable error',
+              'No chromosomes found' in str(e), str(e)[:60])
+    except Exception as e:
+        check('an unusable rate file raises a readable error', False,
+              f'{type(e).__name__}: {str(e)[:50]}')
+    finally:
+        sys.argv = sys_argv
+
+
 if __name__ == '__main__':
     test_component_ranking_follows_the_gene_gate()
     test_component_row_reports_its_own_best()
@@ -466,5 +642,10 @@ if __name__ == '__main__':
     test_annotation_caches_do_their_job()
     test_one_gene_name_per_protein()
     test_chromosome_discovery_skips_other_keys()
+    test_component_row_always_has_both_corrections()
+    test_gate_is_rechecked_on_the_component()
+    test_allele_guard_excludes_out_of_structure_positions()
+    test_documented_conditional_columns_exist()
+    test_empty_rate_file_explains_itself()
     print('\n' + ('ALL TESTS PASSED' if not FAILURES else f'FAILURES: {FAILURES}'))
     sys.exit(1 if FAILURES else 0)

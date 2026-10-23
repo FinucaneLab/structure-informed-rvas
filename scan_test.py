@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import h5py
 from scipy.stats import fisher_exact
-from utils import (get_adjacency_matrix, write_dataset,
+from utils import (get_adjacency_matrix, write_dataset, structure_length,
                    check_keep_mask, neighborhood_retention, build_conditioning_mask)
 from logger_config import get_logger
 from empirical_fdr import compute_fdr
@@ -422,17 +422,36 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
                     logger.info(f'{uniprot_id}: conditioning out {what} '
                                 f'({n_removed} residues)')
 
-            # Count what the scan will actually see. Conditioning masks residues
-            # rather than dropping rows, so an unmasked count would let a gene whose
-            # conditioned-out component carried nearly all of its alleles through on
-            # almost nothing -- with n_case reaching 0, read_p_values divides by it.
+            # Count what the scan will actually see, which is neither the raw frame
+            # nor the conditioned one alone. Two things remove alleles before the test:
+            #
+            #  - conditioning, which masks residues rather than dropping rows, so an
+            #    unmasked count lets a gene whose conditioned-out component carried
+            #    nearly all its alleles through on almost nothing; and
+            #  - get_ac_per_residue, which drops aa_pos outside 1..n_res with a warning
+            #    (it used to raise and lose the gene), so a gene mapped against a longer
+            #    isoform than the guide's structure is scanned on only the part that
+            #    fits.
+            #
+            # Either way n_case can reach 0, and read_p_values then divides by it.
             df_counted = df
+            try:
+                n_res_guide = structure_length(pdb_file_pos_guide, uniprot_id)
+                df_counted = df_counted[(df_counted.aa_pos >= 1)
+                                        & (df_counted.aa_pos <= n_res_guide)]
+            except (ValueError, FileNotFoundError, KeyError) as e:
+                # No structure length to check against: fall back to counting
+                # everything, which is what this guard did before.
+                logger.debug(f'{uniprot_id}: no structure length for the allele guard - {e}')
             if keep_residues is not None:
                 kept_pos = np.flatnonzero(keep_residues) + 1
-                df_counted = df[df.aa_pos.isin(kept_pos)]
+                df_counted = df_counted[df_counted.aa_pos.isin(kept_pos)]
             if (sum(df_counted.ac_case) < min_alleles) or (
                     sum(df_counted.ac_control) < min_alleles):
                 extra = '' if keep_residues is None else ' after conditioning'
+                if len(df_counted) < len(df):
+                    extra += (f' ({len(df) - len(df_counted)} of {len(df)} rows fall '
+                              'outside the structure or the mask)')
                 logger.warning(f'{uniprot_id}: needs at least {min_alleles} case and '
                                f'{min_alleles} control alleles{extra}. Skipping.')
                 continue

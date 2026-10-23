@@ -68,12 +68,21 @@ def main():
     out = args.out or os.path.join(args.reference_dir, 'uniprot_genomic_coords.tsv')
 
     with h5py.File(h5_path, 'r') as fid:
+        keys = list(fid.keys())
         chroms = discover_chroms(fid)
         parts = []
         for chrom in chroms:
             part = spans_for_chrom(fid, chrom)
             print(f'{chrom}: {len(part)} proteins, {int(part.n_variants.sum())} variants')
             parts.append(part)
+
+    if not parts:
+        # pd.concat([]) raises "No objects to concatenate", which says nothing about
+        # the real problem: the file has no {chrom}_uniprot_id / {chrom}_pos pair.
+        raise ValueError(
+            f'No chromosomes found in {h5_path}. Expected datasets named '
+            f'{{chrom}}_uniprot_id and {{chrom}}_pos; found: {sorted(keys)[:10]}'
+        )
 
     df = pd.concat(parts, ignore_index=True)
 

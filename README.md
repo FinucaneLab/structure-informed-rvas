@@ -919,8 +919,15 @@ not a defect -- it means the component is assembled in 3D from parts of the chai
 are far apart in sequence, which is exactly what 3DNT exists to find.
 
 The conditional table adds `round`, `conditioned_on` (the positions masked before that
-round) and `n_conditioned_nbhds` to the usual result columns. A gene with three rows
-carries three independent 3D signals.
+round) and `n_conditioned_residues` to the usual result columns, plus the component the
+row stands for: `component_id`, `n_centers`, `n_residues`, `n_case_alleles` and, from
+round 1 on, `n_residues_overlapping_mask`. A gene with three rows carries three
+independent 3D signals.
+
+The FDR and FWER columns hold the component's best over its own members, not the value
+at the lead position -- under the mutation-rate null those columns are maxima over both
+tests, so the best-scoring member need not be the one that cleared the cutoff. Both
+columns are always written, whichever `--conditional-criterion` was used.
 
 ### Other flags
 

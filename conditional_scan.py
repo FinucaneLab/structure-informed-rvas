@@ -202,6 +202,11 @@ def conditional_scan(
     gate_cutoff = gene_cutoff
     p_col = 'p_binomial' if mutation_rate_mode else 'p_value'
     radius_cols = _radius_columns(mutation_rate_mode)
+    # The mode's own column names. crit_col and gate_col are each one of these, and
+    # with --conditional-criterion fwer they are the SAME one -- so rows are written
+    # under these instead, which always gives the table both an FDR and a FWER column.
+    fdr_name = _criterion_column('fdr', mutation_rate_mode)
+    fwer_name = _criterion_column('fwer', mutation_rate_mode)
 
     def read_mut(uniprot_id):
         """Per-residue counts for one gene, from whichever p-value file is current."""
@@ -291,6 +296,7 @@ def conditional_scan(
             results, genes, reference_dir, pae_cutoff, read_mut,
             p_col, crit_col, gate_col, radius_cols, cutoff, mutation_rate_mode,
             round_idx=round_idx, default_radius=default_radius,
+            gate_col=gate_col, fdr_name=fdr_name, fwer_name=fwer_name,
         )
 
     # The gene gate is FWER by default and the members are the FDR-significant
@@ -310,6 +316,16 @@ def conditional_scan(
         comp = top_component(comps, uid)
         if comp is None:
             continue
+        # The gene gate admitted this gene on SOME neighborhood, which need not be one
+        # of this component's. With --include-depletion, or over an older two-sided
+        # results file, the gate can be cleared by a depleted neighborhood that
+        # enriched_mask then drops, leaving an enriched component that never cleared it.
+        # Reporting that as an accepted signal -- and masking it -- is what this guard
+        # stops; _genes_passing_gate deliberately does not filter direction itself.
+        if not float(comp.best_gate) < gate_cutoff:
+            logger.info(f'{uid}: best component is {gate_col} = {float(comp.best_gate):.3g}, '
+                        f'above the gene gate ({gate_cutoff}); not reported')
+            continue
         rec = {'uniprot_id': uid, 'gene_name': comp.gene_name, 'aa_pos': comp.lead_aa_pos,
                'round': 0, 'conditioned_on': '', 'n_conditioned_residues': 0,
                'component_id': comp.component_id, 'n_centers': comp.n_centers,
@@ -323,7 +339,7 @@ def conditional_scan(
                # lead's value made `run_all --fdr-file <stem>.conditional.tsv
                # --all-signals` filter out a signal this analysis accepted and masked.
                # p_col already carries the component minimum, since lead_p is the min.
-               crit_col: float(comp.best_crit), gate_col: float(comp.best_gate),
+               fdr_name: float(comp.best_fdr), fwer_name: float(comp.best_fwer),
                p_col: comp.lead_p}
         accepted_rows.append(rec)
 
@@ -436,6 +452,11 @@ def conditional_scan(
                     'analysis.'
                 )
                 continue
+            if not float(comp.best_gate) < gate_cutoff:
+                logger.info(f'{uid}: round {round_idx} component is {gate_col} = '
+                            f'{float(comp.best_gate):.3g}, above the gene gate '
+                            f'({gate_cutoff}); not reported')
+                continue
             overlap = len(parse_pymol_positions(comp.residues_pymol) & masked)
             rec = {'uniprot_id': uid, 'gene_name': comp.gene_name,
                    'aa_pos': comp.lead_aa_pos, 'round': round_idx,
@@ -445,7 +466,7 @@ def conditional_scan(
                    'n_residues': comp.n_residues, 'n_case_alleles': comp.n_case_alleles,
                    'n_residues_overlapping_mask': overlap,
                    radius_cols[0]: float(comp.radius),
-                   crit_col: float(comp.best_crit), gate_col: float(comp.best_gate),
+                   fdr_name: float(comp.best_fdr), fwer_name: float(comp.best_fwer),
                    p_col: comp.lead_p}
             accepted_rows.append(rec)
             rows_this_round.append(rec)
