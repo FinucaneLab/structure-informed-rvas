@@ -1172,6 +1172,84 @@ def test_cmh_warns_that_it_ignores_the_conditional_radius():
           f'got {cond}')
 
 
+# ---------------------------------------------------------------------------
+def test_structures_resolve_by_accession_not_filename_substring():
+    """
+    A 6-character UniProt accession is a legal prefix of a 10-character one. Matching
+    the structure guide on `pdb_filename.str.contains` therefore pulled the longer
+    protein's fragments into the shorter one, while structure_length -- which sizes the
+    mask check -- resolved by the uniprot_id column and did not.
+    """
+    print('\n26. Structures are resolved by the accession column')
+    import utils
+
+    tmp = tempfile.mkdtemp()
+    guide = os.path.join(tmp, 'pdb_pae_file_pos_guide.tsv')
+    # A0A024 is one 4-residue fragment; A0A024R161, whose accession it prefixes, is a
+    # 400-residue protein in two fragments.
+    pd.DataFrame({
+        'pdb_filename': ['AF-A0A024-F1.pdb.gz', 'AF-A0A024R161-F1.pdb.gz',
+                         'AF-A0A024R161-F2.pdb.gz'],
+        'pae_filename': ['AF-A0A024-F1.json.gz', 'AF-A0A024R161-F1.json.gz',
+                         'AF-A0A024R161-F2.json.gz'],
+        'pos_covered': ['[1, 4]', '[1, 200]', '[201, 400]'],
+        'uniprot_id': ['A0A024', 'A0A024R161', 'A0A024R161'],
+    }).to_csv(guide, sep='\t', index=False)
+
+    sizes = {'AF-A0A024-F1': 4, 'AF-A0A024R161-F1': 200, 'AF-A0A024R161-F2': 200}
+
+    def _n_rows(path, args):
+        # The real readers take an optional 1-based inclusive (i, j) sub-range, and the
+        # multi-fragment branch relies on it. A stub that ignored it would make the
+        # unfixed code raise a broadcast error instead of returning its wrong shape.
+        n = sizes[os.path.basename(path).split('.')[0]]
+        if len(args) > 1:
+            return args[1] - args[0] + 1
+        if len(args) > 0:
+            return n - args[0] + 1
+        return n
+
+    def fake_distances(pdb_file, *args):
+        n = _n_rows(pdb_file, args)
+        return np.zeros((n, n))
+
+    def fake_paes(pae_file, *args):
+        n = _n_rows(pae_file, args)
+        return np.zeros((n, n))
+
+    for name in sizes:
+        open(os.path.join(tmp, f'{name}.json.gz'), 'a').close()
+
+    originals = (utils.get_pairwise_distances, utils.get_paes)
+    utils.get_pairwise_distances = fake_distances
+    utils.get_paes = fake_paes
+    try:
+        dist = utils.get_distance_matrix_structure(guide, tmp, 'A0A024')
+        pae = utils.get_pae_matrix_structure(guide, tmp, 'A0A024')
+        long_dist = utils.get_distance_matrix_structure(guide, tmp, 'A0A024R161')
+    finally:
+        utils.get_pairwise_distances, utils.get_paes = originals
+
+    n_guide = utils.structure_length(guide, 'A0A024')
+    check('the short accession gets only its own structure',
+          dist is not None and dist.shape == (4, 4),
+          f'got {None if dist is None else dist.shape}; the substring match took the '
+          'multi-fragment branch and sized it 400')
+    check('its PAE matrix is sized to match',
+          pae is not None and pae.shape == (4, 4),
+          f'got {None if pae is None else pae.shape}')
+    check('and the adjacency agrees with structure_length',
+          dist is not None and dist.shape[0] == n_guide,
+          f'{None if dist is None else dist.shape[0]} vs {n_guide}; a disagreement is '
+          'the check_keep_mask ValueError that drops the gene from a round')
+    check('the longer accession still gets both its fragments',
+          long_dist is not None and long_dist.shape == (400, 400),
+          f'got {None if long_dist is None else long_dist.shape}')
+    check('which is what structure_length reports for it',
+          long_dist is not None
+          and long_dist.shape[0] == utils.structure_length(guide, 'A0A024R161'))
+
+
 if __name__ == '__main__':
     test_component_ranking_follows_the_gene_gate()
     test_component_row_reports_its_own_best()
@@ -1198,5 +1276,6 @@ if __name__ == '__main__':
     test_failed_rescan_leaves_the_round_pool()
     test_genes_that_stop_being_rescanned_stay_out_of_the_pool()
     test_cmh_warns_that_it_ignores_the_conditional_radius()
+    test_structures_resolve_by_accession_not_filename_substring()
     print('\n' + ('ALL TESTS PASSED' if not FAILURES else f'FAILURES: {FAILURES}'))
     sys.exit(1 if FAILURES else 0)

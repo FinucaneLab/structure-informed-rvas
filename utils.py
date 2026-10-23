@@ -49,7 +49,14 @@ def get_pairwise_distances(pdb_file, *args):
 def get_distance_matrix_structure(pdb_file_pos_guide, pdb_dir, uniprot_id):
     logger.debug(f"Computing distance matrix for {uniprot_id}")
     info = pd.read_csv(pdb_file_pos_guide, sep="\t")
-    pdb_files = info.loc[info.pdb_filename.str.contains(uniprot_id),'pdb_filename']
+    # The uniprot_id COLUMN, not a substring of the filename. UniProt accessions come
+    # in 6- and 10-character forms, and a 6-character one is a legal prefix of a
+    # 10-character one (A0A024 and A0A024R161), so `contains` pulled the longer
+    # protein's fragments into the shorter one's structure -- taking the multi-fragment
+    # branch and sizing the matrix by the wrong nAA. structure_length, which the
+    # conditioning mask is checked against, already resolves by the column, so the two
+    # disagreed and check_keep_mask dropped the gene from the round.
+    pdb_files = info.loc[info.uniprot_id == uniprot_id, 'pdb_filename']
     ## Version 2: central on top of all
     if len(pdb_files)==0:
         logger.warning(f"Protein {uniprot_id} not found.")
@@ -116,12 +123,13 @@ def get_paes(pae_file, *args):
 def get_pae_matrix_structure(pae_file_pos_guide, pae_dir, uniprot_id):
     logger.debug(f"Computing pae matrix for {uniprot_id}")
     info = pd.read_csv(pae_file_pos_guide, sep="\t")
-    #pae_files = info.loc[info.pae_filename.str.contains(uniprot_id),'pae_filename']
-    # need to deal with null entries 
-    pae_files = info.loc[info.pae_filename.notnull() & info.pae_filename.str.contains(uniprot_id), 'pae_filename']
+    # By the uniprot_id column, as in get_distance_matrix_structure and the
+    # known_no_pae check below; the null entries are proteins with no PAE file.
+    pae_files = info.loc[(info.uniprot_id == uniprot_id) & info.pae_filename.notnull(),
+                         'pae_filename']
     ## Version 2: central on top of all
     if len(pae_files)==0:
-        pdb_files = info.loc[info.pdb_filename.str.contains(uniprot_id), 'pdb_filename']
+        pdb_files = info.loc[info.uniprot_id == uniprot_id, 'pdb_filename']
         if len(pdb_files)==0:
             logger.warning(f"Protein {uniprot_id} not found.")
             return None
