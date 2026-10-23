@@ -392,6 +392,11 @@ def get_nbhd_info(df_rvas, uniprot_id, aa_pos, reference_dir, radius, pae_cutoff
         - variant genetic coordinates; amino acid position, reference, and alternate; and allele count
     3. a dataframe control variant residue positions in the neighborhood
         - variant genetic coordinates; amino acid position, reference, and alternate; and allele count
+
+    Under the mutation-rate null there is no control cohort -- map_to_protein appends
+    `mu` instead of ac_control -- so (3) is None and the case table carries the
+    per-variant rate in its place. Selecting ac_control unconditionally raised
+    AttributeError, which is what --get-nbhd did on a mutation-rate run.
     """
     pdb_pae_file_pos_guide = f'{reference_dir}/pdb_pae_file_pos_guide.tsv'
     pdb_dir = f'{reference_dir}/pdb_files/'
@@ -407,11 +412,16 @@ def get_nbhd_info(df_rvas, uniprot_id, aa_pos, reference_dir, radius, pae_cutoff
     df_rvas_nbhd = df_rvas_u[df_rvas_u.aa_pos.isin(nbhd)]
     # all case variants on neighborhood residues
     df_rvas_case = df_rvas_nbhd[df_rvas_nbhd.ac_case>0]
-    # all control variants on neighborhood residues
-    df_rvas_cntrl = df_rvas_nbhd[df_rvas_nbhd.ac_control>0]
+    case_cols = ['Variant ID', 'aa_pos', 'ac_case', 'aa_ref', 'aa_alt']
+    if 'mu' in df_rvas_nbhd.columns:
+        case_cols.append('mu')
+    cases = df_rvas_case[case_cols].reset_index(drop=True)
 
-    cases = df_rvas_case[['Variant ID', 'aa_pos','ac_case', 'aa_ref', 'aa_alt']].reset_index(drop=True)
-    cntrls = df_rvas_cntrl[['Variant ID', 'aa_pos', 'ac_control', 'aa_ref', 'aa_alt']].reset_index(drop=True)
+    cntrls = None
+    if 'ac_control' in df_rvas_nbhd.columns:
+        # all control variants on neighborhood residues
+        df_rvas_cntrl = df_rvas_nbhd[df_rvas_nbhd.ac_control>0]
+        cntrls = df_rvas_cntrl[['Variant ID', 'aa_pos', 'ac_control', 'aa_ref', 'aa_alt']].reset_index(drop=True)
 
     # alternative option - function takes in list of aa_pos (aa_list) and calcs nbhd for each of them
     # could also take in no list of pos and just return neighborhoods of whole protein

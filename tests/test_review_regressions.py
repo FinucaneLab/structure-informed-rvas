@@ -1069,15 +1069,35 @@ def test_failed_rescan_leaves_the_round_pool():
     check('a round where nothing was re-scanned yields no active genes',
           none_left == [])
 
-    # The grey-chain PSE path, which the same loop builds from a full path.
-    from pymol_code import _gray_pse_path
-    check('a dotted results directory keeps its path',
-          _gray_pse_path('/data/v1.2/out/HBA1_P1.pse') == '/data/v1.2/out/HBA1_P1_gray.pse',
-          "split('.') truncated this to /data/v1_gray.pse")
-    check('a relative path keeps its directory',
-          _gray_pse_path('./results/HBA1_P1.pse') == './results/HBA1_P1_gray.pse')
-    check('a plain name still works',
-          _gray_pse_path('plain.pse') == 'plain_gray.pse')
+    # The sibling PSE paths, which the same loop builds from a full path. Both ends
+    # matter: pymol_scan_test loads the _gray and saves the _ratio beside it, and the
+    # save kept a split('.') after the load was fixed -- so the gray loaded from
+    # results/ while the ratio was written to the working directory under a truncated
+    # name, and every fragment of a multi-fragment protein collapsed onto that name.
+    from pymol_code import _gray_pse_path, _sibling_pse
+    for label, suffix, path_of in (
+            ('_gray_pse_path', 'gray', _gray_pse_path),
+            ('the gray save', 'gray', lambda v: _sibling_pse(v, 'gray')),
+            ('the ratio save', 'ratio', lambda v: _sibling_pse(v, 'ratio'))):
+        check(f'a dotted results directory keeps its path ({label})',
+              path_of('/data/v1.2/out/HBA1_P1.pse')
+              == f'/data/v1.2/out/HBA1_P1_{suffix}.pse',
+              f"split('.') truncated this to /data/v1_{suffix}.pse")
+        check(f'a relative path keeps its directory ({label})',
+              path_of('./results/HBA1_P1.pse') == f'./results/HBA1_P1_{suffix}.pse',
+              "split('.')[0] is '' here, so the file lands in the working directory")
+        check(f'a plain name still works ({label})',
+              path_of('plain.pse') == f'plain_{suffix}.pse')
+        check(f'two fragments keep separate names ({label})',
+              path_of('./out/G_P1_F1.pse') != path_of('./out/G_P1_F2.pse'))
+
+    # And the writer uses it, rather than re-deriving the stem.
+    import inspect
+    import pymol_code
+    scan_src = inspect.getsource(pymol_code.pymol_scan_test)
+    check('pymol_scan_test saves through the same helper it loads through',
+          '_sibling_pse(v' in scan_src and "split('.')" not in scan_src,
+          'the load and the save drifted apart once already')
 
     # scan_test must report what it wrote, or the caller cannot tell.
     import inspect
@@ -1321,6 +1341,59 @@ def test_every_uniprot_call_has_a_timeout():
           f'uniprot_annotation.py lines {missing} do not')
 
 
+# ---------------------------------------------------------------------------
+def test_get_nbhd_reports_a_mutation_rate_run():
+    """
+    --get-nbhd was taught to read a mutation-rate table's radius columns but still
+    selected ac_control, which map_to_protein does not produce under that null -- so
+    the branch resolved the radius and then died with AttributeError on the next line.
+    """
+    print('\n29. --get-nbhd works under the mutation-rate null')
+    import utils
+
+    adj = np.zeros((20, 20), dtype=int)
+    adj[9, 8:12] = 1                      # neighborhood of residue 10 is 9..12
+    original = utils.get_adjacency_matrix
+    utils.get_adjacency_matrix = lambda *a, **k: adj
+
+    common = {'Variant ID': ['v1', 'v2'], 'uniprot_id': ['P1'] * 2,
+              'aa_pos': [10, 15], 'aa_ref': ['A'] * 2, 'aa_alt': ['V'] * 2,
+              'ac_case': [2, 1]}
+    try:
+        # Mutation-rate mode: `mu` in place of ac_control, which is the shape
+        # read_data.map_to_protein returns for --mu-file / --mu-col.
+        mu_df = pd.DataFrame({**common, 'mu': [1e-6, 2e-6]})
+        nbhd, cases, cntrls = utils.get_nbhd_info(mu_df, 'P1', 10, 'ref', 10.0, 25.0)
+        check('the neighborhood is still computed', sorted(nbhd) == [9, 10, 11, 12],
+              f'got {sorted(nbhd)}')
+        check('the case variants inside it are reported',
+              list(cases.aa_pos) == [10], f'got {list(cases.aa_pos)}')
+        check('with the rate that stands in for an allele count',
+              'mu' in cases.columns, f'columns {list(cases.columns)}')
+        check('and there is no control table to report',
+              cntrls is None, f'got {type(cntrls).__name__}')
+
+        # Case/control mode is unchanged.
+        cc_df = pd.DataFrame({**common, 'ac_control': [0, 3]})
+        _n, cc_cases, cc_cntrls = utils.get_nbhd_info(cc_df, 'P1', 10, 'ref', 10.0, 25.0)
+        check('a case/control run still reports both tables',
+              cc_cntrls is not None and list(cc_cases.aa_pos) == [10])
+        check('and carries no mu column', 'mu' not in cc_cases.columns)
+        check('its control table still filters on ac_control > 0',
+              list(cc_cntrls.aa_pos) == [], f'got {list(cc_cntrls.aa_pos)}')
+    finally:
+        utils.get_adjacency_matrix = original
+
+    # The caller must not print a table that is not there.
+    import inspect
+    import run
+    branch = inspect.getsource(run.main)
+    branch = branch[branch.index('get_nbhd_info(df_rvas'):]
+    branch = branch[:branch.index('did_nothing = False')]
+    check('--get-nbhd handles the absent control table',
+          'cntrls is None' in branch, 'it printed `None` under a header otherwise')
+
+
 if __name__ == '__main__':
     test_component_ranking_follows_the_gene_gate()
     test_component_row_reports_its_own_best()
@@ -1350,5 +1423,6 @@ if __name__ == '__main__':
     test_structures_resolve_by_accession_not_filename_substring()
     test_a_failed_annotation_is_not_cached_forever()
     test_every_uniprot_call_has_a_timeout()
+    test_get_nbhd_reports_a_mutation_rate_run()
     print('\n' + ('ALL TESTS PASSED' if not FAILURES else f'FAILURES: {FAILURES}'))
     sys.exit(1 if FAILURES else 0)

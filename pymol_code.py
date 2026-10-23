@@ -40,15 +40,24 @@ def _safe(name):
     return cleaned or 'unnamed'
 
 
-def _gray_pse_path(visual_pse):
+def _sibling_pse(visual_pse, suffix):
     """
-    The grey-chain PSE sitting beside a fragment's visual PSE.
+    A PSE sitting beside a fragment's visual PSE, under the same stem.
 
     splitext rather than split('.'): this is a full path, so a results directory with
     a dot in it (./results, /data/v1.2/out) would otherwise be truncated at the first
-    dot and the load would miss. _safe() permits dots in the stem as well.
+    dot -- the load would miss, the save would land in the working directory, and
+    every fragment of a multi-fragment protein would collapse onto one name. _safe()
+    permits dots in the stem as well. One helper for both ends: the load and the save
+    were written separately and drifted apart, which is how the save kept a split('.')
+    after the load was fixed.
     """
-    return f'{os.path.splitext(visual_pse)[0]}_gray.pse'
+    return f'{os.path.splitext(visual_pse)[0]}_{suffix}.pse'
+
+
+def _gray_pse_path(visual_pse):
+    """The grey-chain PSE sitting beside a fragment's visual PSE."""
+    return _sibling_pse(visual_pse, 'gray')
 
 
 def _pse_base(pdb_filename, gene_name, uniprot_id):
@@ -442,7 +451,7 @@ def pymol_scan_test(uniprot_id, reference_directory, results_directory, pval_fil
             cmd.set("ray_trace_gain", 0.15)
             cmd.set("cartoon_loop_radius", 0.4)
 
-            cmd.save(f"{v.split('.')[0]}_ratio.pse")
+            cmd.save(_sibling_pse(v, 'ratio'))
 
     except Exception as e:
         print(f"[ERROR] in pymol_scan_test(): {e}")

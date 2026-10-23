@@ -1143,8 +1143,12 @@ def main(argv=None):
         print(nbhd)
         print('Case Variants in neighborhood:')
         print(cases)
-        print('Control Variants in neighborhood:')
-        print(cntrls)
+        if cntrls is None:
+            print('No control cohort under the mutation-rate null; the case table '
+                  'carries each variant\'s mutation rate instead.')
+        else:
+            print('Control Variants in neighborhood:')
+            print(cntrls)
         did_nothing = False
     
     elif args.combine_pval_files is not None:

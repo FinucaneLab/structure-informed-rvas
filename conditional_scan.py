@@ -21,6 +21,15 @@ spans every gene in the analysis -- unmasked nulls for the genes that were not t
 freshly drawn masked nulls for the genes that were. FDR and FWER in round k are therefore
 on the same footing as in round 0, which is what makes the rounds comparable.
 
+With one documented exception: a gene the round asked for but did not re-scan -- spent
+below --min-denovo/--min-alleles, or skipped by the scan -- leaves the pool for that
+round and every round after, because the file still holds values drawn under a shorter
+mask than the round is using. The pool therefore shrinks slightly over the rounds, and
+since FWER is the per-simulation minimum over it, that makes later rounds mildly
+anti-conservative for the genes still in. Only genes that carried signal ever leave, so
+the effect is small; it is a deliberate trade against correcting every other gene
+against p-values drawn under the wrong mask.
+
 What this does NOT correct for is the sequential testing itself: each round is controlled
 at the nominal level, and the rounds are not jointly corrected. This matches the usual
 convention in conditional association analysis, and means the later rounds should be read
@@ -420,10 +429,19 @@ def conditional_scan(
             )
             drop = {u for u, _ in exhausted}
             active = [u for u in active if u not in drop]
-            # Out of `round_filter` as well as `active`: not being re-scanned, these
-            # genes keep the previous round's UNCONDITIONED p-values in the copied
-            # file, and leaving them in the pool is the same corruption of this
-            # round's FDR and FWER that _drop_failed_rescans exists to prevent.
+            # Out of `round_filter` as well as `active`. Not being re-scanned, these
+            # genes keep whatever the copied file already held for them, which is
+            # conditioned on a mask SHORTER than this round's: unconditioned values if
+            # they are spent at round 1, round-(k-1) values if later. Either way they
+            # are not the values this round's pool is supposed to contain, which is the
+            # corruption _drop_failed_rescans exists to prevent, so they leave with it.
+            #
+            # The cost is a pool that shrinks as rounds go on. _compute_fwer takes the
+            # per-simulation minimum over the pool, so a smaller pool raises that
+            # minimum and lowers FWER slightly for every gene still in -- i.e. this is
+            # mildly anti-conservative, bounded by how few genes ever leave (only ones
+            # that carried signal). That was judged the lesser evil against correcting
+            # against values drawn under the wrong mask. See the module docstring.
             round_filter = round_filter[~round_filter['uniprot_id'].isin(drop)]
         if not active:
             logger.info(f'No genes left with testable signal; stopping after round '
