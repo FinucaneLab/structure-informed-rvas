@@ -100,11 +100,15 @@ def _load_gene_map(reference_dir):
     path = os.path.join(reference_dir, 'protein_sequence_guide.tsv')
     try:
         df = pd.read_csv(path, sep='\t')
-        # First row wins: 67 accessions carry several gene names, and plain zip() would
-        # keep the last, disagreeing with pymol_code._load_gene_name and scattering one
-        # protein's artefacts across two filename stems.
-        df = df.drop_duplicates(subset='uniprot_id', keep='first')
-        return dict(zip(df['uniprot_id'], df['gene_name']))
+        # Every name, slash-joined, exactly as empirical_fdr.compute_fdr builds the
+        # gene_name column of the results table. 67 accessions carry several (HBA1/HBA2,
+        # the histone clusters); taking just one here disagreed with the components file,
+        # which carries the table's name, so --components and --fdr-file wrote one
+        # protein's PSEs and TSVs under two different stems.
+        return (df[['uniprot_id', 'gene_name']].dropna().drop_duplicates()
+                  .groupby('uniprot_id')['gene_name']
+                  .apply(lambda names: '/'.join(sorted(names)))
+                  .to_dict())
     except Exception:
         return {}
 

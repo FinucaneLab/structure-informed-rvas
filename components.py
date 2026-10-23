@@ -226,8 +226,10 @@ def component_table(
             'n_centers': len(idx),
             'lead_aa_pos': int(lead),
             'lead_p': float(lead_row[p_col]),
-            'lead_fdr': float(lead_row[fdr_col]),
-            'lead_fwer': float(lead_row[fwer_col]),
+            # Canonical columns, so these are never mislabelled when the criterion or
+            # the gene gate happens to be the other correction.
+            'lead_fdr': float(lead_row[fdr_name]),
+            'lead_fwer': float(lead_row[fwer_name]),
             'best_gate': best_gate,
             'best_crit': best_crit,
             # Both canonical columns, always. --conditional-criterion fwer makes the

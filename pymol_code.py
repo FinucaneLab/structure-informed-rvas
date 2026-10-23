@@ -18,9 +18,10 @@ def _load_gene_name(uniprot_id, reference_directory):
         df = pd.read_csv(path, sep='\t')
         match = df[df['uniprot_id'] == uniprot_id]
         if not match.empty:
-            # First row wins, matching _load_gene_map in visualize_and_interpret, so
-            # the two resolvers cannot disagree for a duplicated accession.
-            return match.iloc[0]['gene_name']
+            # Every name, slash-joined, matching _load_gene_map in
+            # visualize_and_interpret and the gene_name column compute_fdr writes, so
+            # no two of the three can disagree for a duplicated accession.
+            return '/'.join(sorted(match['gene_name'].dropna().unique()))
     except Exception:
         pass
     return uniprot_id  # fall back to UniProt ID if not found

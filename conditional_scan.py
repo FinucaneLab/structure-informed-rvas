@@ -294,7 +294,11 @@ def conditional_scan(
     def _components(results, genes, round_idx):
         return components_for_genes(
             results, genes, reference_dir, pae_cutoff, read_mut,
-            p_col, crit_col, gate_col, radius_cols, cutoff, mutation_rate_mode,
+            # fwer_name, not gate_col: with --conditional-gene-criterion fdr the gate
+            # IS the FDR column, and passing it here wrote an FDR value into a column
+            # called lead_fwer. The gate goes in as gate_col, which is what best_gate
+            # and the ranking use.
+            p_col, crit_col, fwer_name, radius_cols, cutoff, mutation_rate_mode,
             round_idx=round_idx, default_radius=default_radius,
             gate_col=gate_col, fdr_name=fdr_name, fwer_name=fwer_name,
         )
@@ -306,12 +310,12 @@ def conditional_scan(
     logger.info(f'Round 0: {len(gated)} genes pass the gene gate '
                 f'({gate_col} < {gate_cutoff})')
     comps = _components(df_results, gated, 0)
-    component_tables.append(comps)
 
     # radius_cols[0] is the column this mode's results carry the chosen radius in
     # ('radius', or 'radius_binomial' under the mutation-rate null). Recording it under
     # that name is what lets `run_all --fdr-file <stem>.conditional.tsv` rebuild each
     # neighborhood at the radius the scan picked instead of falling back to --radius.
+    accepted = []
     for uid in gated:
         comp = top_component(comps, uid)
         if comp is None:
@@ -326,6 +330,7 @@ def conditional_scan(
             logger.info(f'{uid}: best component is {gate_col} = {float(comp.best_gate):.3g}, '
                         f'above the gene gate ({gate_cutoff}); not reported')
             continue
+        accepted.append(uid)
         rec = {'uniprot_id': uid, 'gene_name': comp.gene_name, 'aa_pos': comp.lead_aa_pos,
                'round': 0, 'conditioned_on': '', 'n_conditioned_residues': 0,
                'component_id': comp.component_id, 'n_centers': comp.n_centers,
@@ -343,7 +348,16 @@ def conditional_scan(
                p_col: comp.lead_p}
         accepted_rows.append(rec)
 
-    hits = comps[comps.uniprot_id.isin(gated)] if len(comps) else comps
+    # `accepted`, not `gated`: a gene whose component the guard above rejected has no
+    # round-0 signal, so masking that component and re-scanning it would pay for a round
+    # whose hits would be written as "further independent" signals for a gene that never
+    # had a first one. Rounds >= 1 have always filtered to `kept` this way; round 0 did
+    # not, which left the guard stopping the report but not the masking it names.
+    if len(comps):
+        component_tables.append(comps[comps.uniprot_id.isin(accepted)])
+    else:
+        component_tables.append(comps)
+    hits = comps[comps.uniprot_id.isin(accepted)] if len(comps) else comps
     active = sorted(set(hits['uniprot_id'])) if len(hits) else []
 
     # ---------------- rounds 1..max_rounds ----------------

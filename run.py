@@ -471,8 +471,10 @@ def build_parser():
         left. Comma-separated list of positions, or a single position, in --uniprot-id,
         which must name exactly one protein. Masking zeroes the residues in place -- and
         under a mutation-rate null it zeroes their mutational opportunity too, so the
-        null does not keep expecting variants where they were just removed. Use
-        --conditional to have the positions chosen and iterated automatically.
+        null does not keep expecting variants where they were just removed. With
+        --test-method cmh the variants are dropped instead, which comes to the same
+        thing there because the CMH test has no opportunity term. Use --conditional to
+        have the positions chosen and iterated automatically.
         '''
     )
     parser.add_argument(
@@ -1032,7 +1034,7 @@ def main(argv=None):
             args.ignore_ac,
             args.fdr_file,
             args.pval_file,
-            args.remove_nbhd,
+            remove_nbhd_conditioning(args),
             args.stratum_col,
             args.cmh_screen_threshold,
             args.seed,

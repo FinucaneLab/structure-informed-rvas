@@ -631,6 +631,224 @@ def test_empty_rate_file_explains_itself():
         sys.argv = sys_argv
 
 
+# ---------------------------------------------------------------------------
+def _drive_conditional(best_gates, gate_cutoff=0.05, max_rounds=1):
+    """
+    Run conditional_scan for real over a synthetic two-gene result table, with the
+    scan and the component builder stubbed.
+
+    `best_gates` maps uniprot_id -> the component's best_gate. Returns
+    (genes re-scanned in round 1, the conditional rows written, the components table).
+    """
+    import conditional_scan as cs
+
+    tmp = tempfile.mkdtemp()
+    genes = sorted(best_gates)
+    df_results = pd.DataFrame({
+        'uniprot_id': genes, 'gene_name': genes, 'aa_pos': [10] * len(genes),
+        'p_value': [1e-8] * len(genes), 'fdr': [0.001] * len(genes),
+        'fwer': [0.001] * len(genes), 'radius': [10.0] * len(genes),
+    })
+    comps = pd.DataFrame([
+        {'uniprot_id': g, 'gene_name': g, 'component_id': 1, 'round': 0,
+         'n_centers': 1, 'lead_aa_pos': 10, 'lead_p': 1e-8, 'lead_fdr': 0.001,
+         'lead_fwer': best_gates[g], 'best_gate': best_gates[g],
+         'best_crit': best_gates[g], 'best_fdr': 0.001, 'best_fwer': best_gates[g],
+         'radius': 10.0, 'n_residues': 3, 'n_case_alleles': 4,
+         'residues_pymol': '9-11', 'centers_pymol': '10',
+         'centers_detail': '10:10', 'seq_span_aa': 3,
+         'n_case_residues': 1, 'case_pymol': '10', 'case_detail': '10:4',
+         'n_control_residues': 0, 'n_control_alleles': 0, 'control_pymol': ''}
+        for g in genes])
+
+    rescanned = []
+
+    def fake_scan(*args, **kwargs):
+        # Round 0 passes uniprot_id_list=None; later rounds pass the active set.
+        if kwargs.get('uniprot_id_list') is not None:
+            rescanned.append(sorted(kwargs['uniprot_id_list']))
+        fdr_name = args[11]
+        df_results.to_csv(os.path.join(tmp, fdr_name), sep='\t', index=False)
+        open(os.path.join(tmp, args[12]), 'a').close()   # the pval file must exist
+
+    originals = (cs.scan_test, cs.components_for_genes, cs.compute_fdr)
+    cs.scan_test = fake_scan
+    cs.components_for_genes = lambda *a, **k: comps.assign(round=k.get('round_idx', 0))
+    cs.compute_fdr = lambda *a, **k: df_results
+    try:
+        cs.conditional_scan(
+            df_rvas=pd.DataFrame({'uniprot_id': genes, 'aa_pos': [10] * len(genes),
+                                  'ac_case': [4] * len(genes),
+                                  'ac_control': [4] * len(genes)}),
+            reference_dir=tmp, radius=10.0, pae_cutoff=25.0, results_dir=tmp,
+            n_sims=10, fdr_cutoff=0.05, df_filter=None, fdr_file='r.fdr.tsv',
+            pval_file='r.pvals.h5', seed=1, mutation_rate_mode=False,
+            ignore_ac=False, criterion='fdr', cutoff=0.05,
+            gene_criterion='fwer', gene_cutoff=gate_cutoff,
+            max_rounds=max_rounds, min_retained=0.5, include_depletion=False,
+            min_alleles=5, min_denovo=5, mu_kwargs={},
+        )
+    finally:
+        cs.scan_test, cs.components_for_genes, cs.compute_fdr = originals
+
+    stem = 'r.fdr'
+    rows = pd.read_csv(os.path.join(tmp, f'{stem}.conditional.tsv'), sep='\t')
+    comp_rows = pd.read_csv(os.path.join(tmp, f'{stem}.components.tsv'), sep='\t')
+    return rescanned, rows, comp_rows
+
+
+def test_rejected_gene_is_not_masked_or_rescanned():
+    """
+    The round-0 guard must stop the masking it names, not just the report. Rounds >= 1
+    filter the carried-forward set to the genes they accepted; round 0 did not.
+    """
+    print('\n16. A gene the gate guard rejects is dropped entirely')
+
+    # ACCEPT clears the gate; REJECT's component does not.
+    rescanned, rows, comp_rows = _drive_conditional({'ACCEPT': 0.001, 'REJECT': 0.30})
+
+    check('only the accepted gene is reported in round 0',
+          sorted(rows[rows['round'] == 0].uniprot_id) == ['ACCEPT'],
+          f"got {sorted(rows[rows['round'] == 0].uniprot_id)}")
+    check('the rejected gene is not carried into round 1',
+          rescanned and 'REJECT' not in rescanned[0],
+          f'round 1 re-scanned {rescanned[0] if rescanned else None}')
+    check('the accepted gene is carried into round 1',
+          rescanned and rescanned[0] == ['ACCEPT'])
+    check('the rejected gene gets no components row either',
+          'REJECT' not in set(comp_rows.uniprot_id),
+          f'components.tsv holds {sorted(set(comp_rows.uniprot_id))}')
+    check('the rejected gene appears nowhere in the conditional table',
+          'REJECT' not in set(rows.uniprot_id))
+
+
+# ---------------------------------------------------------------------------
+def test_lead_columns_are_never_mislabelled():
+    """
+    lead_fdr and lead_fwer must hold the correction they are named for, whichever
+    column happens to be the criterion or the gene gate.
+    """
+    print('\n17. lead_fdr / lead_fwer hold what they say')
+
+    # Gene criterion fdr: the gate is the FDR column. lead_fwer must still be FWER.
+    row = _two_centre_component(
+        pd.DataFrame({'aa_pos': [2, 4], 'p_binomial': [1e-9, 1e-5],
+                      'fdr_max': [0.30, 0.004], 'fwer_max': [0.40, 0.010]}),
+        fdr_col='fdr_max', fwer_col='fdr_max',
+        gate_col='fdr_max', fdr_name='fdr_max', fwer_name='fwer_max').iloc[0]
+    check('lead_fwer is a FWER value, not the gate column',
+          row.lead_fwer == 0.40, f'got {row.lead_fwer} (fdr_max at the lead is 0.30)')
+    check('lead_fdr is an FDR value', row.lead_fdr == 0.30)
+    check('best_gate still follows the gene criterion', row.best_gate == 0.004)
+
+    # And conditional_scan must pass the canonical FWER name, not the gate.
+    import inspect
+    import conditional_scan
+    helper = inspect.getsource(conditional_scan.conditional_scan)
+    check('the component builder is given the canonical FWER column',
+          'p_col, crit_col, fwer_name, radius_cols' in helper)
+
+
+# ---------------------------------------------------------------------------
+def test_cmh_remove_nbhd_is_per_protein():
+    """
+    --remove-nbhd names residues in one protein. The CMH backend used to take the raw
+    string and apply it to every protein it scanned.
+    """
+    print('\n18. CMH --remove-nbhd applies to one protein')
+    import scan_test_cmh
+
+    adj = np.zeros((20, 20), dtype=int)
+    adj[9, 8:12] = 1                      # neighborhood of residue 10 is 9..12
+    df = pd.DataFrame({'uniprot_id': ['P1'] * 3, 'aa_pos': [9, 10, 15],
+                       'ac_case': [1, 1, 1], 'ac_control': [1, 1, 1]})
+
+    out = scan_test_cmh._remove_neighborhood(df, adj, [(10, 10.0)], 'P1')
+    check('the named centre removes its neighborhood',
+          sorted(out.aa_pos) == [15], f'kept {sorted(out.aa_pos)}')
+    check('a centre outside the structure is rejected',
+          _raises(scan_test_cmh._remove_neighborhood, df, adj, [(99, 10.0)], 'P1'))
+
+    # Drive the real scan loop over two proteins with only one named, and record the
+    # frame each one was scanned with. This is where the bug lived: the loop applied
+    # the raw --remove-nbhd string to every protein it touched.
+    tmp = tempfile.mkdtemp()
+    df_rvas = pd.DataFrame({
+        'uniprot_id': ['P1'] * 3 + ['P2'] * 3,
+        'aa_pos': [9, 10, 15] * 2,
+        'ac_case': [3] * 6, 'ac_control': [3] * 6, 'stratum': ['s'] * 6,
+    })
+    seen = {}
+    originals = {n: getattr(scan_test_cmh, n) for n in
+                 ('get_adjacency_matrix', 'compute_all_cmh_pvals', 'write_cmh_pvals')}
+    scan_test_cmh.get_adjacency_matrix = lambda *a, **k: adj
+    scan_test_cmh.compute_all_cmh_pvals = (
+        lambda **k: (seen.__setitem__(k['uniprot_id'], sorted(k['df'].aa_pos)),
+                     (pd.DataFrame({'p_value': [0.5]}), None))[1])
+    scan_test_cmh.write_cmh_pvals = lambda *a, **k: None
+    try:
+        scan_test_cmh.scan_test_cmh(
+            df_rvas, tmp, 10.0, 25.0, tmp, 10, True, False, 0.05, None, False,
+            'f.tsv', 'p.h5', {'P1': [(10, 10.0)]}, 'stratum', min_alleles=1)
+    finally:
+        for name, fn in originals.items():
+            setattr(scan_test_cmh, name, fn)
+
+    check('both proteins were scanned', sorted(seen) == ['P1', 'P2'], f'saw {sorted(seen)}')
+    check('the named protein loses its neighborhood',
+          seen.get('P1') == [15], f"P1 scanned with {seen.get('P1')}")
+    check('every other protein is untouched',
+          seen.get('P2') == [9, 10, 15], f"P2 scanned with {seen.get('P2')}")
+
+    # run.py must hand the backend the per-protein dict, not the raw flag.
+    import inspect
+    import run
+    main_src = inspect.getsource(run.main)
+    cmh_call = main_src[main_src.index('scan_test_cmh('):]
+    check('run.py gives the CMH backend the conditioning dict',
+          'remove_nbhd_conditioning(args)' in cmh_call[:cmh_call.index(')\n')],
+          'it used to pass args.remove_nbhd')
+
+
+def _raises(fn, *args):
+    try:
+        fn(*args)
+        return False
+    except ValueError:
+        return True
+
+
+# ---------------------------------------------------------------------------
+def test_gene_name_matches_the_results_table():
+    """
+    Three places name a protein: the results table, _load_gene_map and
+    _load_gene_name. All three must agree or one run writes two sets of files.
+    """
+    print('\n19. Gene names agree with the results table')
+    import pymol_code
+    from visualize_and_interpret import _load_gene_map
+
+    tmp = tempfile.mkdtemp()
+    guide = pd.DataFrame({'uniprot_id': ['P69905', 'P69905', 'P1'],
+                          'gene_name': ['HBA2', 'HBA1', 'SOLO']})
+    guide.to_csv(os.path.join(tmp, 'protein_sequence_guide.tsv'), sep='\t', index=False)
+
+    # What empirical_fdr.compute_fdr writes into the results table's gene_name column.
+    from_table = (guide[['uniprot_id', 'gene_name']].dropna().drop_duplicates()
+                       .groupby('uniprot_id')['gene_name']
+                       .apply(lambda names: '/'.join(sorted(names))).to_dict())
+
+    by_map = _load_gene_map(tmp)
+    check('_load_gene_map matches the results table',
+          by_map['P69905'] == from_table['P69905'] == 'HBA1/HBA2',
+          f"map={by_map['P69905']} table={from_table['P69905']}")
+    check('_load_gene_name matches too',
+          pymol_code._load_gene_name('P69905', tmp) == from_table['P69905'],
+          f"name={pymol_code._load_gene_name('P69905', tmp)}")
+    check('an accession with one name is unaffected',
+          by_map['P1'] == pymol_code._load_gene_name('P1', tmp) == 'SOLO')
+
+
 if __name__ == '__main__':
     test_component_ranking_follows_the_gene_gate()
     test_component_row_reports_its_own_best()
@@ -647,5 +865,9 @@ if __name__ == '__main__':
     test_allele_guard_excludes_out_of_structure_positions()
     test_documented_conditional_columns_exist()
     test_empty_rate_file_explains_itself()
+    test_rejected_gene_is_not_masked_or_rescanned()
+    test_lead_columns_are_never_mislabelled()
+    test_cmh_remove_nbhd_is_per_protein()
+    test_gene_name_matches_the_results_table()
     print('\n' + ('ALL TESTS PASSED' if not FAILURES else f'FAILURES: {FAILURES}'))
     sys.exit(1 if FAILURES else 0)

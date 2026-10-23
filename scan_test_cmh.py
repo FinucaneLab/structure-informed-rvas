@@ -305,9 +305,24 @@ def _filter_proteins(df_rvas, df_fdr_filter=None, min_alleles=DEFAULT_MIN_ALLELE
     return keep.tolist()
 
 
-def _remove_neighborhood(df, adjacency_matrix, positions, uniprot_id):
+def _remove_neighborhood(df, adjacency_matrix, centers, uniprot_id):
+    """
+    Drop the variants in the neighborhood of each centre.
+
+    `centers` is the [(aa_pos, radius), ...] list for THIS protein, as built by
+    run.remove_nbhd_conditioning. It used to be the raw --remove-nbhd string, applied
+    to every protein the scan touched -- the same bug the standard path fixed by
+    keying conditioning on uniprot_id.
+
+    The radius in each pair is ignored here: the CMH scan takes one numeric
+    --neighborhood-radius (validate_args enforces that), and the adjacency matrix is
+    already built at it. Unlike the standard path this drops the rows rather than
+    masking residues in place; with no mutational opportunity term in the CMH test the
+    two coincide, but it means the positional contract in utils.py does not apply.
+    """
     out = df.copy()
-    for center in map(int, positions.split(",")):
+    for center, _radius in centers:
+        center = int(center)
         if center < 1 or center > adjacency_matrix.shape[0]:
             raise ValueError(
                 f"Neighborhood center {center} is outside {uniprot_id} structure bounds"
@@ -332,7 +347,7 @@ def scan_test_cmh(
     ignore_ac,
     fdr_file,
     pval_file,
-    remove_nbhd,
+    remove_nbhd,          # {uniprot_id: [(aa_pos, radius), ...]} or None
     stratum_col,
     screen_chi2=DEFAULT_SCREEN_CHI2,
     seed=1,
@@ -388,7 +403,8 @@ def scan_test_cmh(
         try:
             df = df_rvas[df_rvas["uniprot_id"] == uniprot_id].copy()
 
-            if remove_nbhd is not None:
+            centers = (remove_nbhd or {}).get(uniprot_id)
+            if centers:
                 adjacency_matrix = get_adjacency_matrix(
                     pdb_file_pos_guide,
                     pdb_dir,
@@ -404,7 +420,7 @@ def scan_test_cmh(
                 df = _remove_neighborhood(
                     df,
                     adjacency_matrix,
-                    remove_nbhd,
+                    centers,
                     uniprot_id,
                 )
 
