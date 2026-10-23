@@ -157,6 +157,14 @@ def remove_nbhd_conditioning(args):
               else args.neighborhood_radius)
     if args.conditional_radius != 'best':
         radius = float(args.conditional_radius)
+        if args.test_method == 'cmh':
+            # scan_test_cmh._remove_neighborhood ignores the per-centre radius and
+            # uses the adjacency matrix, which is built at --neighborhood-radius.
+            logger.warning(
+                f'--test-method cmh removes the --neighborhood-radius '
+                f'({args.neighborhood_radius}) neighborhood; --conditional-radius '
+                f'{radius} is ignored.'
+            )
     elif args.neighborhood_radius in ('multiple-small', 'multiple-big'):
         logger.warning(
             'With a multi-radius scan there is no single neighborhood to remove; '
@@ -557,7 +565,8 @@ def build_parser():
         radius to use: under --neighborhood-radius multiple-small/multiple-big, 'best'
         falls back to 15 with a warning, and you should set this flag explicitly.
         Conditional analysis does not use this: it masks a component's own residue set,
-        recorded in the components file.
+        recorded in the components file. --test-method cmh ignores it too, and removes
+        the --neighborhood-radius neighborhood instead.
         '''
     )
     parser.add_argument(

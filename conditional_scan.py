@@ -297,10 +297,12 @@ def conditional_scan(
 
     # Every later round is corrected against the same set of tests as round 0, so that
     # the rounds are comparable and no position enters or leaves the multiple-testing
-    # burden mid-way. When --df-filter carries an aa_pos column the filter is
-    # position-level, and it has to be carried through verbatim: dropping it would
-    # silently correct later rounds over every residue in the protein instead of the
-    # filtered subset.
+    # burden mid-way -- except for genes that stop being re-scanned, which have to
+    # leave it, since a gene not re-scanned carries stale unconditioned p-values in
+    # the copied file. Those exits are permanent: every later round copies this one.
+    # When --df-filter carries an aa_pos column the filter is position-level, and it
+    # has to be carried through verbatim: dropping it would silently correct later
+    # rounds over every residue in the protein instead of the filtered subset.
     analysis_genes = sorted(df_results['uniprot_id'].unique())
     if df_filter is not None:
         round_filter = df_filter[df_filter['uniprot_id'].isin(analysis_genes)]
@@ -418,6 +420,11 @@ def conditional_scan(
             )
             drop = {u for u, _ in exhausted}
             active = [u for u in active if u not in drop]
+            # Out of `round_filter` as well as `active`: not being re-scanned, these
+            # genes keep the previous round's UNCONDITIONED p-values in the copied
+            # file, and leaving them in the pool is the same corruption of this
+            # round's FDR and FWER that _drop_failed_rescans exists to prevent.
+            round_filter = round_filter[~round_filter['uniprot_id'].isin(drop)]
         if not active:
             logger.info(f'No genes left with testable signal; stopping after round '
                         f'{round_idx - 1}')
@@ -445,11 +452,11 @@ def conditional_scan(
                 seed_salt=round_idx, gene_list=active, **mu_kwargs
             )
             # gene_totals is keyed by the genes actually re-scanned.
-            active, this_round_filter = _drop_failed_rescans(
+            active, round_filter = _drop_failed_rescans(
                 active, set(round_totals or {}), round_filter, round_idx)
             if not active:
                 break
-            df_results = _compute_both_fdrs(results_dir, fdr_cutoff, this_round_filter,
+            df_results = _compute_both_fdrs(results_dir, fdr_cutoff, round_filter,
                                             reference_dir, current_pval_file)
             # Round 0 goes through mutation_rate_scan_test, which merges the per-gene
             # totals on afterwards; calling _compute_both_fdrs directly skips that, so
@@ -465,11 +472,11 @@ def conditional_scan(
                 uniprot_id_list=active, include_depletion=include_depletion,
                 min_alleles=min_alleles,
             )
-            active, this_round_filter = _drop_failed_rescans(
+            active, round_filter = _drop_failed_rescans(
                 active, scanned, round_filter, round_idx)
             if not active:
                 break
-            df_results = compute_fdr(results_dir, fdr_cutoff, this_round_filter,
+            df_results = compute_fdr(results_dir, fdr_cutoff, round_filter,
                                      reference_dir, current_pval_file)
 
         df_results.to_csv(os.path.join(results_dir, round_fdr_file), sep='\t', index=False)

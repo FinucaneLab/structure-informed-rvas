@@ -633,14 +633,20 @@ def test_empty_rate_file_explains_itself():
 
 
 # ---------------------------------------------------------------------------
-def _drive_conditional(best_gates, gate_cutoff=0.05, max_rounds=1, fails_rescan=()):
+def _drive_conditional(best_gates, gate_cutoff=0.05, max_rounds=1, fails_rescan=(),
+                       moving_lead=False, spent=()):
     """
     Run conditional_scan for real over a synthetic two-gene result table, with the
     scan and the component builder stubbed.
 
-    `best_gates` maps uniprot_id -> the component's best_gate. Returns
+    `best_gates` maps uniprot_id -> the component's best_gate. `moving_lead` walks each
+    round's component to fresh residues, so a gene survives the masked-lead guard and
+    the run reaches round 2; `spent` names genes whose remaining allele counts fall
+    below the bar, which the real run reads out of the p-value file. Returns
     (genes re-scanned in round 1, the conditional rows written, the components table).
     """
+    import h5py
+    import utils
     import conditional_scan as cs
 
     tmp = tempfile.mkdtemp()
@@ -672,7 +678,8 @@ def _drive_conditional(best_gates, gate_cutoff=0.05, max_rounds=1, fails_rescan=
             rescanned.append(sorted(asked))
         fdr_name = args[11]
         df_results.to_csv(os.path.join(tmp, fdr_name), sep='\t', index=False)
-        open(os.path.join(tmp, args[12]), 'a').close()   # the pval file must exist
+        # A real (empty) HDF5 file: the exhaustion check opens this one for real.
+        h5py.File(os.path.join(tmp, args[12]), 'a').close()
         # scan_test reports which genes it actually wrote. `fails_rescan` names genes
         # the scan skips -- too few alleles after conditioning, a missing structure --
         # which keep their previous, unconditioned p-values in the copied file.
@@ -680,9 +687,30 @@ def _drive_conditional(best_gates, gate_cutoff=0.05, max_rounds=1, fails_rescan=
             return set(genes)
         return {g for g in asked if g not in fails_rescan}
 
+    def fake_components(*a, **k):
+        r = k.get('round_idx', 0)
+        out = comps.assign(round=r)
+        if moving_lead and r:
+            # A fresh signal each round, 10 residues along from the last.
+            out = out.assign(lead_aa_pos=10 + 10 * r,
+                             residues_pymol=f'{9 + 10 * r}-{11 + 10 * r}')
+        return out
+
+    # The real read_mut opens the current p-value file and reads per-residue counts.
+    # Give the spent genes everything inside the mask round 1 applies (9-11) and the
+    # others everything outside it.
+    def fake_mut(node, uniprot_id, mu_mode=False):
+        pos = 10 if uniprot_id in spent else 50
+        return pd.DataFrame({'aa_pos': [pos], 'ac_case': [10], 'ac_control': [10],
+                             'mu': [1e-6]})
+
     originals = (cs.scan_test, cs.components_for_genes, cs.compute_fdr)
+    utils_originals = (utils.resolve_pval_node, utils.read_original_mutation_data)
     cs.scan_test = fake_scan
-    cs.components_for_genes = lambda *a, **k: comps.assign(round=k.get('round_idx', 0))
+    cs.components_for_genes = fake_components
+    if spent:
+        utils.resolve_pval_node = lambda fid, test: (None, False)
+        utils.read_original_mutation_data = fake_mut
     def fake_fdr(results_dir, fdr_cutoff, df_fdr_filter, *a, **k):
         pools.append(sorted(df_fdr_filter['uniprot_id'].unique()))
         return df_results
@@ -702,6 +730,7 @@ def _drive_conditional(best_gates, gate_cutoff=0.05, max_rounds=1, fails_rescan=
         )
     finally:
         cs.scan_test, cs.components_for_genes, cs.compute_fdr = originals
+        utils.resolve_pval_node, utils.read_original_mutation_data = utils_originals
 
     stem = 'r.fdr'
     rows = pd.read_csv(os.path.join(tmp, f'{stem}.conditional.tsv'), sep='\t')
@@ -1041,6 +1070,89 @@ def test_failed_rescan_leaves_the_round_pool():
           inspect.getsource(scan_test.scan_test).rstrip().endswith('return scanned'))
 
 
+# ---------------------------------------------------------------------------
+def test_genes_that_stop_being_rescanned_stay_out_of_the_pool():
+    """
+    Two ways a gene stops being re-scanned, one pool it must leave -- and stay out of.
+
+    `_drop_failed_rescans` already cut the genes a scan skipped, but only from the
+    round-local copy of the filter, and the exhaustion check ahead of it cut its genes
+    from `active` alone. Both leave unconditioned p-values in the pool every later
+    round copies.
+    """
+    print('\n24. A gene that is not re-scanned leaves the pool for good')
+
+    # Exhausted: SPENT's alleles all sit inside the mask round 1 applies, so the
+    # round-1 check drops it before the re-scan is paid for.
+    rescanned, _rows, _comps, pools = _drive_conditional(
+        {'SPENT': 0.001, 'KEEPS': 0.001}, max_rounds=1, moving_lead=True,
+        spent={'SPENT'})
+    check('an exhausted gene is not re-scanned',
+          rescanned and rescanned[0] == ['KEEPS'],
+          f'round 1 re-scanned {rescanned[0] if rescanned else None}')
+    check('and leaves the pool its round is corrected over',
+          pools and 'SPENT' not in pools[0],
+          f'pool was {pools[0] if pools else None}; SPENT keeps round 0\'s '
+          'unconditioned p-values, which would shift every other gene\'s FDR')
+    check('the gene that was re-scanned stays in the pool',
+          pools and pools[0] == ['KEEPS'])
+
+    # Failed re-scan: the exclusion has to outlive the round that made it, because
+    # round 2 copies round 1's p-value file -- stale values and all.
+    rescanned2, _rows2, _comps2, pools2 = _drive_conditional(
+        {'FAILS': 0.001, 'KEEPS': 0.001}, max_rounds=2, fails_rescan={'FAILS'},
+        moving_lead=True)
+    check('the run reached round 2', len(pools2) == 2, f'{len(pools2)} rounds corrected')
+    check('a failed re-scan leaves the round it failed in',
+          pools2 and 'FAILS' not in pools2[0], f'round 1 pool was {pools2[0]}')
+    check('and is still out in the next round',
+          len(pools2) > 1 and 'FAILS' not in pools2[1],
+          f'round 2 pool was {pools2[1] if len(pools2) > 1 else None}; the exclusion '
+          'used to be thrown away with the round-local filter')
+
+
+# ---------------------------------------------------------------------------
+def test_cmh_warns_that_it_ignores_the_conditional_radius():
+    """
+    --conditional-radius is honoured by the standard path and discarded by the CMH
+    one, which removes the --neighborhood-radius neighborhood. That has to be said.
+    """
+    print('\n25. --test-method cmh says it is ignoring --conditional-radius')
+    import logging
+    import run
+
+    class _Args:
+        remove_nbhd = '10'
+        uniprot_id = 'P1'
+        neighborhood_radius = 15.0
+        conditional_radius = 25.0
+        test_method = 'cmh'
+
+    records = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    run.logger.addHandler(handler)
+    try:
+        cond = run.remove_nbhd_conditioning(_Args())
+        _Args.test_method = 'standard'
+        n_before = len(records)
+        run.remove_nbhd_conditioning(_Args())
+        quiet = len(records) == n_before
+    finally:
+        run.logger.removeHandler(handler)
+
+    warned = [r.getMessage() for r in records if r.levelno >= logging.WARNING]
+    check('cmh warns that --conditional-radius is ignored',
+          any('conditional-radius' in m and 'cmh' in m for m in warned),
+          f'logged {warned}')
+    check('the warning names the radius actually used',
+          any('15' in m for m in warned), f'logged {warned}')
+    check('the standard path is not warned at', quiet,
+          'it honours the flag, so there is nothing to say')
+    check('the conditioning dict is built either way', cond == {'P1': [(10, 25.0)]},
+          f'got {cond}')
+
+
 if __name__ == '__main__':
     test_component_ranking_follows_the_gene_gate()
     test_component_row_reports_its_own_best()
@@ -1065,5 +1177,7 @@ if __name__ == '__main__':
     test_old_results_tables_still_read()
     test_get_nbhd_finds_the_recorded_radius()
     test_failed_rescan_leaves_the_round_pool()
+    test_genes_that_stop_being_rescanned_stay_out_of_the_pool()
+    test_cmh_warns_that_it_ignores_the_conditional_radius()
     print('\n' + ('ALL TESTS PASSED' if not FAILURES else f'FAILURES: {FAILURES}'))
     sys.exit(1 if FAILURES else 0)
