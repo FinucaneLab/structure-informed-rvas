@@ -28,6 +28,21 @@ import numpy as np
 import pandas as pd
 
 
+def discover_chroms(fid):
+    """
+    Chromosomes the file actually has both fields for.
+
+    Guarded as precompute_mu_per_residue.py does: the prefix of every key is not
+    necessarily a chromosome, and spans_for_chrom indexes {chrom}_uniprot_id and
+    {chrom}_pos unconditionally -- so one auxiliary dataset, or a chromosome stored
+    with only some of its fields, would abort the run with a KeyError after the
+    earlier chromosomes had already been processed.
+    """
+    return sorted({k.split('_')[0] for k in fid.keys()
+                   if f'{k.split("_")[0]}_pos' in fid
+                   and f'{k.split("_")[0]}_uniprot_id' in fid})
+
+
 def spans_for_chrom(fid, chrom):
     """Min/max genomic position and variant count per uniprot_id on one chromosome."""
     # Group on the raw bytes and decode only the unique accessions afterwards:
@@ -53,14 +68,7 @@ def main():
     out = args.out or os.path.join(args.reference_dir, 'uniprot_genomic_coords.tsv')
 
     with h5py.File(h5_path, 'r') as fid:
-        # Guard as precompute_mu_per_residue.py does: the prefix of every key is not
-        # necessarily a chromosome, and spans_for_chrom indexes {chrom}_uniprot_id and
-        # {chrom}_pos unconditionally -- so one auxiliary dataset, or a chromosome
-        # stored with only some of its fields, would abort the run with a KeyError
-        # after the earlier chromosomes had already been processed.
-        chroms = sorted({k.split('_')[0] for k in fid.keys()
-                         if f'{k.split("_")[0]}_pos' in fid
-                         and f'{k.split("_")[0]}_uniprot_id' in fid})
+        chroms = discover_chroms(fid)
         parts = []
         for chrom in chroms:
             part = spans_for_chrom(fid, chrom)
