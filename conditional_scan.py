@@ -81,7 +81,10 @@ def _radius_columns(mutation_rate_mode):
     return ('radius_binomial', 'radius_poisson') if mutation_rate_mode else ('radius',)
 
 
-def _carry_gene_totals(df_results, gene_totals):
+TOTAL_COLUMNS = ('n_denovo_gene', 'mu_gene', 'mu_coverage')
+
+
+def _carry_gene_totals(df_results, gene_totals, df_round0):
     """
     Give a later round's table the per-gene columns round 0 has.
 
@@ -90,18 +93,30 @@ def _carry_gene_totals(df_results, gene_totals):
     and so would omit them, leaving the round tables a different shape from round 0 for
     anything reading them side by side.
 
-    `gene_totals` must be THIS round's, as returned by mutation_rate_scan_test: these
-    are not constants of the gene. Conditioning masks residues out of original_case and
-    original_mu, and Test B's binomial null uses the masked n_g and m_g -- so carrying
-    round 0's values forward would print a 40-de-novo gene total beside p-values
-    computed against the 10 that survived the mask.
+    Two sources, because neither alone covers the table. `gene_totals` is THIS round's,
+    as returned by mutation_rate_scan_test, and is the only correct source for a gene
+    that was re-scanned: conditioning masks residues out of original_case and
+    original_mu, and Test B's binomial null uses the masked n_g and m_g, so round 0's
+    values would print a 40-de-novo total beside p-values computed against the 10 that
+    survived. But a round re-scans only `active`, so gene_totals covers just those;
+    every other gene in the table was never masked, which makes round 0's values exactly
+    right for it. Taking only one source leaves the other half of the table wrong or
+    NaN.
     """
-    if not gene_totals:
+    frames = []
+    if gene_totals:
+        frames.append(pd.DataFrame(
+            [(uid, n_g, m_g, cov) for uid, (n_g, m_g, cov) in gene_totals.items()],
+            columns=['uniprot_id'] + list(TOTAL_COLUMNS),
+        ))
+    have = set(frames[0].uniprot_id) if frames else set()
+    if df_round0 is not None and all(c in df_round0.columns for c in TOTAL_COLUMNS):
+        carried = df_round0[['uniprot_id'] + list(TOTAL_COLUMNS)].drop_duplicates(
+            subset='uniprot_id')
+        frames.append(carried[~carried.uniprot_id.isin(have)])
+    if not frames:
         return df_results
-    df_totals = pd.DataFrame(
-        [(uid, n_g, m_g, cov) for uid, (n_g, m_g, cov) in gene_totals.items()],
-        columns=['uniprot_id', 'n_denovo_gene', 'mu_gene', 'mu_coverage'],
-    )
+    df_totals = pd.concat(frames, ignore_index=True)
     keep = [c for c in df_totals.columns
             if c == 'uniprot_id' or c not in df_results.columns]
     if keep == ['uniprot_id']:
@@ -240,6 +255,7 @@ def conditional_scan(
         )
 
     df_results = pd.read_csv(os.path.join(results_dir, fdr_file), sep='\t')
+    round0_results = df_results
     if crit_col not in df_results.columns:
         raise ValueError(
             f'{fdr_file} has no column {crit_col}; --conditional-criterion '
@@ -299,7 +315,16 @@ def conditional_scan(
                'component_id': comp.component_id, 'n_centers': comp.n_centers,
                'n_residues': comp.n_residues, 'n_case_alleles': comp.n_case_alleles,
                radius_cols[0]: float(comp.radius),
-               crit_col: comp.lead_fdr, gate_col: comp.lead_fwer, p_col: comp.lead_p}
+               # The component's own best values, not the lead's. The component was
+               # SELECTED on best_gate, and under the mutation-rate null the gate and
+               # criterion columns are maxima over both tests and so are not monotone in
+               # the p_binomial that picks the lead -- so a component can clear the gate
+               # through one member while its lead sits above the cutoff. Writing the
+               # lead's value made `run_all --fdr-file <stem>.conditional.tsv
+               # --all-signals` filter out a signal this analysis accepted and masked.
+               # p_col already carries the component minimum, since lead_p is the min.
+               crit_col: float(comp.best_crit), gate_col: float(comp.best_gate),
+               p_col: comp.lead_p}
         accepted_rows.append(rec)
 
     hits = comps[comps.uniprot_id.isin(gated)] if len(comps) else comps
@@ -373,7 +398,7 @@ def conditional_scan(
             # totals on afterwards; calling _compute_both_fdrs directly skips that, so
             # the round tables would be ragged against round 0. These are this round's
             # own totals, computed from the conditioned arrays.
-            df_results = _carry_gene_totals(df_results, round_totals)
+            df_results = _carry_gene_totals(df_results, round_totals, round0_results)
         else:
             scan_test(
                 df_rvas, reference_dir, radius, pae_cutoff, results_dir, n_sims,
@@ -420,7 +445,7 @@ def conditional_scan(
                    'n_residues': comp.n_residues, 'n_case_alleles': comp.n_case_alleles,
                    'n_residues_overlapping_mask': overlap,
                    radius_cols[0]: float(comp.radius),
-                   crit_col: comp.lead_fdr, gate_col: comp.lead_fwer,
+                   crit_col: float(comp.best_crit), gate_col: float(comp.best_gate),
                    p_col: comp.lead_p}
             accepted_rows.append(rec)
             rows_this_round.append(rec)

@@ -43,11 +43,18 @@ def load_ref_for_chrom(path, chrom, pos_filter):
     return df
 
 
-# Rate column names, most preferred first. roulette_rate stays ahead of mu_snp because
-# that was the precedence before these were collected into one list, and a file carrying
-# both columns must keep resolving the way it used to -- changing which column such a
-# file is read from would silently change a rate model. No shipped file has both; this
-# is about not moving behaviour that nothing asked to move.
+# Resolved by name, ahead of the pattern fallback. ONLY roulette_rate belongs here:
+# it is the one name whose precedence predates this list, and a file carrying it
+# alongside another rate column must keep resolving the way it used to, because
+# changing which column such a file is read from would silently change a rate model.
+#
+# mu_snp and mu are deliberately NOT here. They match the pattern fallback on their
+# own, so a file carrying just one still resolves; listing them would let a file with
+# two plausible rate columns (say mu and mutation_rate) silently pick one instead of
+# raising, and that file feeds precompute_mu_per_residue.py as well as the scan.
+RATE_COLUMNS_BY_NAME = ('roulette_rate',)
+
+# Named in the error message as the conventional spellings, not resolved by name.
 KNOWN_RATE_COLUMNS = ('roulette_rate', 'mu_snp', 'mu')
 
 
@@ -57,10 +64,15 @@ def identify_rate_column(schema_names, path=''):
 
     Named columns first, then the pattern fallback for custom files: anything
     containing 'rate', a bare 'mu' or 'u', or a 'mu_' prefix -- the last of which is
-    what lets an unlisted mu_<something> column work.
+    what lets an unlisted mu_<something> column work. More than one match is an error
+    rather than a guess: the same file feeds the scan and the per-residue table, so a
+    silent pick could have them disagree about which rate model is in use.
+
+    Logs the column it settled on, which is otherwise unrecoverable from the output.
     """
-    for name in KNOWN_RATE_COLUMNS:
+    for name in RATE_COLUMNS_BY_NAME:
         if name in schema_names:
+            logger.info(f'Using rate column {name} from {path}')
             return name
     candidates = [c for c in schema_names
                   if 'rate' in c.lower() or c.lower() in ('mu', 'u')
@@ -70,6 +82,7 @@ def identify_rate_column(schema_names, path=''):
             f'Could not identify a mutation rate column in {path}. '
             f'Columns present: {list(schema_names)}. Known names: {list(KNOWN_RATE_COLUMNS)}.'
         )
+    logger.info(f'Using rate column {candidates[0]} from {path}')
     return candidates[0]
 
 

@@ -84,8 +84,8 @@ def build_components(centers, adj_by_radius, case_positions):
     mutated = sorted(set().union(*shared)) if any(shared) else []
     if not mutated:
         # No centre contains a case mutation: nothing can share one, so every centre is
-        # its own component. Reachable when a neighborhood is significant through
-        # depletion (--test-direction depletion).
+        # its own component. Reachable from an older two-sided results file, where a
+        # neighborhood could be significant through depletion.
         return np.arange(k), nbhd, shared
     index = {p: j for j, p in enumerate(mutated)}
     B = np.zeros((k, len(mutated)), dtype=bool)
@@ -201,6 +201,7 @@ def component_table(
         # member's, and ordering components by it would mask the wrong component and let
         # the one that actually cleared the gene gate resurface next round.
         best_gate = float(min(by_pos.loc[p, fwer_col] for p in member_centers))
+        best_crit = float(min(by_pos.loc[p, fdr_col] for p in member_centers))
 
         rec = {
             'uniprot_id': uniprot_id,
@@ -213,6 +214,7 @@ def component_table(
             'lead_fdr': float(lead_row[fdr_col]),
             'lead_fwer': float(lead_row[fwer_col]),
             'best_gate': best_gate,
+            'best_crit': best_crit,
             'radius': float(dict(centers)[lead]),
             'n_residues': len(residues),
             'seq_span_aa': _seq_span(centers, labels, comp),
