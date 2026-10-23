@@ -430,6 +430,25 @@ def test_one_gene_name_per_protein():
     check('without one it still falls back to the guide',
           fell_back and set(fell_back) == {'WRONG'}, f'got {fell_back}')
 
+    # A guide row with no usable name. The two resolvers used to disagree here --
+    # '/'.join([]) returned '' from one, which _safe turns into 'unnamed', while the
+    # other dropped the accession and fell back to it -- so `visualize` and a later
+    # `run_all` stemmed the same protein's PSEs differently and stopped sharing the
+    # grey chain _gray_pse_path points at.
+    for blank in (np.nan, '', '  '):
+        pd.DataFrame({'uniprot_id': ['P12345'], 'gene_name': [blank]}).to_csv(
+            os.path.join(tmp, 'protein_sequence_guide.tsv'), sep='\t', index=False)
+        by_map = _load_gene_map(tmp).get('P12345', 'P12345')
+        by_name = pymol_code._load_gene_name('P12345', tmp)
+        check(f'a {"missing" if blank is np.nan else "blank"} name falls back to the '
+              'accession in both resolvers',
+              by_map == by_name == 'P12345', f'map={by_map!r} name={by_name!r}')
+        check('so both stem the PSE the same way',
+              pymol_code._pse_base('AF-P12345.pdb', by_name, 'P12345')
+              == pymol_code._pse_base('AF-P12345.pdb', by_map, 'P12345')
+              == 'P12345_P12345',
+              f'got {pymol_code._pse_base("AF-P12345.pdb", by_name, "P12345")}')
+
 
 # ---------------------------------------------------------------------------
 def test_chromosome_discovery_skips_other_keys():

@@ -17,11 +17,18 @@ def _load_gene_name(uniprot_id, reference_directory):
     try:
         df = pd.read_csv(path, sep='\t')
         match = df[df['uniprot_id'] == uniprot_id]
+        # Every name, slash-joined, matching _load_gene_map in visualize_and_interpret
+        # and the gene_name column compute_fdr writes, so no two of the three can
+        # disagree for a duplicated accession. A row whose names are all blank joins to
+        # '', which has to fall through to the accession rather than be returned: _safe
+        # turns it into 'unnamed', and _load_gene_map drops the row entirely, so the
+        # two subcommands would stem the same protein's PSEs differently and stop
+        # sharing its grey chain.
         if not match.empty:
-            # Every name, slash-joined, matching _load_gene_map in
-            # visualize_and_interpret and the gene_name column compute_fdr writes, so
-            # no two of the three can disagree for a duplicated accession.
-            return '/'.join(sorted(match['gene_name'].dropna().unique()))
+            name = '/'.join(sorted(n for n in match['gene_name'].dropna().unique()
+                                   if str(n).strip()))
+            if name:
+                return name
     except Exception:
         pass
     return uniprot_id  # fall back to UniProt ID if not found

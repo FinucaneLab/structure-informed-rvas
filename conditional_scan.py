@@ -490,7 +490,6 @@ def conditional_scan(
         # file, which would re-report the component we just masked. Catch that rather
         # than letting it look like a second independent signal.
         kept = []
-        rows_this_round = []
         for uid in gated:
             comp = top_component(comps, uid)
             if comp is None:
@@ -521,7 +520,6 @@ def conditional_scan(
                    FDR_COLUMN: float(comp.best_fdr), FWER_COLUMN: float(comp.best_fwer),
                    p_col: comp.lead_p}
             accepted_rows.append(rec)
-            rows_this_round.append(rec)
             kept.append(uid)
 
         if len(comps):

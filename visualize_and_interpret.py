@@ -104,8 +104,14 @@ def _load_gene_map(reference_dir):
         # the histone clusters); taking just one here disagreed with the components file,
         # which carries the table's name, so --components and --fdr-file wrote one
         # protein's PSEs and TSVs under two different stems.
-        return (df[['uniprot_id', 'gene_name']].dropna().drop_duplicates()
-                  .groupby('uniprot_id')['gene_name']
+        # Blank names are dropped along with the NaNs, so an accession with no usable
+        # name is ABSENT from the map and every `.get(uid, uid)` below falls back to
+        # the accession -- which is what _load_gene_name does for the same row. Letting
+        # '' through instead stemmed those PSEs `unnamed_P12345` here and
+        # `P12345_P12345` there, so the two subcommands stopped sharing a grey chain.
+        named = df[['uniprot_id', 'gene_name']].dropna().drop_duplicates()
+        named = named[named['gene_name'].astype(str).str.strip() != '']
+        return (named.groupby('uniprot_id')['gene_name']
                   .apply(lambda names: '/'.join(sorted(names)))
                   .to_dict())
     except Exception:
@@ -995,10 +1001,12 @@ def main():
     p_analyze.add_argument('--reference-dir', required=True,
                            help='Reference directory')
     p_analyze.add_argument('--significance-column', default=None,
-                           help='Column to use for significance cutoff. Default depends '
-                                'on the file: "fdr" in both, or a per-test column such '
-                                'for mutation-rate results (a neighborhood passes only '
-                                'if it passes both tests)')
+                           help='Column to use for significance cutoff. Defaults to '
+                                '"fdr" for either null; under the mutation-rate null '
+                                'that column is the max over both tests, so a '
+                                'neighborhood passes only if it passes both. Pass '
+                                '"fdr_binomial" to filter on Test B alone, or "fwer" '
+                                'for the family-wise column')
     p_analyze.add_argument('--all-signals', action='store_true', default=False,
                            help='Process every significant row rather than only the best '
                                 'neighborhood per protein. Use with the .conditional.tsv '
