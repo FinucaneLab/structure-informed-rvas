@@ -505,10 +505,12 @@ Each test is corrected separately by the usual empirical FDR/FWER machinery, and
 neighborhood passes when it passes both, which is what the reported `fdr` holds:
 `fdr = max(fdr_poisson, fdr_binomial)`, likewise `fwer`. Those are the same column
 names the case/control scan writes, so nothing downstream has to know which null
-produced a table; the per-test `fdr_poisson` / `fdr_binomial` stay alongside. On simulated data each test rejects at 4% under the true null,
-Test B inflates to 17% under regional constraint while Test A stays at 4%, Test A
-inflates to 80% under uniform gene-level enrichment while Test B stays at 4%, and
-requiring both still recovers an injected cluster with at least 98% power.
+produced a table; the per-test `fdr_poisson` / `fdr_binomial` stay alongside.
+
+On simulated data each test rejects at 4% under the true null, Test B inflates to 17%
+under regional constraint while Test A stays at 4%, Test A inflates to 80% under
+uniform gene-level enrichment while Test B stays at 4%, and requiring both still
+recovers an injected cluster with at least 98% power.
 
 ### Setting up the rate reference
 

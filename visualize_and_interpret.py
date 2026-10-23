@@ -21,17 +21,16 @@ import csv
 import os
 import re
 import sys
-import numpy as np
 import pandas as pd
 from collections import defaultdict
 
 from uniprot_annotation import (aggregate_annotations_across_family,
                                 generate_simple_feature_table, resolve_family_members)
-# Re-exported rather than redefined: this module used to carry its own copies, and the
-# positions_to_pymol_notation one lacked the None guard and the int() coercion, so it
-# raised on a Series or ndarray and emitted "1.0-2.0" for float input. Tests import
-# both names from here, which is why they stay in this namespace.
-from utils import parse_pymol_positions, positions_to_pymol_notation
+# This module used to carry its own copy of parse_pymol_positions, alongside one of
+# positions_to_pymol_notation that lacked the None guard and the int() coercion and so
+# raised on a Series or ndarray. Both now come from utils, which has the one
+# implementation.
+from utils import parse_pymol_positions
 
 
 # ---------------------------------------------------------------------------

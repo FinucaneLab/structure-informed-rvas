@@ -1098,18 +1098,20 @@ def main(argv=None):
         if not (args.uniprot_id and args.reference_dir and args.aa_pos):
             raise ValueError("For neighborhood residue lists, you must provide --uniprot_id, --reference_dir and --aa_pos")
         if args.neighborhood_radius in ('multiple-small', 'multiple-big'):
-            # Look up the per-position best radius recorded in the FDR file
+            # Look up the per-position best radius recorded in the FDR file. All
+            # three names, because which one holds it depends on the null: a
+            # case/control run writes `radius`, a mutation-rate run writes one per
+            # test. Checking only `radius` silently fell back to 15 for every
+            # mutation-rate table, which is the opposite of what this branch is for.
+            from utils import best_radius_for_hit
             fdr_path = os.path.join(args.results_dir, args.fdr_file)
-            nbhd_radius = 15.0  # fallback
+            nbhd_radius = 15.0  # fallback when the file or the row is missing
             if os.path.exists(fdr_path):
-                df_fdr_lookup = pd.read_csv(fdr_path, sep='\t')
-                if 'radius' in df_fdr_lookup.columns:
-                    row_match = df_fdr_lookup[
-                        (df_fdr_lookup['uniprot_id'] == args.uniprot_id) &
-                        (df_fdr_lookup['aa_pos'] == args.aa_pos)
-                    ]
-                    if len(row_match) > 0 and not pd.isna(row_match.iloc[0]['radius']):
-                        nbhd_radius = float(row_match.iloc[0]['radius'])
+                nbhd_radius = best_radius_for_hit(
+                    pd.read_csv(fdr_path, sep='\t'), args.uniprot_id, args.aa_pos,
+                    default=nbhd_radius,
+                    radius_cols=('radius', 'radius_binomial', 'radius_poisson'),
+                )
         else:
             nbhd_radius = args.neighborhood_radius
         nbhd, cases, cntrls = get_nbhd_info(df_rvas, args.uniprot_id, args.aa_pos, args.reference_dir, nbhd_radius, args.pae_cutoff)

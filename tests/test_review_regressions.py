@@ -395,7 +395,6 @@ def test_annotation_caches_do_their_job():
 def test_one_gene_name_per_protein():
     """The resolvers must agree, or one protein's artefacts land under two stems."""
     print('\n9. Gene-name resolution')
-    import inspect
     import pymol_code
     from visualize_and_interpret import _load_gene_map
 
@@ -919,6 +918,40 @@ def test_old_results_tables_still_read():
           normalize_result_columns(current).equals(current))
 
 
+# ---------------------------------------------------------------------------
+def test_get_nbhd_finds_the_recorded_radius():
+    """
+    --get-nbhd under a multi-radius scan looks the chosen radius up in the results
+    file. A mutation-rate table records it per test, so checking only `radius` found
+    nothing and silently fell back to 15 -- the opposite of what the branch is for.
+    """
+    print('\n22. --get-nbhd reads the radius the scan chose')
+    from utils import best_radius_for_hit
+
+    cols = ('radius', 'radius_binomial', 'radius_poisson')
+    std = pd.DataFrame({'uniprot_id': ['P1'], 'aa_pos': [42], 'radius': [8.0]})
+    mu = pd.DataFrame({'uniprot_id': ['P1'], 'aa_pos': [42],
+                       'radius_binomial': [12.0], 'radius_poisson': [20.0]})
+
+    check('a case/control table yields its radius',
+          best_radius_for_hit(std, 'P1', 42, default=15.0, radius_cols=cols) == 8.0)
+    check('a mutation-rate table yields the Test B radius',
+          best_radius_for_hit(mu, 'P1', 42, default=15.0, radius_cols=cols) == 12.0,
+          'checking only `radius` fell back to 15.0 here')
+    check('an absent position still falls back',
+          best_radius_for_hit(mu, 'P1', 99, default=15.0, radius_cols=cols) == 15.0)
+
+    # run.py must use the lookup rather than a single hardcoded column.
+    import inspect
+    import run
+    src_main = inspect.getsource(run.main)
+    branch = src_main[src_main.index('elif args.get_nbhd:'):]
+    branch = branch[:branch.index('did_nothing = False')]
+    check('--get-nbhd uses best_radius_for_hit', 'best_radius_for_hit' in branch)
+    check('--get-nbhd does not test for a single radius column',
+          "'radius' in df_fdr_lookup.columns" not in branch)
+
+
 if __name__ == '__main__':
     test_component_ranking_follows_the_gene_gate()
     test_component_row_reports_its_own_best()
@@ -941,5 +974,6 @@ if __name__ == '__main__':
     test_gene_name_matches_the_results_table()
     test_mu_fdr_is_the_max_over_both_tests()
     test_old_results_tables_still_read()
+    test_get_nbhd_finds_the_recorded_radius()
     print('\n' + ('ALL TESTS PASSED' if not FAILURES else f'FAILURES: {FAILURES}'))
     sys.exit(1 if FAILURES else 0)

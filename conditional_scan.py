@@ -46,7 +46,6 @@ import os
 import shutil
 from collections import namedtuple
 
-import numpy as np
 import pandas as pd
 
 from logger_config import get_logger
@@ -346,11 +345,9 @@ def conditional_scan(
     # whose hits would be written as "further independent" signals for a gene that never
     # had a first one. Rounds >= 1 have always filtered to `kept` this way; round 0 did
     # not, which left the guard stopping the report but not the masking it names.
-    if len(comps):
-        component_tables.append(comps[comps.uniprot_id.isin(accepted)])
-    else:
-        component_tables.append(comps)
+    # An empty frame has no uniprot_id column to filter on, so it passes through.
     hits = comps[comps.uniprot_id.isin(accepted)] if len(comps) else comps
+    component_tables.append(hits)
     active = sorted(set(hits['uniprot_id'])) if len(hits) else []
 
     # ---------------- rounds 1..max_rounds ----------------

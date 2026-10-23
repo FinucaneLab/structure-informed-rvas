@@ -28,11 +28,10 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import (write_dataset, resolve_pval_node, read_p_values,
-                   read_original_mutation_data)
+                   read_original_mutation_data, positions_to_pymol_notation)
 from visualize_and_interpret import (_nbhd_features_table, _result_columns,
                                      MU_RESULT_COLUMNS, STD_RESULT_COLUMNS,
-                                     normalize_result_columns,
-                                     positions_to_pymol_notation)
+                                     normalize_result_columns)
 from pymol_code import _obs_exp_to_b
 
 FAILURES = []
@@ -269,6 +268,12 @@ def test_result_columns_detection():
 
     check('mutation-rate table detected', _result_columns(df_mu) is MU_RESULT_COLUMNS)
     check('standard table detected', _result_columns(df_std) is STD_RESULT_COLUMNS)
+
+    # A table written before fdr_max/fwer_max were renamed still has to classify.
+    legacy = df_mu.rename(columns={'fdr': 'fdr_max', 'fwer': 'fwer_max'})
+    check('a pre-rename table is detected and normalized',
+          _result_columns(normalize_result_columns(legacy)) is MU_RESULT_COLUMNS
+          and 'fdr' in normalize_result_columns(legacy).columns)
 
     # Every column the schema names must actually exist in the matching table, or
     # cmd_analyze fails at the point of use rather than here.

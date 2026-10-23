@@ -557,7 +557,7 @@ def aggregate_annotations_across_family(query_id, family_members, cache_dir, con
                                      'feature_description', 'alignment_confidence'])
 
     df = pd.DataFrame(all_transferred)
-    print(f"\n=== Transfer Complete ===")
+    print("\n=== Transfer Complete ===")
     print(f"Total annotations transferred: {len(df)}")
     print(f"Unique query positions annotated: {df['query_position'].nunique()}")
     print(f"Mean confidence: {df['alignment_confidence'].mean():.3f}")
