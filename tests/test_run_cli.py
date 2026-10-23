@@ -217,11 +217,55 @@ def test_main_is_callable():
         check('main refuses to do nothing', False, f'{type(e).__name__}: {e}')
 
 
+# ---------------------------------------------------------------------------
+def test_bounds_are_checked_on_the_paths_that_read_them():
+    """
+    A flag has to be validated wherever it is consumed, not wherever it looks at home.
+
+    --remove-nbhd sets args.conditional False and then goes on to use two of the
+    --conditional-* flags. --conditional-radius was moved out of the `if
+    args.conditional:` block for exactly that reason; --conditional-min-retained was
+    left behind, and it is the one that fails silently: it is not rejected downstream,
+    it is obeyed.
+    """
+    print('\n6. Bounds on the flags --remove-nbhd still reads')
+    scan = BASE + ['--run-3dnt', '--pre-mapped-rvas', '/dev/null']
+    removed = scan + ['--uniprot-id', 'P1', '--remove-nbhd', '5']
+
+    check('--remove-nbhd turns conditional analysis off',
+          _args(removed).conditional is False, 'otherwise this test proves nothing')
+
+    for bad in ('5', '-0.5'):
+        ok, msg = _rejects(removed + ['--conditional-min-retained', bad],
+                           'min-retained')
+        check(f'--conditional-min-retained {bad} is refused with --remove-nbhd',
+              ok, msg)
+        ok, msg = _rejects(scan + ['--conditional-min-retained', bad], 'min-retained')
+        check(f'--conditional-min-retained {bad} is refused with --conditional too',
+              ok, msg)
+
+    check('a value in range is still accepted',
+          _args(removed + ['--conditional-min-retained', '0.5']).conditional_min_retained
+          == 0.5)
+    # The sibling that was already moved out, so a future tidy-up cannot put both back.
+    ok, msg = _rejects(removed + ['--conditional-radius', '-1'], 'positive')
+    check('--conditional-radius is still checked here as well', ok, msg)
+
+    # --min-alleles 0 admits a gene with no case alleles, which read_p_values divides by.
+    ok, msg = _rejects(scan + ['--min-alleles', '0'], 'min-alleles')
+    check('--min-alleles 0 is refused', ok, msg)
+    ok, msg = _rejects(scan + ['--min-alleles', '-1'], 'min-alleles')
+    check('--min-alleles -1 is refused', ok, msg)
+    check('--min-alleles 1 is accepted',
+          _args(scan + ['--min-alleles', '1']).min_alleles == 1)
+
+
 if __name__ == '__main__':
     test_flags_present()
     test_cmh_validation()
     test_conditional_defaulting()
     test_gene_filters_inclusive()
     test_main_is_callable()
+    test_bounds_are_checked_on_the_paths_that_read_them()
     print('\n' + ('ALL TESTS PASSED' if not FAILURES else f'FAILURES: {FAILURES}'))
     sys.exit(1 if FAILURES else 0)

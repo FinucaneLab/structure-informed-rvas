@@ -775,13 +775,17 @@ def validate_args(args):
         if not (0 < args.conditional_gene_cutoff < 1):
             raise ValueError(f"--conditional-gene-cutoff must be between 0 and 1, got "
                              f"{args.conditional_gene_cutoff}")
-        if not (0 <= args.conditional_min_retained <= 1):
-            raise ValueError(f"--conditional-min-retained must be between 0 and 1, got "
-                             f"{args.conditional_min_retained}")
 
     # Outside the --conditional block on purpose: --remove-nbhd sets args.conditional
-    # False above and is the only other consumer of --conditional-radius, so validating
-    # it there would leave the flag unchecked on the one path that still reads it.
+    # False above and is the only other consumer of these two, so validating them
+    # there would leave them unchecked on the one path that still reads them.
+    # --conditional-min-retained is the dangerous one: it reaches neutralized_positions
+    # as min_retained either way, and an out-of-range value is not rejected, it is
+    # obeyed -- 5 kills every centre, so every p-value is 1.0 and the results table
+    # comes out empty with no error at all.
+    if not (0 <= args.conditional_min_retained <= 1):
+        raise ValueError(f"--conditional-min-retained must be between 0 and 1, got "
+                         f"{args.conditional_min_retained}")
     if args.conditional_radius != 'best':
         try:
             args.conditional_radius = float(args.conditional_radius)
@@ -790,6 +794,14 @@ def validate_args(args):
                              f"{args.conditional_radius}")
         if args.conditional_radius <= 0:
             raise ValueError("--conditional-radius must be positive")
+
+    # At least 1, not just non-negative: the guard in _process_proteins_batch is
+    # `sum(ac_case) < min_alleles`, so 0 admits a gene with no case alleles at all --
+    # and read_p_values then divides by that count, filling `ratio` with inf and nan
+    # instead of raising. --min-denovo is checked where the mutation-rate block
+    # validates its own flags.
+    if args.min_alleles < 1:
+        raise ValueError(f"--min-alleles must be at least 1, got {args.min_alleles}")
 
     # Fail before map_and_filter_rvas reads and maps the whole input file: these are
     # argument errors, and remove_nbhd_conditioning is not reached until main().

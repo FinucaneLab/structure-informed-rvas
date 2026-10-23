@@ -282,6 +282,14 @@ def _annotate_and_save(uniprot_id, features_path, cache_dir, confidence_threshol
         uniprot_id, family_members, cache_dir, confidence_threshold=0.7
     )
     features_df = generate_simple_feature_table(annotations_df, confidence_threshold)
+    if features_df.empty:
+        # Do not cache, for the same reason get_functional_sites_detailed does not: an
+        # empty table is indistinguishable on disk from a protein that genuinely has no
+        # sites. resolve_family_members swallows a failed family lookup and returns [],
+        # so one 503 here would otherwise write a header-only TSV that every later
+        # run_all loads on the silent cache-hit path, never retrying.
+        print(f"  No features for {uniprot_id}; not cached, so a later run retries")
+        return features_df
     features_df.to_csv(features_path, sep='\t', index=False)
     print(f"  Saved features to {features_path}")
     return features_df

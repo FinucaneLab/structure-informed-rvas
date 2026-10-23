@@ -226,13 +226,19 @@ def transfer_all_annotations(query_seq, target_seq, target_annotations, aligned=
 # UniProt API
 # ---------------------------------------------------------------------------
 
+# Every call to rest.uniprot.org carries this. Without one a hung connection stalls a
+# whole run_all with no output, part-way through a multi-gene loop; with one the call
+# raises and the loop's per-protein handler reports it and moves on.
+REQUEST_TIMEOUT = 10
+
+
 def get_protein_family(uniprot_id):
     """
     Return the raw SIMILARITY comment from UniProt (e.g. "Belongs to the Kv1
     potassium channel family"), or None if the protein has no such comment.
     """
     url = f"https://rest.uniprot.org/uniprotkb/{uniprot_id}.json"
-    response = requests.get(url)
+    response = requests.get(url, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     data = response.json()
     try:
@@ -273,7 +279,7 @@ def search_family_members_with_annotations(family_name, is_superfamily=False):
             'size': 500,
             'format': 'json'
         }
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         protein_list = [p['primaryAccession'] for p in response.json().get('results', [])]
         if protein_list:
@@ -308,7 +314,8 @@ def get_protein_list(uniprot_id):
 
 def get_uniprot_sequence(uniprot_id):
     """Fetch the canonical amino acid sequence for `uniprot_id` from UniProt."""
-    response = requests.get(f"https://rest.uniprot.org/uniprotkb/{uniprot_id}")
+    response = requests.get(f"https://rest.uniprot.org/uniprotkb/{uniprot_id}",
+                            timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     return response.json().get('sequence', {}).get('value', '')
 
@@ -339,7 +346,7 @@ def get_functional_sites_detailed(uniprot_id, cache_dir=None):
 
     try:
         url = f"https://rest.uniprot.org/uniprotkb/{uniprot_id}.json"
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         data = response.json()
         features = data.get('features', [])
@@ -649,7 +656,8 @@ def resolve_family_members(uniprot_id, cache_dir=None,
                 query = f'family:"{family_name} {suffix}" {extra}'.strip()
                 params = {'query': query, 'fields': 'accession', 'size': 500,
                           'format': 'json'}
-                r = requests.get('https://rest.uniprot.org/uniprotkb/search', params=params)
+                r = requests.get('https://rest.uniprot.org/uniprotkb/search',
+                                 params=params, timeout=REQUEST_TIMEOUT)
                 if r.status_code == 200 and r.json().get('results'):
                     members = [x['primaryAccession'] for x in r.json()['results']]
                     break

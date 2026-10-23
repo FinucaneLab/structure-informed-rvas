@@ -1250,6 +1250,77 @@ def test_structures_resolve_by_accession_not_filename_substring():
           and long_dist.shape[0] == utils.structure_length(guide, 'A0A024R161'))
 
 
+# ---------------------------------------------------------------------------
+def test_a_failed_annotation_is_not_cached_forever():
+    """
+    _annotate_and_save returns an existing file verbatim, on a path that prints
+    nothing. So writing an empty table after a failed fetch suppresses that protein's
+    annotations in every later run -- the failure mode the PR fixed one layer down in
+    get_functional_sites_detailed, which this layer reintroduced.
+    """
+    print('\n27. An empty feature table is not cached')
+    import visualize_and_interpret as vi
+
+    tmp = tempfile.mkdtemp()
+    features_path = os.path.join(tmp, 'P1_features.tsv')
+    cache_dir = os.path.join(tmp, 'cache')
+
+    originals = {n: getattr(vi, n) for n in
+                 ('resolve_family_members', 'aggregate_annotations_across_family',
+                  'generate_simple_feature_table')}
+    # A family lookup that failed: resolve_family_members swallows the exception and
+    # returns [], so the pipeline runs to completion and produces nothing.
+    vi.resolve_family_members = lambda *a, **k: []
+    vi.aggregate_annotations_across_family = lambda *a, **k: pd.DataFrame()
+    try:
+        vi.generate_simple_feature_table = lambda *a, **k: pd.DataFrame()
+        empty = vi._annotate_and_save('P1', features_path, cache_dir)
+        check('a failed fetch still returns a frame', empty is not None and empty.empty)
+        check('but writes no file, so the next run retries',
+              not os.path.exists(features_path),
+              'a header-only TSV here is read back as "this protein has no sites"')
+
+        # The retry, now that UniProt is answering.
+        real = pd.DataFrame({'aa_pos': [10], 'feature_type': ['BINDING']})
+        vi.generate_simple_feature_table = lambda *a, **k: real
+        got = vi._annotate_and_save('P1', features_path, cache_dir)
+        check('a successful fetch is cached', os.path.exists(features_path))
+        check('and returns its rows', len(got) == 1)
+
+        # And the cache is used: a third call must not re-run the pipeline.
+        vi.generate_simple_feature_table = lambda *a, **k: pd.DataFrame()
+        cached = vi._annotate_and_save('P1', features_path, cache_dir)
+        check('a cached table is read back rather than refetched', len(cached) == 1,
+              f'got {len(cached)} rows')
+    finally:
+        for name, fn in originals.items():
+            setattr(vi, name, fn)
+
+
+# ---------------------------------------------------------------------------
+def test_every_uniprot_call_has_a_timeout():
+    """
+    A hung connection to rest.uniprot.org otherwise stalls a whole run_all with no
+    output. The per-protein handler in run_all turns a raised timeout into a warning
+    and moves on; it cannot do anything about a socket that never returns.
+    """
+    print('\n28. Every UniProt request carries a timeout')
+    import ast
+    import inspect
+    import uniprot_annotation
+
+    tree = ast.parse(inspect.getsource(uniprot_annotation))
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr == 'get'
+             and isinstance(n.func.value, ast.Name) and n.func.value.id == 'requests']
+    check('the module still makes UniProt calls', len(calls) >= 5, f'{len(calls)} found')
+    missing = [c.lineno for c in calls
+               if not any(k.arg == 'timeout' for k in c.keywords)]
+    check('every one of them passes a timeout', not missing,
+          f'uniprot_annotation.py lines {missing} do not')
+
+
 if __name__ == '__main__':
     test_component_ranking_follows_the_gene_gate()
     test_component_row_reports_its_own_best()
@@ -1277,5 +1348,7 @@ if __name__ == '__main__':
     test_genes_that_stop_being_rescanned_stay_out_of_the_pool()
     test_cmh_warns_that_it_ignores_the_conditional_radius()
     test_structures_resolve_by_accession_not_filename_substring()
+    test_a_failed_annotation_is_not_cached_forever()
+    test_every_uniprot_call_has_a_timeout()
     print('\n' + ('ALL TESTS PASSED' if not FAILURES else f'FAILURES: {FAILURES}'))
     sys.exit(1 if FAILURES else 0)
