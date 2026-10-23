@@ -537,7 +537,7 @@ def build_parser():
         help='''
         which correction decides whether a neighborhood is called, and so whether it is
         conditioned out in the next round. With a mutation-rate null this reads
-        fdr_max / fwer_max, which require both tests to pass.
+        the max over both tests, so passing requires passing both.
         '''
     )
     parser.add_argument(

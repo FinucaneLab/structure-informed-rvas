@@ -111,12 +111,12 @@ def test_component_table_contents():
         'uniprot_id': 'P1', 'gene_name': 'G1',
         'aa_pos': [20, 28, 70],
         'p_binomial': [1e-9, 1e-7, 1e-6],
-        'fdr_max': [0.001, 0.002, 0.01],
-        'fwer_max': [0.01, 0.02, 0.04],
+        'fdr': [0.001, 0.002, 0.01],
+        'fwer': [0.01, 0.02, 0.04],
     })
 
     out = component_table(df_results, 'P1', 'G1', centers, adj, df_mut,
-                          'p_binomial', 'fdr_max', 'fwer_max', mu_mode=True)
+                          'p_binomial', mu_mode=True)
 
     check('two components (20+28 joined, 70 alone)', len(out) == 2, f'{len(out)} rows')
     big = out[out.n_centers == 2].iloc[0]
@@ -141,7 +141,7 @@ def test_component_table_contents():
     df_cc['ac_control'] = 0
     df_cc.loc[df_cc.aa_pos == 30, 'ac_control'] = 5
     out_cc = component_table(df_results, 'P1', 'G1', centers, adj, df_cc,
-                             'p_binomial', 'fdr_max', 'fwer_max', mu_mode=False)
+                             'p_binomial', mu_mode=False)
     big_cc = out_cc[out_cc.n_centers == 2].iloc[0]
     check('case/control mode reports control alleles',
           big_cc.n_control_alleles == 5 and big_cc.control_pymol == '30',
@@ -200,9 +200,9 @@ def test_masking_can_exhaust_a_gene():
     centers = [(20, 15.0), (28, 15.0)]
     df_results = pd.DataFrame({
         'uniprot_id': 'P1', 'gene_name': 'G1', 'aa_pos': [20, 28],
-        'p_binomial': [1e-9, 1e-8], 'fdr_max': [0.001, 0.002], 'fwer_max': [0.01, 0.02]})
+        'p_binomial': [1e-9, 1e-8], 'fdr': [0.001, 0.002], 'fwer': [0.01, 0.02]})
     out = component_table(df_results, 'P1', 'G1', centers, adj, df_mut,
-                          'p_binomial', 'fdr_max', 'fwer_max', mu_mode=True)
+                          'p_binomial', mu_mode=True)
     masked = parse_pymol_positions(out.iloc[0].residues_pymol)
     left = int(df_mut.loc[~df_mut.aa_pos.isin(masked), 'ac_case'].sum())
 
@@ -354,7 +354,7 @@ def test_enriched_only():
             'ratio': [8.0, 0.1],
         })
         kw = dict(reference_dir='x', pae_cutoff=15.0, read_mut=lambda u: df_mut,
-                  p_col='p_value', fdr_col='fdr', fwer_col='fwer',
+                  p_col='p_value', member_col='fdr',
                   radius_cols=('radius',), member_cutoff=0.05, mu_mode=False,
                   default_radius=15.0)
 
@@ -445,7 +445,7 @@ def test_degenerate_inputs():
     from visualize_and_interpret import safe_name
 
     base = dict(reference_dir='../sir-reference-data', pae_cutoff=15.0,
-                p_col='p_value', fdr_col='fdr', fwer_col='fwer',
+                p_col='p_value', member_col='fdr',
                 radius_cols=('radius',), mu_mode=False)
     df = pd.DataFrame({'uniprot_id': ['P1'], 'gene_name': ['G1'], 'aa_pos': [10],
                        'p_value': [1e-9], 'fdr': [0.04], 'fwer': [0.01],

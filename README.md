@@ -394,9 +394,10 @@ comparison and the test of interest). `--test poisson` draws Test A instead; its
 standalone significance is not calibrated (see Limitations), so use it as a
 direction-of-effect check rather than as a second opinion on which hits are real.
 
-**Significance column.** `--significance-column` defaults to `fdr_max` here rather than
-`fdr`, so a neighborhood is only shown if it passed *both* tests. Hits are ranked by the
-selected test's p-value.
+**Significance column.** `--significance-column` defaults to `fdr`, as it does for a
+case/control run -- but under this null `fdr` is the max over both tests, so a
+neighborhood is only shown if it passed *both*. Hits are ranked by the selected test's
+p-value. Pass `--significance-column fdr_binomial` to rank on Test B alone.
 
 **No control class.** There is no control cohort, so `_mut.pse` shows de novo positions
 in one colour (darker where a residue carries more than one) rather than the
@@ -501,8 +502,10 @@ unconstrained regions, and a neighborhood there looks enriched without being spe
 Such a neighborhood sits at `X_i ~ lambda_hat * M_i`, so Test A does not call it.
 
 Each test is corrected separately by the usual empirical FDR/FWER machinery, and a
-neighborhood passes when it passes both: `fdr_max = max(fdr_poisson, fdr_binomial)`,
-likewise `fwer_max`. On simulated data each test rejects at 4% under the true null,
+neighborhood passes when it passes both, which is what the reported `fdr` holds:
+`fdr = max(fdr_poisson, fdr_binomial)`, likewise `fwer`. Those are the same column
+names the case/control scan writes, so nothing downstream has to know which null
+produced a table; the per-test `fdr_poisson` / `fdr_binomial` stay alongside. On simulated data each test rejects at 4% under the true null,
 Test B inflates to 17% under regional constraint while Test A stays at 4%, Test A
 inflates to 80% under uniform gene-level enrichment while Test B stays at 4%, and
 requiring both still recovers an injected cluster with at least 98% power.
@@ -610,7 +613,7 @@ to 1 for a model that already gives absolute expected counts.
 
 Results are written per test into the `poisson` and `binomial` HDF5 groups of the
 p-value file, and merged into one TSV with `p_`/`fdr_`/`fwer_` columns for each test,
-plus `fdr_max`, `fwer_max`, per-gene `n_denovo_gene`, `mu_gene`, and `mu_coverage`.
+plus the combined `fdr`, `fwer`, and per-gene `n_denovo_gene`, `mu_gene`, `mu_coverage`.
 
 ### Splitting the scan across jobs
 
@@ -648,13 +651,13 @@ Combining warns if the chunks disagree on `lambda_hat`.
   1.50, and Test A's per-gene FWER came out at 14.3% against a nominal 5%.
 
   Read Test A as a direction-of-effect guard, not as significance. Two things follow.
-  Quote `fdr_binomial` / `fwer_binomial` and the combined `fdr_max` / `fwer_max`, never
+  Quote `fdr_binomial` / `fwer_binomial` and the combined `fdr` / `fwer`, never
   `fdr_poisson` on its own. And since Test A is the guard against regional constraint, a
   too-liberal Test A under-flags, so "passes Test B but not Test A" coming out empty is
   weak evidence rather than a demonstration that no hit is a constraint artifact.
 
   Test B is unaffected (4.3% on the same run) because conditioning on `N_g` cancels the
-  selection exactly, and `fdr_max < q` requires `fdr_binomial < q`, so the reported set
+  selection exactly, and `fdr < q` requires `fdr_binomial < q`, so the reported set
   is a subset of the Test B set and inherits its validity. Running without `--min-denovo`
   removes the issue at the cost of testing every gene.
 - FDR control over the *intersection* of two rejection sets is not guaranteed by the two
@@ -934,7 +937,7 @@ columns are always written, whichever `--conditional-criterion` was used.
 | flag | meaning |
 | --- | --- |
 | `--conditional-max-rounds` | stop after this many rounds beyond round 0 (default 5) |
-| `--conditional-criterion` | `fdr` (default) or `fwer`; with a mutation-rate null these read `fdr_max` / `fwer_max`, which require both tests to pass |
+| `--conditional-criterion` | `fdr` (default) or `fwer`; both nulls name these columns the same way, and under a mutation-rate null each is the max over both tests, so passing requires passing both |
 | `--conditional-cutoff` | threshold for that criterion; defaults to `--fdr-cutoff` |
 | `--conditional-radius` | radius of the removed neighborhood for `--remove-nbhd`. `best` (default) takes it from `--neighborhood-radius`; the mask predates the scan, so no per-position radius exists yet, and under a multi-radius run `best` falls back to 15 with a warning -- set this flag explicitly there |
 | `--conditional-min-retained` | fraction of a neighborhood that must survive for its centre to be re-tested (default 0.5) |

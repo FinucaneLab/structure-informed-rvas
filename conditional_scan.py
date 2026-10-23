@@ -44,6 +44,7 @@ result is arithmetic, not evidence of absence.
 
 import os
 import shutil
+from collections import namedtuple
 
 import numpy as np
 import pandas as pd
@@ -63,22 +64,26 @@ def _round_path(filename, round_idx):
     return f'{stem}.round{round_idx}{ext}'
 
 
-def _criterion_column(criterion, mutation_rate_mode):
-    """The column a hit is judged on, in each mode."""
-    if mutation_rate_mode:
-        # fdr_max / fwer_max: a neighborhood passes only if it passes both tests.
-        return 'fdr_max' if criterion == 'fdr' else 'fwer_max'
-    return 'fdr' if criterion == 'fdr' else 'fwer'
+# Every column name the conditional rounds read, per null. Both modes name the
+# corrections `fdr` and `fwer`, so only the p-value and the radius differ -- which is
+# why there is one table here instead of a selector function per column.
+#
+# Under the mutation-rate null the two tests pick their best radius independently, and
+# Test B is the test of interest (see the mutation_rate_test module docstring), so its
+# radius comes first and defines the neighborhood to condition out.
+ResultColumns = namedtuple('ResultColumns', 'p radius')
+RESULT_COLUMNS = {
+    False: ResultColumns(p='p_value', radius=('radius',)),
+    True:  ResultColumns(p='p_binomial', radius=('radius_binomial', 'radius_poisson')),
+}
+FDR_COLUMN = 'fdr'
+FWER_COLUMN = 'fwer'
 
 
-def _radius_columns(mutation_rate_mode):
-    """Where the per-position chosen radius lives, per mode.
-
-    Under the mutation-rate null the two tests pick their best radius independently;
-    Test B is the test of interest (see the mutation_rate_test module docstring), so its
-    radius defines the neighborhood to condition out.
-    """
-    return ('radius_binomial', 'radius_poisson') if mutation_rate_mode else ('radius',)
+def _column_for(criterion):
+    """The column a criterion names. Used for both the member gate and the gene gate --
+    they are the same choice, made twice."""
+    return FDR_COLUMN if criterion == 'fdr' else FWER_COLUMN
 
 
 TOTAL_COLUMNS = ('n_denovo_gene', 'mu_gene', 'mu_coverage')
@@ -122,13 +127,6 @@ def _carry_gene_totals(df_results, gene_totals, df_round0):
     if keep == ['uniprot_id']:
         return df_results
     return df_results.merge(df_totals[keep], on='uniprot_id', how='left')
-
-
-def _gene_gate_column(criterion, mutation_rate_mode):
-    """The column the GENE gate is judged on (default FWER), as opposed to members."""
-    if mutation_rate_mode:
-        return 'fwer_max' if criterion == 'fwer' else 'fdr_max'
-    return 'fwer' if criterion == 'fwer' else 'fdr'
 
 
 def _genes_passing_gate(df_results, active_genes, gate_col, gate_cutoff):
@@ -197,16 +195,15 @@ def conditional_scan(
 
     mu_kwargs = dict(mu_kwargs or {})
     cutoff = fdr_cutoff if cutoff is None else cutoff
-    crit_col = _criterion_column(criterion, mutation_rate_mode)
-    gate_col = _gene_gate_column(gene_criterion, mutation_rate_mode)
+    cols = RESULT_COLUMNS[bool(mutation_rate_mode)]
+    p_col, radius_cols = cols.p, cols.radius
+    # Which correction each gate is judged on. Rows are always written under
+    # FDR_COLUMN and FWER_COLUMN, never under these -- with --conditional-criterion
+    # fwer the two selectors name the same column, and keying a row on them would
+    # write a table with no FDR column at all.
+    member_col = _column_for(criterion)
+    gate_col = _column_for(gene_criterion)
     gate_cutoff = gene_cutoff
-    p_col = 'p_binomial' if mutation_rate_mode else 'p_value'
-    radius_cols = _radius_columns(mutation_rate_mode)
-    # The mode's own column names. crit_col and gate_col are each one of these, and
-    # with --conditional-criterion fwer they are the SAME one -- so rows are written
-    # under these instead, which always gives the table both an FDR and a FWER column.
-    fdr_name = _criterion_column('fdr', mutation_rate_mode)
-    fwer_name = _criterion_column('fwer', mutation_rate_mode)
 
     def read_mut(uniprot_id):
         """Per-residue counts for one gene, from whichever p-value file is current."""
@@ -261,9 +258,9 @@ def conditional_scan(
 
     df_results = pd.read_csv(os.path.join(results_dir, fdr_file), sep='\t')
     round0_results = df_results
-    if crit_col not in df_results.columns:
+    if member_col not in df_results.columns:
         raise ValueError(
-            f'{fdr_file} has no column {crit_col}; --conditional-criterion '
+            f'{fdr_file} has no column {member_col}; --conditional-criterion '
             f'{criterion} is not available for this test'
         )
 
@@ -294,13 +291,9 @@ def conditional_scan(
     def _components(results, genes, round_idx):
         return components_for_genes(
             results, genes, reference_dir, pae_cutoff, read_mut,
-            # fwer_name, not gate_col: with --conditional-gene-criterion fdr the gate
-            # IS the FDR column, and passing it here wrote an FDR value into a column
-            # called lead_fwer. The gate goes in as gate_col, which is what best_gate
-            # and the ranking use.
-            p_col, crit_col, fwer_name, radius_cols, cutoff, mutation_rate_mode,
+            p_col, member_col, radius_cols, cutoff, mutation_rate_mode,
             round_idx=round_idx, default_radius=default_radius,
-            gate_col=gate_col, fdr_name=fdr_name, fwer_name=fwer_name,
+            gate_col=gate_col, fdr_name=FDR_COLUMN, fwer_name=FWER_COLUMN,
         )
 
     # The gene gate is FWER by default and the members are the FDR-significant
@@ -344,7 +337,7 @@ def conditional_scan(
                # lead's value made `run_all --fdr-file <stem>.conditional.tsv
                # --all-signals` filter out a signal this analysis accepted and masked.
                # p_col already carries the component minimum, since lead_p is the min.
-               fdr_name: float(comp.best_fdr), fwer_name: float(comp.best_fwer),
+               FDR_COLUMN: float(comp.best_fdr), FWER_COLUMN: float(comp.best_fwer),
                p_col: comp.lead_p}
         accepted_rows.append(rec)
 
@@ -480,7 +473,7 @@ def conditional_scan(
                    'n_residues': comp.n_residues, 'n_case_alleles': comp.n_case_alleles,
                    'n_residues_overlapping_mask': overlap,
                    radius_cols[0]: float(comp.radius),
-                   fdr_name: float(comp.best_fdr), fwer_name: float(comp.best_fwer),
+                   FDR_COLUMN: float(comp.best_fdr), FWER_COLUMN: float(comp.best_fwer),
                    p_col: comp.lead_p}
             accepted_rows.append(rec)
             rows_this_round.append(rec)
@@ -516,7 +509,7 @@ def conditional_scan(
     df_conditional = pd.DataFrame(accepted_rows)
     out_file = f'{stem}.conditional.tsv'
     if len(df_conditional):
-        front = [c for c in ('round', 'uniprot_id', 'gene_name', 'aa_pos', crit_col)
+        front = [c for c in ('round', 'uniprot_id', 'gene_name', 'aa_pos', member_col)
                  if c in df_conditional.columns]
         rest = [c for c in df_conditional.columns if c not in front]
         df_conditional = df_conditional[front + rest].sort_values(

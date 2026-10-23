@@ -129,24 +129,49 @@ def _load_mut_data(pval_path, uniprot_id, test='binomial'):
         return read_original_mutation_data(node, uniprot_id, mu_mode=mu_mode), mu_mode
 
 
-# Column layouts of the two kinds of FDR table. The mutation-rate run corrects each test
-# separately and reports the max, so it has no plain `fdr` / `p_value` column at all.
-MU_FDR_SCHEMA = {
-    'significance_column': 'fdr_max',
+# Column layouts of the two kinds of results table. Both name their corrections `fdr`
+# and `fwer`; what differs is that a mutation-rate run reports a p-value and a chosen
+# radius per test, since it runs two.
+MU_RESULT_COLUMNS = {
+    'significance_column': 'fdr',
     'p_column': {'binomial': 'p_binomial', 'poisson': 'p_poisson'},
     'radius_columns': {'binomial': ('radius_binomial', 'radius_poisson'),
                        'poisson': ('radius_poisson', 'radius_binomial')},
 }
-STD_FDR_SCHEMA = {
+STD_RESULT_COLUMNS = {
     'significance_column': 'fdr',
     'p_column': {'binomial': 'p_value', 'poisson': 'p_value'},
     'radius_columns': {'binomial': ('radius',), 'poisson': ('radius',)},
 }
 
 
-def _fdr_schema(df_fdr):
-    """Pick the column layout for an FDR table by looking at what it actually contains."""
-    return MU_FDR_SCHEMA if 'fdr_max' in df_fdr.columns else STD_FDR_SCHEMA
+def _result_columns(df_fdr):
+    """
+    Pick the column layout for a results table by looking at what it contains.
+
+    Keyed on p_binomial, which only a mutation-rate run produces. It used to key on
+    fdr_max, which no longer exists: both nulls now report `fdr` and `fwer`.
+    """
+    if 'p_binomial' in df_fdr.columns or 'p_poisson' in df_fdr.columns:
+        return MU_RESULT_COLUMNS
+    return STD_RESULT_COLUMNS
+
+
+def normalize_result_columns(df_fdr):
+    """
+    Accept a results table written before fdr_max/fwer_max were renamed.
+
+    Those columns held max(poisson, binomial), which is exactly what `fdr`/`fwer` hold
+    now, so an old table is read correctly by renaming them. Done on read rather than
+    by writing both, so there is one name in the code and one in new output.
+    """
+    renames = {old: new for old, new in (('fdr_max', 'fdr'), ('fwer_max', 'fwer'))
+               if old in df_fdr.columns and new not in df_fdr.columns}
+    if renames:
+        moved = ', '.join(f'{old} is now {new}' for old, new in sorted(renames.items()))
+        print(f'  Note: reading an older results table ({moved}).')
+        return df_fdr.rename(columns=renames)
+    return df_fdr
 
 
 def _compute_nbhd(uniprot_id, center, reference_dir, radius, pae_cutoff):
@@ -618,12 +643,12 @@ def cmd_analyze(args):
         # Load FDR file and work out which layout it has. A mutation-rate run corrects
         # each test separately and reports the max, so it has no plain `fdr` or
         # `p_value` column.
-        df_fdr = pd.read_csv(args.fdr_file, sep='\t')
-        schema = _fdr_schema(df_fdr)
-        sig_col = args.significance_column or schema['significance_column']
-        p_col = schema['p_column'][args.test]
-        radius_cols = schema['radius_columns'][args.test]
-        if schema is MU_FDR_SCHEMA:
+        df_fdr = normalize_result_columns(pd.read_csv(args.fdr_file, sep='\t'))
+        columns = _result_columns(df_fdr)
+        sig_col = args.significance_column or columns['significance_column']
+        p_col = columns['p_column'][args.test]
+        radius_cols = columns['radius_columns'][args.test]
+        if columns is MU_RESULT_COLUMNS:
             print(f"Mutation-rate results detected; ranking by {p_col}, "
                   f"significance from {sig_col}.")
         for col in (sig_col, p_col):
@@ -972,7 +997,7 @@ def main():
                            help='Reference directory')
     p_analyze.add_argument('--significance-column', default=None,
                            help='Column to use for significance cutoff. Default depends '
-                                'on the file: "fdr" for standard 3DNT results, "fdr_max" '
+                                'on the file: "fdr" in both, or a per-test column such '
                                 'for mutation-rate results (a neighborhood passes only '
                                 'if it passes both tests)')
     p_analyze.add_argument('--all-signals', action='store_true', default=False,

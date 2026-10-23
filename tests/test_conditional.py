@@ -493,7 +493,7 @@ def test_round_carries_the_whole_null_pool():
 def test_driver_helpers():
     """Round file naming and criterion columns."""
     print('\n9. Driver bookkeeping')
-    from conditional_scan import _round_path, _criterion_column, _radius_columns
+    from conditional_scan import _round_path, _column_for, RESULT_COLUMNS
 
     check('p-value file is versioned per round',
           _round_path('all_proteins.pvals.h5', 2) == 'all_proteins.pvals.round2.h5')
@@ -502,14 +502,17 @@ def test_driver_helpers():
     check('round 0 file is never overwritten by a later round',
           _round_path('x.h5', 1) != 'x.h5')
 
-    check('standard scan judges on fdr', _criterion_column('fdr', False) == 'fdr')
-    check('standard scan judges on fwer', _criterion_column('fwer', False) == 'fwer')
-    check('mutation-rate mode requires both tests to pass',
-          _criterion_column('fdr', True) == 'fdr_max' and
-          _criterion_column('fwer', True) == 'fwer_max')
+    check('a criterion names its correction column',
+          _column_for('fdr') == 'fdr' and _column_for('fwer') == 'fwer')
+    check('both nulls name their corrections the same way',
+          _column_for('fdr') == 'fdr',
+          'the mutation-rate run reports max(poisson, binomial) under `fdr`')
     check('mutation-rate mode conditions on the Test B radius first',
-          _radius_columns(True)[0] == 'radius_binomial')
-    check('standard mode has a single radius column', _radius_columns(False) == ('radius',))
+          RESULT_COLUMNS[True].radius[0] == 'radius_binomial')
+    check('standard mode has a single radius column',
+          RESULT_COLUMNS[False].radius == ('radius',))
+    check('the p-value column differs by null',
+          RESULT_COLUMNS[True].p == 'p_binomial' and RESULT_COLUMNS[False].p == 'p_value')
 
 
 def test_position_filter_survives_the_rounds():

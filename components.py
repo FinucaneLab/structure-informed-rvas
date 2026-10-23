@@ -157,13 +157,11 @@ def component_table(
     adj_by_radius,
     df_mut,
     p_col,
-    fdr_col,
-    fwer_col,
     mu_mode,
     round_idx=0,
     gate_col=None,
-    fdr_name=None,
-    fwer_name=None,
+    fdr_name='fdr',
+    fwer_name='fwer',
 ):
     """
     One row per component for a single gene.
@@ -172,12 +170,12 @@ def component_table(
     and ac_case always, plus mu (mutation-rate mode) or ac_control (case/control).
     `centers` is a list of (aa_pos, radius).
 
-    `fdr_col` is the membership criterion and `gate_col` the gene gate (defaulting to
-    `fwer_col`); these can be the same column. `fdr_name`/`fwer_name` are the mode's
-    canonical column names, recorded separately so a row always carries both.
+    `fdr_name`/`fwer_name` are the correction columns -- the same two names in both
+    nulls -- and `gate_col` is whichever of them the gene gate is judged on. Rows record
+    both corrections unconditionally, so a row is never keyed on the gate and the two
+    cannot collide.
     """
-    fdr_name = fdr_name or fdr_col
-    fwer_name = fwer_name or fwer_col
+    gate_col = gate_col or fwer_name
     case_pos = set(df_mut.loc[df_mut.ac_case > 0, 'aa_pos'].astype(int))
     labels, nbhd, shared = build_components(centers, adj_by_radius, case_pos)
 
@@ -203,20 +201,16 @@ def component_table(
         lead = min(member_centers, key=lambda p: by_pos.loc[p, p_col])
         lead_row = by_pos.loc[lead]
 
-        # The component's own best gate value, minimised over its members rather than
-        # read off the lead. The lead is chosen by p_col, and under the mutation-rate
-        # null the gate column (fwer_max/fdr_max, a max over both tests) is not monotone
-        # in p_binomial -- so the lead's gate value can be far worse than some other
-        # member's, and ordering components by it would mask the wrong component and let
-        # the one that actually cleared the gene gate resurface next round.
-        # Minima over the component's own members, not values read off the lead: the
-        # lead is picked by p_col, and under the mutation-rate null these columns are
-        # maxima over both tests and so are not monotone in it.
+        # Minima over the component's own members, not values read off the lead. The
+        # lead is chosen by p_col, and under the mutation-rate null fdr/fwer are maxima
+        # over both tests and so are not monotone in p_binomial -- the lead's value can
+        # be far worse than another member's. Ordering components by the lead's value
+        # would mask the wrong component and let the one that actually cleared the gene
+        # gate resurface next round.
         def _best(col):
             return float(min(by_pos.loc[p, col] for p in member_centers))
 
-        best_crit = _best(fdr_col)
-        best_gate = _best(gate_col) if gate_col is not None else _best(fwer_col)
+        best_gate = _best(gate_col)
 
         rec = {
             'uniprot_id': uniprot_id,
@@ -231,14 +225,8 @@ def component_table(
             'lead_fdr': float(lead_row[fdr_name]),
             'lead_fwer': float(lead_row[fwer_name]),
             'best_gate': best_gate,
-            'best_crit': best_crit,
-            # Both canonical columns, always. --conditional-criterion fwer makes the
-            # criterion and the gene gate the same column, and a rec dict keyed on the
-            # two would then carry one key and write a table with no FDR column at all
-            # -- which _fdr_schema cannot classify, so the documented --all-signals
-            # follow-up died on it.
-            'best_fdr': _best(fdr_name) if fdr_name in by_pos.columns else best_crit,
-            'best_fwer': _best(fwer_name) if fwer_name in by_pos.columns else best_gate,
+            'best_fdr': _best(fdr_name),
+            'best_fwer': _best(fwer_name),
             'radius': float(dict(centers)[lead]),
             'n_residues': len(residues),
             'seq_span_aa': _seq_span(centers, labels, comp),
@@ -280,8 +268,7 @@ def components_for_genes(
     pae_cutoff,
     read_mut,
     p_col,
-    fdr_col,
-    fwer_col,
+    member_col,
     radius_cols,
     member_cutoff,
     mu_mode,
@@ -289,14 +276,14 @@ def components_for_genes(
     default_radius=15.0,
     enriched_only=True,
     gate_col=None,
-    fdr_name=None,
-    fwer_name=None,
+    fdr_name='fdr',
+    fwer_name='fwer',
 ):
     """
     Build the component table for every gene in `genes`.
 
     `genes` is the set that passed the gene gate; membership within each is every
-    neighborhood with `fdr_col` below `member_cutoff`. `read_mut(uniprot_id)` returns
+    neighborhood with `member_col` below `member_cutoff`. `read_mut(uniprot_id)` returns
     that gene's per-residue mutation frame.
 
     Genes whose structure cannot be loaded are skipped with a message rather than
@@ -312,7 +299,7 @@ def components_for_genes(
     n_depleted = 0
     for uniprot_id in sorted(genes):
         g = df_results[(df_results.uniprot_id == uniprot_id) &
-                       (df_results[fdr_col] < member_cutoff)]
+                       (df_results[member_col] < member_cutoff)]
         if len(g) == 0:
             # The gene gate and the member gate are separate cutoffs, so a gene can
             # clear the first with nothing clearing the second -- which happens
@@ -320,7 +307,7 @@ def components_for_genes(
             # gene_name off the empty frame below used to raise IndexError and take the
             # whole run down.
             logger.info(f'{uniprot_id}: passes the gene gate but no neighborhood passes '
-                        f'the member gate ({fdr_col} < {member_cutoff}); no component')
+                        f'the member gate ({member_col} < {member_cutoff}); no component')
             continue
         # One row per position. Results tables written before the gene_name merge was
         # collapsed carry a row per paralogous gene name, which would otherwise put the
@@ -382,7 +369,7 @@ def components_for_genes(
 
         t = component_table(
             g, uniprot_id, gene_name, centers, adj_by_radius, df_mut,
-            p_col, fdr_col, fwer_col, mu_mode, round_idx,
+            p_col, mu_mode, round_idx,
             gate_col=gate_col, fdr_name=fdr_name, fwer_name=fwer_name,
         )
         n_caseless += t.attrs.get('n_caseless', 0)
@@ -449,7 +436,7 @@ def top_component(df_components, uniprot_id):
 
     Ranked by best_gate -- the component's own minimum over the column the gene gate is
     judged on -- rather than by lead_p or by the lead's gate value. Under the
-    mutation-rate null the gate is fwer_max, a max over both tests, which is not
+    mutation-rate null the gate is fwer, a max over both tests, which is not
     monotone in the p_binomial that picks the lead; ordering on either of those could
     report and mask a component that never cleared the gate, leaving the one that did to
     resurface in the next round looking like a second independent signal. lead_p breaks

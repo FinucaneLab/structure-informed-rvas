@@ -29,8 +29,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import (write_dataset, resolve_pval_node, read_p_values,
                    read_original_mutation_data)
-from visualize_and_interpret import (_nbhd_features_table, _fdr_schema,
-                                     MU_FDR_SCHEMA, STD_FDR_SCHEMA,
+from visualize_and_interpret import (_nbhd_features_table, _result_columns,
+                                     MU_RESULT_COLUMNS, STD_RESULT_COLUMNS,
+                                     normalize_result_columns,
                                      positions_to_pymol_notation)
 from pymol_code import _obs_exp_to_b
 
@@ -250,15 +251,15 @@ def test_feature_table_std_mode_unchanged():
 
 
 # ---------------------------------------------------------------------------
-def test_fdr_schema_detection():
+def test_result_columns_detection():
     """The two results layouts must be told apart by content, not by a flag."""
-    print('\n5. FDR table schema detection')
+    print('\n5. Results-table column detection')
 
     mu_cols = ['uniprot_id', 'aa_pos', 'p_poisson', 'fdr_poisson', 'fwer_poisson',
                'nbhd_case', 'exp_poisson', 'obs_exp_poisson', 'radius_poisson',
                'gene_name', 'p_binomial', 'fdr_binomial', 'fwer_binomial',
                'exp_binomial', 'obs_exp_binomial', 'radius_binomial',
-               'fdr_max', 'fwer_max', 'sig_fwer_both', 'sig_fdr_both',
+               'fdr', 'fwer', 'sig_fwer_both', 'sig_fdr_both',
                'n_denovo_gene', 'mu_gene', 'mu_coverage']
     std_cols = ['uniprot_id', 'aa_pos', 'p_value', 'fdr', 'fwer', 'nbhd_case',
                 'nbhd_control', 'ratio', 'radius', 'gene_name']
@@ -266,22 +267,22 @@ def test_fdr_schema_detection():
     df_mu = pd.DataFrame(columns=mu_cols)
     df_std = pd.DataFrame(columns=std_cols)
 
-    check('mutation-rate table detected', _fdr_schema(df_mu) is MU_FDR_SCHEMA)
-    check('standard table detected', _fdr_schema(df_std) is STD_FDR_SCHEMA)
+    check('mutation-rate table detected', _result_columns(df_mu) is MU_RESULT_COLUMNS)
+    check('standard table detected', _result_columns(df_std) is STD_RESULT_COLUMNS)
 
     # Every column the schema names must actually exist in the matching table, or
     # cmd_analyze fails at the point of use rather than here.
-    for schema, df, name in ((MU_FDR_SCHEMA, df_mu, 'mutation-rate'),
-                             (STD_FDR_SCHEMA, df_std, 'standard')):
-        needed = {schema['significance_column']}
-        needed |= set(schema['p_column'].values())
+    for columns, df, name in ((MU_RESULT_COLUMNS, df_mu, 'mutation-rate'),
+                              (STD_RESULT_COLUMNS, df_std, 'standard')):
+        needed = {columns['significance_column']}
+        needed |= set(columns['p_column'].values())
         ok = needed <= set(df.columns)
-        check(f'{name} schema names only columns that exist', ok,
+        check(f'{name} layout names only columns that exist', ok,
               f'missing {sorted(needed - set(df.columns))}')
         # Radius columns are optional (a single-radius run still records `radius`), but
         # the first choice for each test must be real where the table has any.
-        check(f'{name} schema radius columns exist',
-              all(c in df.columns for cols in schema['radius_columns'].values()
+        check(f'{name} radius columns exist',
+              all(c in df.columns for cols in columns['radius_columns'].values()
                   for c in cols))
 
 
@@ -316,7 +317,7 @@ if __name__ == '__main__':
         test_mutation_data_columns(tmpdir)
         test_feature_table_mu_mode()
         test_feature_table_std_mode_unchanged()
-        test_fdr_schema_detection()
+        test_result_columns_detection()
         test_obs_exp_colour_anchor()
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

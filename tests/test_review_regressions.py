@@ -81,8 +81,6 @@ def _two_centre_component(df_results, **kwargs):
     df_mut = pd.DataFrame({'aa_pos': [2, 3, 4], 'ac_case': [0, 1, 0], 'mu': [1e-6] * 3})
     return component_table(df_results, 'P1', 'G1', [(2, 10.0), (4, 10.0)],
                            {10.0: adj}, df_mut, 'p_binomial',
-                           kwargs.pop('fdr_col', 'fdr_max'),
-                           kwargs.pop('fwer_col', 'fwer_max'),
                            mu_mode=True, **kwargs)
 
 
@@ -141,36 +139,36 @@ def test_component_row_reports_its_own_best():
     """
     print('\n2. A component row reports the component, not its lead')
 
-    # The lead has the best p_binomial and a failing fdr_max; centre 4 cleared the gate.
+    # The lead has the best p_binomial and a failing fdr; centre 4 cleared the gate.
     t = _two_centre_component(pd.DataFrame({
         'aa_pos':     [2,    4],
         'p_binomial': [1e-9, 1e-5],
-        'fdr_max':    [0.30, 0.004],
-        'fwer_max':   [0.40, 0.010],
+        'fdr':    [0.30, 0.004],
+        'fwer':   [0.40, 0.010],
     }))
     check('the two centres form one component', len(t) == 1 and int(t.iloc[0].n_centers) == 2)
     row = t.iloc[0]
     check('the lead is still the best-scoring centre', int(row.lead_aa_pos) == 2)
-    check('best_crit is the minimum over members, not the lead value',
-          row.best_crit == 0.004 and row.lead_fdr == 0.30)
+    check('best_fdr is the minimum over members, not the lead value',
+          row.best_fdr == 0.004 and row.lead_fdr == 0.30)
     check('best_gate is the minimum over members',
           row.best_gate == 0.010 and row.lead_fwer == 0.40)
 
     # This is what the conditional writer puts in the crit column, and what
     # _units_from_fdr then filters on.
     check('the reported value survives an --all-signals cutoff the lead would fail',
-          row.best_crit < 0.05 <= row.lead_fdr)
+          row.best_fdr < 0.05 <= row.lead_fdr)
 
     # Monotone case: nothing should move in case/control mode, where the lead's values
     # and the component's minima coincide by construction.
     mono = _two_centre_component(pd.DataFrame({
         'aa_pos':     [2,    4],
         'p_binomial': [1e-9, 1e-5],
-        'fdr_max':    [0.001, 0.004],
-        'fwer_max':   [0.002, 0.010],
+        'fdr':    [0.001, 0.004],
+        'fwer':   [0.002, 0.010],
     })).iloc[0]
     check('with monotone columns the lead already is the best',
-          mono.best_crit == mono.lead_fdr and mono.best_gate == mono.lead_fwer)
+          mono.best_fdr == mono.lead_fdr and mono.best_gate == mono.lead_fwer)
 
 
 # ---------------------------------------------------------------------------
@@ -208,22 +206,23 @@ def test_conditional_rows_record_a_usable_radius():
     annotation step silently falls back to the flat --radius default.
     """
     print('\n4. The radius a conditional row records')
-    from conditional_scan import _radius_columns
+    from conditional_scan import RESULT_COLUMNS
     from utils import best_radius_for_hit
-    from visualize_and_interpret import _fdr_schema, MU_FDR_SCHEMA, STD_FDR_SCHEMA
+    from visualize_and_interpret import (_result_columns, MU_RESULT_COLUMNS,
+                                         STD_RESULT_COLUMNS)
 
-    for mu_mode, expected_schema in ((False, STD_FDR_SCHEMA), (True, MU_FDR_SCHEMA)):
-        col = _radius_columns(mu_mode)[0]
+    for mu_mode, expected_columns in ((False, STD_RESULT_COLUMNS), (True, MU_RESULT_COLUMNS)):
+        col = RESULT_COLUMNS[mu_mode].radius[0]
         rec = {'uniprot_id': 'P1', 'aa_pos': 42, 'round': 0, col: 8.0}
-        rec.update({'fdr_max': 0.01, 'fwer_max': 0.02, 'p_binomial': 1e-5} if mu_mode
+        rec.update({'fdr': 0.01, 'fwer': 0.02, 'p_binomial': 1e-5} if mu_mode
                    else {'fdr': 0.01, 'fwer': 0.02, 'p_value': 1e-5})
         df = pd.DataFrame([rec])
-        schema = _fdr_schema(df)
+        layout = _result_columns(df)
         mode = 'mutation-rate' if mu_mode else 'case/control'
         check(f'{mode}: the table is read with the expected schema',
-              schema is expected_schema)
+              layout is expected_columns)
         got = best_radius_for_hit(df, 'P1', 42, default=15.0,
-                                  radius_cols=schema['radius_columns']['binomial'])
+                                  radius_cols=layout['radius_columns']['binomial'])
         check(f'{mode}: the recorded radius is the one the reader finds',
               got == 8.0, f'got {got}, default is 15.0')
 
@@ -462,17 +461,18 @@ def test_component_row_always_has_both_corrections():
     """
     --conditional-criterion fwer makes the member criterion and the gene gate the same
     column. Keying the row on both would write a table with no FDR column, which
-    _fdr_schema cannot classify.
+    _result_columns cannot classify.
     """
     print('\n11. A conditional row carries both corrections')
-    from conditional_scan import _criterion_column, _gene_gate_column
-    from visualize_and_interpret import _fdr_schema, MU_FDR_SCHEMA, STD_FDR_SCHEMA
+    from conditional_scan import _column_for, FDR_COLUMN, FWER_COLUMN
+    from visualize_and_interpret import (_result_columns, MU_RESULT_COLUMNS,
+                                         STD_RESULT_COLUMNS)
 
     t = _two_centre_component(pd.DataFrame({
         'aa_pos':     [2,    4],
         'p_binomial': [1e-9, 1e-5],
-        'fdr_max':    [0.30, 0.004],
-        'fwer_max':   [0.40, 0.010],
+        'fdr':    [0.30, 0.004],
+        'fwer':   [0.40, 0.010],
     }))
     row = t.iloc[0]
     check('a component reports its best under both canonical names',
@@ -480,41 +480,43 @@ def test_component_row_always_has_both_corrections():
 
     for mu_mode in (False, True):
         mode = 'mutation-rate' if mu_mode else 'case/control'
-        check(f'{mode}: --conditional-criterion fwer does collide',
-              _criterion_column('fwer', mu_mode) == _gene_gate_column('fwer', mu_mode),
-              'the case this test exists for')
+        check(f'{mode}: --conditional-criterion fwer selects the gate column',
+              _column_for('fwer') == FWER_COLUMN,
+              'member gate and gene gate name the same column -- the case this covers')
 
-    # Under --conditional-criterion fwer the criterion column IS the gate column, so
-    # best_crit is a FWER value. best_fdr must still come from the FDR column.
+    # With --conditional-criterion fwer the member gate IS the FWER column. Each
+    # recorded correction must still come from its own column.
     collided = _two_centre_component(
         pd.DataFrame({'aa_pos': [2, 4], 'p_binomial': [1e-9, 1e-5],
-                      'fdr_max': [0.30, 0.004], 'fwer_max': [0.40, 0.010]}),
-        fdr_col='fwer_max', fwer_col='fwer_max',
-        gate_col='fwer_max', fdr_name='fdr_max', fwer_name='fwer_max').iloc[0]
-    check('with the criterion set to fwer, best_crit is a FWER value',
-          collided.best_crit == 0.010)
-    check('best_fdr still comes from the FDR column',
+                      'fdr': [0.30, 0.004], 'fwer': [0.40, 0.010]}),
+        gate_col='fwer').iloc[0]
+    check('best_fdr comes from the FDR column',
           collided.best_fdr == 0.004, f'got {collided.best_fdr}')
-    check('best_fwer still comes from the FWER column', collided.best_fwer == 0.010)
+    check('best_fwer comes from the FWER column', collided.best_fwer == 0.010)
+    check('best_gate follows the gene criterion', collided.best_gate == 0.010)
 
-    # And the writer must key on those names, not on crit_col/gate_col.
+    # Structural: component_table cannot be handed a selector as a column name, so a
+    # row can no longer be keyed on one -- what made the collision possible.
     import inspect
     import conditional_scan
+    from components import component_table
+    check('component_table takes no selector-shaped column parameters',
+          not ({'fdr_col', 'fwer_col'} & set(inspect.signature(component_table).parameters)))
     writer = inspect.getsource(conditional_scan.conditional_scan)
     check('both rec dicts are keyed on the canonical names',
-          writer.count('fdr_name: float(comp.best_fdr), fwer_name: float(comp.best_fwer)') == 2)
+          writer.count('FDR_COLUMN: float(comp.best_fdr), FWER_COLUMN: float(comp.best_fwer)') == 2)
     check('neither rec dict is keyed on the colliding pair',
           'crit_col: float(comp.' not in writer and 'gate_col: float(comp.' not in writer)
 
     # A table written that way classifies in both modes.
-    for mu_mode, expected in ((False, STD_FDR_SCHEMA), (True, MU_FDR_SCHEMA)):
+    for mu_mode, expected in ((False, STD_RESULT_COLUMNS), (True, MU_RESULT_COLUMNS)):
         mode = 'mutation-rate' if mu_mode else 'case/control'
         df = pd.DataFrame([{'uniprot_id': 'P1', 'aa_pos': 2, 'round': 0,
-                            _criterion_column('fdr', mu_mode): 0.004,
-                            _criterion_column('fwer', mu_mode): 0.010,
+                            FDR_COLUMN: 0.004,
+                            FWER_COLUMN: 0.010,
                             ('p_binomial' if mu_mode else 'p_value'): 1e-9}])
         check(f'{mode}: the written table is classifiable downstream',
-              _fdr_schema(df) is expected)
+              _result_columns(df) is expected)
 
 
 # ---------------------------------------------------------------------------
@@ -653,7 +655,7 @@ def _drive_conditional(best_gates, gate_cutoff=0.05, max_rounds=1):
         {'uniprot_id': g, 'gene_name': g, 'component_id': 1, 'round': 0,
          'n_centers': 1, 'lead_aa_pos': 10, 'lead_p': 1e-8, 'lead_fdr': 0.001,
          'lead_fwer': best_gates[g], 'best_gate': best_gates[g],
-         'best_crit': best_gates[g], 'best_fdr': 0.001, 'best_fwer': best_gates[g],
+         'best_fdr': 0.001, 'best_fwer': best_gates[g],
          'radius': 10.0, 'n_residues': 3, 'n_case_alleles': 4,
          'residues_pymol': '9-11', 'centers_pymol': '10',
          'centers_detail': '10:10', 'seq_span_aa': 3,
@@ -733,20 +735,23 @@ def test_lead_columns_are_never_mislabelled():
     # Gene criterion fdr: the gate is the FDR column. lead_fwer must still be FWER.
     row = _two_centre_component(
         pd.DataFrame({'aa_pos': [2, 4], 'p_binomial': [1e-9, 1e-5],
-                      'fdr_max': [0.30, 0.004], 'fwer_max': [0.40, 0.010]}),
-        fdr_col='fdr_max', fwer_col='fdr_max',
-        gate_col='fdr_max', fdr_name='fdr_max', fwer_name='fwer_max').iloc[0]
+                      'fdr': [0.30, 0.004], 'fwer': [0.40, 0.010]}),
+        gate_col='fdr', fdr_name='fdr', fwer_name='fwer').iloc[0]
     check('lead_fwer is a FWER value, not the gate column',
-          row.lead_fwer == 0.40, f'got {row.lead_fwer} (fdr_max at the lead is 0.30)')
+          row.lead_fwer == 0.40, f'got {row.lead_fwer} (fdr at the lead is 0.30)')
     check('lead_fdr is an FDR value', row.lead_fdr == 0.30)
     check('best_gate still follows the gene criterion', row.best_gate == 0.004)
 
-    # And conditional_scan must pass the canonical FWER name, not the gate.
+    # Structural: there is no parameter through which the gate column could reach
+    # lead_fwer any more -- component_table takes the correction names and the gate
+    # separately, so the mix-up is unrepresentable rather than merely fixed.
     import inspect
-    import conditional_scan
-    helper = inspect.getsource(conditional_scan.conditional_scan)
-    check('the component builder is given the canonical FWER column',
-          'p_col, crit_col, fwer_name, radius_cols' in helper)
+    from components import component_table
+    params = inspect.signature(component_table).parameters
+    check('component_table names the corrections, not a gate-shaped column',
+          'fwer_name' in params and 'fwer_col' not in params)
+    check('fwer_name defaults to the canonical column',
+          params['fwer_name'].default == 'fwer')
 
 
 # ---------------------------------------------------------------------------
@@ -849,6 +854,71 @@ def test_gene_name_matches_the_results_table():
           by_map['P1'] == pymol_code._load_gene_name('P1', tmp) == 'SOLO')
 
 
+# ---------------------------------------------------------------------------
+def test_mu_fdr_is_the_max_over_both_tests():
+    """
+    `fdr`/`fwer` under the mutation-rate null are max(poisson, binomial), not the
+    Poisson value.
+
+    In practice the two are usually equal, because Test A -- the regional-constraint
+    guard -- is the binding one. That makes the max look redundant and invites
+    collapsing it to fdr_poisson. It is not redundant: the max is what makes passing
+    require passing BOTH tests, and Test B is the test of interest. Wherever
+    fdr_binomial exceeds fdr_poisson, dropping the max would call a neighborhood
+    significant that currently fails. Renaming these columns from fdr_max/fwer_max was
+    deliberate; changing what they hold would be a separate statistical decision.
+    """
+    print('\n20. The mutation-rate fdr/fwer keep max semantics')
+    from mutation_rate_test import _merge_test_results
+
+    # Row 0: Poisson binds. Row 1: binomial binds -- the case that matters.
+    base = {'uniprot_id': ['P1', 'P1'], 'aa_pos': [1, 2],
+            'nbhd_expected': [1.0, 1.0], 'obs_exp': [2.0, 2.0], 'radius': [10.0, 10.0]}
+    a = pd.DataFrame({**base, 'p_value': [1e-3, 1e-9],
+                      'fdr': [0.20, 0.001], 'fwer': [0.30, 0.002]})
+    b = pd.DataFrame({**base, 'p_value': [1e-9, 1e-3],
+                      'fdr': [0.001, 0.40], 'fwer': [0.002, 0.50]})
+    m = _merge_test_results(a, b, 0.05, 0.05).sort_values('aa_pos').reset_index(drop=True)
+
+    check('fdr is the max over the two tests',
+          m.fdr.tolist() == [0.20, 0.40], f'got {m.fdr.tolist()}')
+    check('fwer is the max over the two tests',
+          m.fwer.tolist() == [0.30, 0.50], f'got {m.fwer.tolist()}')
+    check('where binomial binds, fdr is NOT fdr_poisson',
+          m.fdr.iloc[1] == 0.40 and m.fdr_poisson.iloc[1] == 0.001,
+          'collapsing to fdr_poisson would call this neighborhood significant')
+    check('passing requires passing both tests',
+          m.sig_fdr_both.tolist() == [False, False],
+          'each row passes one test and fails the other')
+    check('the per-test columns remain for inspection',
+          all(c in m.columns for c in ('fdr_poisson', 'fdr_binomial',
+                                       'fwer_poisson', 'fwer_binomial')))
+    check('the old fdr_max / fwer_max names are gone',
+          'fdr_max' not in m.columns and 'fwer_max' not in m.columns)
+
+
+# ---------------------------------------------------------------------------
+def test_old_results_tables_still_read():
+    """A table written before the rename holds the same values under the old names."""
+    print('\n21. Tables predating the fdr_max rename')
+    from visualize_and_interpret import (normalize_result_columns, _result_columns,
+                                         MU_RESULT_COLUMNS)
+
+    old = pd.DataFrame({'uniprot_id': ['P1'], 'aa_pos': [1],
+                        'fdr_max': [0.01], 'fwer_max': [0.02],
+                        'p_binomial': [1e-5], 'p_poisson': [1e-4]})
+    norm = normalize_result_columns(old)
+    check('fdr_max is read as fdr', norm['fdr'].iloc[0] == 0.01)
+    check('fwer_max is read as fwer', norm['fwer'].iloc[0] == 0.02)
+    check('an old mutation-rate table is still recognised as one',
+          _result_columns(norm) is MU_RESULT_COLUMNS)
+
+    current = pd.DataFrame({'uniprot_id': ['P1'], 'aa_pos': [1], 'fdr': [0.01],
+                            'fwer': [0.02], 'p_binomial': [1e-5]})
+    check('a current table is passed through untouched',
+          normalize_result_columns(current).equals(current))
+
+
 if __name__ == '__main__':
     test_component_ranking_follows_the_gene_gate()
     test_component_row_reports_its_own_best()
@@ -869,5 +939,7 @@ if __name__ == '__main__':
     test_lead_columns_are_never_mislabelled()
     test_cmh_remove_nbhd_is_per_protein()
     test_gene_name_matches_the_results_table()
+    test_mu_fdr_is_the_max_over_both_tests()
+    test_old_results_tables_still_read()
     print('\n' + ('ALL TESTS PASSED' if not FAILURES else f'FAILURES: {FAILURES}'))
     sys.exit(1 if FAILURES else 0)

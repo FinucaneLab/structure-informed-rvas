@@ -58,7 +58,7 @@ RATE_COLUMNS_BY_NAME = ('roulette_rate',)
 KNOWN_RATE_COLUMNS = ('roulette_rate', 'mu_snp', 'mu')
 
 
-def identify_rate_column(schema_names, path=''):
+def identify_rate_column(column_names, path=''):
     """
     Pick the mutation-rate column of a rate reference file.
 
@@ -71,16 +71,16 @@ def identify_rate_column(schema_names, path=''):
     Logs the column it settled on, which is otherwise unrecoverable from the output.
     """
     for name in RATE_COLUMNS_BY_NAME:
-        if name in schema_names:
+        if name in column_names:
             logger.info(f'Using rate column {name} from {path}')
             return name
-    candidates = [c for c in schema_names
+    candidates = [c for c in column_names
                   if 'rate' in c.lower() or c.lower() in ('mu', 'u')
                   or c.lower().startswith('mu_')]
     if len(candidates) != 1:
         raise ValueError(
             f'Could not identify a mutation rate column in {path}. '
-            f'Columns present: {list(schema_names)}. Known names: {list(KNOWN_RATE_COLUMNS)}.'
+            f'Columns present: {list(column_names)}. Known names: {list(KNOWN_RATE_COLUMNS)}.'
         )
     logger.info(f'Using rate column {candidates[0]} from {path}')
     return candidates[0]
@@ -105,11 +105,11 @@ def load_mu_for_chrom(mu_path, chrom, pos_filter):
             'Reading --mu-file requires pyarrow. Install it with `pip install pyarrow`.'
         )
 
-    schema_names = pq.ParquetFile(mu_path).schema_arrow.names
-    rate_col = identify_rate_column(schema_names, mu_path)
+    column_names = pq.ParquetFile(mu_path).schema_arrow.names
+    rate_col = identify_rate_column(column_names, mu_path)
 
     columns = ['chrom', 'pos', 'ref', 'alt', rate_col]
-    if 'adjusted' in schema_names:
+    if 'adjusted' in column_names:
         columns.append('adjusted')
 
     table = pq.read_table(mu_path, columns=columns, filters=[('chrom', '=', chrom)])
