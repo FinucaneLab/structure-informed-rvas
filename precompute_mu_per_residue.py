@@ -28,6 +28,8 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
+from read_data import identify_rate_column
+
 BASES = {'A': 0, 'C': 1, 'G': 2, 'T': 3}
 
 
@@ -50,14 +52,8 @@ def main():
     out = args.out or os.path.join(ref_dir, 'mu_per_residue_gnomad.parquet')
     h5_path = os.path.join(ref_dir, 'all_missense_variants_gr38.h5')
 
-    rate_col = 'roulette_rate'
     names = pq.ParquetFile(mu_file).schema_arrow.names
-    if rate_col not in names:
-        cands = [c for c in names if 'rate' in c.lower() or c.lower() in ('mu', 'u')
-                 or c.lower().startswith('mu_')]
-        if len(cands) != 1:
-            raise ValueError(f'Could not identify a rate column in {mu_file}: {names}')
-        rate_col = cands[0]
+    rate_col = identify_rate_column(names, mu_file)
 
     with h5py.File(h5_path, 'r') as f:
         chroms = sorted({k.split('_')[0] for k in f.keys() if f'{k.split("_")[0]}_pos' in f})

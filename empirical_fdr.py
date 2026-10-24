@@ -235,9 +235,24 @@ def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file
     # Apply both corrections
     df_results = _apply_corrections(df_pvals, false_discoveries, fwer, mu_mode)
     
-    # Add gene name
+    # Add gene name, one row per accession.
+    #
+    # 67 accessions in the guide carry several gene names: paralogues whose protein
+    # sequence is identical, so UniProt gives them one accession -- HBA1/HBA2, and the
+    # histone H3 and H4 clusters. A plain left-merge duplicates every result row once
+    # per name. Worse, in mutation-rate mode _merge_test_results then inner-joins two
+    # already-duplicated tables, squaring it: 14 names became 196 rows per neighborhood.
+    #
+    # The corrections themselves are computed above, before this merge, so FDR and FWER
+    # values were never affected -- but the output table had duplicate rows, which
+    # double-counts in anything that aggregates over it. Collapse to one row and keep
+    # every name.
     df_gene = pd.read_csv(f'{reference_dir}/protein_sequence_guide.tsv', sep='\t')
-    df_results = df_results.merge(df_gene[['gene_name', 'uniprot_id']], how='left', on='uniprot_id')
+    df_gene = (df_gene[['uniprot_id', 'gene_name']].dropna().drop_duplicates()
+               .groupby('uniprot_id')['gene_name']
+               .apply(lambda names: '/'.join(sorted(names)))
+               .reset_index())
+    df_results = df_results.merge(df_gene, how='left', on='uniprot_id')
     
     # Summarize and return results
     summarize_results(df_results, fdr_cutoff)

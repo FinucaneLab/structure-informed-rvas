@@ -19,7 +19,9 @@ neighborhood sits at X_i ~= lambda_hat * M_i, so Test A does not call it.
 
 Both tests are one-sided (upper tail). Each is corrected separately by the existing
 empirical FDR/FWER machinery; a neighborhood passes when it passes both, which is
-recorded as fdr_max = max(fdr_poisson, fdr_binomial) and likewise for FWER.
+recorded as fdr = max(fdr_poisson, fdr_binomial) and likewise for fwer. Those two
+carry the same names the case/control scan uses, so a reader does not need to know
+which null produced a table; fdr_poisson / fdr_binomial remain for inspection.
 
 M_i must be the summed rate of ALL possible missense SNVs in the neighborhood, so it
 comes from the precomputed per-residue table (precompute_mu_per_residue.py), not from
@@ -36,10 +38,12 @@ import numpy as np
 import pandas as pd
 from scipy.stats import poisson, binom
 
-from utils import get_adjacency_matrix, write_dataset
+from utils import (get_adjacency_matrix, write_dataset, check_keep_mask,
+                   build_conditioning_mask)
 from logger_config import get_logger
 from empirical_fdr import compute_fdr
-from scan_test import MULTI_RADII_SMALL, MULTI_RADII_BIG, P_FLOOR
+from scan_test import (MULTI_RADII_SMALL, MULTI_RADII_BIG, P_FLOOR,
+                       DEFAULT_MIN_RETAINED, neutralized_positions, _neutralize)
 
 logger = get_logger(__name__)
 
@@ -147,8 +151,10 @@ def estimate_lambda(df_rvas, df_mu, rate_calibration, calibration_genes=None, n_
         f'missense variants in {len(genes)} genes)'
     )
     if n_trios is not None and n_trios > 0:
-        # lambda_hat itself is not interpretable when the rate model is relative (as
-        # Roulette's is), so check the quantity that is: de novo missense per trio.
+        # lambda_hat itself is not interpretable when the rate model is relative, which
+        # both gnomAD's mu_snp and Roulette's rates are (on different scales, so
+        # lambda_hat is not comparable between them either). Check the quantity that is
+        # interpretable: de novo missense per trio.
         per_trio = sum_x / n_trios
         logger.info(f'Sanity check: {per_trio:.3f} de novo missense per trio '
                     f'({sum_x:.0f} over {n_trios} trios); expect roughly 0.6-1.1')
@@ -177,6 +183,25 @@ def restrict_to_structure(df, n_res, uniprot_id):
     return df
 
 
+def apply_conditioning(x_obs, m, keep):
+    """
+    Mask conditioned-out residues in the observed counts AND in the mutational
+    opportunity, which have to move together.
+
+    Zeroing only x_obs would leave both nulls still expecting de novos at residues whose
+    variants were just removed: every neighborhood overlapping the conditioned region
+    would look depleted, and the neighborhoods beside it -- exactly where a second
+    independent signal would sit -- would lose the power to show anything.
+
+    Positional, like every per-residue array here: keep[i] refers to residue i + 1, and
+    nothing is dropped, so the arrays keep their length.
+    """
+    if keep is None:
+        return x_obs, m
+    col = keep[:, np.newaxis]
+    return x_obs * col, m * col
+
+
 def sum_per_residue(df, colname, n_res, dtype=float):
     """Sum a per-variant column onto residues. Returns an (n_res, 1) column vector."""
     out = np.zeros((n_res, 1), dtype=dtype)
@@ -194,27 +219,26 @@ def sum_per_residue(df, colname, n_res, dtype=float):
 # --n-sims.
 # ---------------------------------------------------------------------------
 
-def poisson_pval_lookup(expected, x_max, direction='enrichment'):
+def poisson_pval_lookup(expected, x_max):
     """
-    L[i, k] = P(X >= k) for X ~ Poisson(expected[i]), or P(X <= k) for depletion.
-    Shape (n_res, x_max + 1).
+    L[i, k] = P(X >= k) for X ~ Poisson(expected[i]). Shape (n_res, x_max + 1).
+
+    Upper tail only: the test is for neighborhoods carrying MORE de novos than the rate
+    model predicts, and the tool does not test depletion in either null.
     """
     k = np.arange(x_max + 1)
     expected = np.maximum(np.asarray(expected, dtype=float), P_FLOOR)
-    if direction == 'depletion':
-        return poisson.cdf(k[np.newaxis, :], expected[:, np.newaxis])
     return poisson.sf(k[np.newaxis, :] - 1, expected[:, np.newaxis])
 
 
-def binomial_pval_lookup(p_nbhd, n_trials, x_max, direction='enrichment'):
+def binomial_pval_lookup(p_nbhd, n_trials, x_max):
     """
-    L[i, k] = P(X >= k) for X ~ Binomial(n_trials, p_nbhd[i]), or P(X <= k) for depletion.
-    Shape (n_res, x_max + 1).
+    L[i, k] = P(X >= k) for X ~ Binomial(n_trials, p_nbhd[i]). Shape (n_res, x_max + 1).
+
+    Upper tail only, as for the Poisson lookup.
     """
     k = np.arange(x_max + 1)
     p_nbhd = np.clip(np.asarray(p_nbhd, dtype=float), 0.0, 1.0)
-    if direction == 'depletion':
-        return binom.cdf(k[np.newaxis, :], n_trials, p_nbhd[:, np.newaxis])
     return binom.sf(k[np.newaxis, :] - 1, n_trials, p_nbhd[:, np.newaxis])
 
 
@@ -270,8 +294,7 @@ def simulate_multinomial_null(m, n_g, n_sims, rng):
 # core computation
 # ---------------------------------------------------------------------------
 
-def _pvals_for_radius(adjacency_matrix, x_a, x_b, m, lambda_hat, n_g, m_g,
-                      direction='enrichment'):
+def _pvals_for_radius(adjacency_matrix, x_a, x_b, m, lambda_hat, n_g, m_g):
     """
     Returns (p_a, p_b, x_nbhd_obs, exp_a, exp_b) for one adjacency matrix.
     x_a / x_b are (n_res, n_sims + 1) with the observed counts in column 0.
@@ -288,8 +311,8 @@ def _pvals_for_radius(adjacency_matrix, x_a, x_b, m, lambda_hat, n_g, m_g,
     p_frac = m_nbhd / m_g if m_g > 0 else np.zeros_like(m_nbhd)
     exp_b = n_g * p_frac
 
-    lookup_a = poisson_pval_lookup(exp_a, int(nbhd_a.max()), direction)
-    lookup_b = binomial_pval_lookup(p_frac, n_g, int(nbhd_b.max()), direction)
+    lookup_a = poisson_pval_lookup(exp_a, int(nbhd_a.max()))
+    lookup_b = binomial_pval_lookup(p_frac, n_g, int(nbhd_b.max()))
 
     rows = np.arange(adjacency_matrix.shape[0])[:, np.newaxis]
     p_a = lookup_a[rows, nbhd_a]
@@ -317,11 +340,18 @@ def compute_all_pvals_mu(
         radius=15,
         pae_cutoff=15,
         seed=None,
-        direction='enrichment',
+        keep_residues=None,
+        min_retained=DEFAULT_MIN_RETAINED,
 ):
     """
-    Returns (df_pvals_poisson, df_pvals_binomial, adjacency_matrix, mu_coverage)
-    for one protein.
+    Returns (df_pvals_poisson, df_pvals_binomial, mu_coverage) for one protein.
+
+    `keep_residues` conditions the scan on one or more neighborhoods already called: an
+    (n_res,) bool array, entry i for residue i+1, False where the residue is masked out.
+    Masking zeroes the mutational opportunity m as well as the observed counts. Zeroing
+    only the counts would leave both nulls still expecting de novos at residues whose
+    variants were just removed, manufacturing depletion in every neighborhood that
+    overlaps the conditioned region and destroying power in the ones next to it.
     """
     rng = np.random.default_rng(seed)
 
@@ -337,24 +367,48 @@ def compute_all_pvals_mu(
 
     n_res = adj_matrices[radii[0]].shape[0]
     df = restrict_to_structure(df, n_res, uniprot_id)
+    keep = check_keep_mask(keep_residues, n_res, uniprot_id)
 
     x_obs = sum_per_residue(df, 'ac_case', n_res, dtype=int)
     # Opportunity comes from the full possible-missense universe, not from the observed
     # variants in df -- see the module docstring.
     m, mu_coverage = mu_vector_for_protein(mu_lookup, uniprot_id, n_res)
+    # Masked before the totals are taken, so N_g and M_g both describe the
+    # unconditioned remainder of the gene and the two nulls draw only where a variant
+    # could still have been observed.
+    x_obs, m = apply_conditioning(x_obs, m, keep)
     n_g = int(x_obs.sum())
     m_g = float(m.sum())
     if m_g <= 0:
-        raise ValueError(f'total mutation rate over the structure is zero for {uniprot_id}')
+        raise ValueError(
+            f'total mutation rate over the structure is zero for {uniprot_id}'
+            + (' after conditioning masked its residues' if keep is not None else '')
+        )
 
     # Observed counts sit in column 0 of both matrices, so the two tests see identical
     # observed data and differ only in their null.
     x_a = np.hstack([x_obs, simulate_poisson_null(m, lambda_hat, n_sims, rng)])
     x_b = np.hstack([x_obs, simulate_multinomial_null(m, n_g, n_sims, rng)])
 
-    per_radius = {r: _pvals_for_radius(adj_matrices[r], x_a, x_b, m, lambda_hat, n_g, m_g,
-                                       direction)
+    per_radius = {r: _pvals_for_radius(adj_matrices[r], x_a, x_b, m, lambda_hat, n_g, m_g)
                   for r in radii}
+
+    if keep is not None:
+        # Neutralize per radius, before any combining, and identically for the observed
+        # and null columns -- the rule reads only the structure and the mask, never the
+        # counts, so the empirical null stays calibrated.
+        dead_any = np.zeros(n_res, dtype=bool)
+        for r in radii:
+            dead_r = neutralized_positions(adj_matrices[r], keep, min_retained)
+            p_a_r, p_b_r, nbhd_r, exp_a_r, exp_b_r = per_radius[r]
+            per_radius[r] = (_neutralize(p_a_r, dead_r), _neutralize(p_b_r, dead_r),
+                             nbhd_r, exp_a_r, exp_b_r)
+            dead_any |= dead_r
+        logger.info(
+            f'{uniprot_id}: conditioning masks {int((~keep).sum())} of {n_res} residues '
+            f'({m_g:.4g} of the gene mutation rate left, {n_g} de novos); '
+            f'{int(dead_any.sum())} centres not re-tested'
+        )
 
     if multi:
         p_a, best_a = _harmonic_mean_combine([per_radius[r][0] for r in radii])
@@ -367,12 +421,10 @@ def compute_all_pvals_mu(
         nbhd_b_obs, exp_b = nbhd_by_radius[best_b, pos_idx], exp_b_by_radius[best_b, pos_idx]
         radius_a = np.array([radii[i] for i in best_a], dtype=float)
         radius_b = np.array([radii[i] for i in best_b], dtype=float)
-        adjacency_matrix = adj_matrices.get(15, adj_matrices[radii[0]])
     else:
         p_a, p_b, nbhd_obs, exp_a, exp_b = per_radius[radii[0]]
         nbhd_a_obs = nbhd_b_obs = nbhd_obs
         radius_a = radius_b = float(radii[0])
-        adjacency_matrix = adj_matrices[radii[0]]
 
     def _build(pval_matrix, nbhd_obs, expected, radius_col):
         pval_columns = ['p_value'] + [f'null_pval_{i}' for i in range(n_sims)]
@@ -386,7 +438,7 @@ def compute_all_pvals_mu(
 
     return (_build(p_a, nbhd_a_obs, exp_a, radius_a),
             _build(p_b, nbhd_b_obs, exp_b, radius_b),
-            adjacency_matrix, mu_coverage)
+            mu_coverage)
 
 
 def write_df_pvals_mu(results_dir, uniprot_id, df_pvals, pval_file, group):
@@ -436,16 +488,23 @@ def _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage
     Gene-level selection. Called AFTER estimate_lambda -- see the note there on why the
     order matters.
 
-    Applied as strictly greater than min_denovo, matching the existing 3DNT gene filter
-    in scan_test._filter_proteins_by_allele_count (which uses `> min_alleles`), so the
-    default of 5 requires at least 6 de novos.
+    Inclusive: min_denovo is the minimum, so the default of 5 admits a gene with exactly
+    5 de novos. scan_test._filter_proteins_by_allele_count means the same by
+    --min-alleles.
+
+    Measured on the ASD analysis, moving from "more than 5" to "at least 5" takes the
+    tested set from 805 genes to 1,267. Nothing is lost at FWER -- all 20 genes and all
+    227 neighborhoods survive -- and PDE4DIP is gained. At FDR it is 87 genes to 91:
+    nine drop out, every one of them from just under the line to just over (worst
+    0.0487 -> 0.0569), and thirteen newly admitted genes come in.
     """
     grouped = df_rvas.groupby('uniprot_id')['ac_case'].sum()
-    uniprot_id_list = grouped[grouped > min_denovo].index.tolist()
+    uniprot_id_list = grouped[grouped >= min_denovo].index.tolist()
 
     # A gene is only testable if it carries a nonzero total mutation rate. Genes with
     # rows in the table but zero total rate are those the rate model does not cover at
-    # all -- the Roulette file is autosomes only, so every chrX gene lands here.
+    # all. The default gnomAD rate file covers chrX; Roulette does not, so against a
+    # Roulette-derived table every chrX gene lands here.
     missing = [u for u in uniprot_id_list if u not in mu_lookup]
     zero_rate = [u for u in uniprot_id_list
                  if u in mu_lookup and mu_lookup[u][1].sum() <= 0]
@@ -453,9 +512,10 @@ def _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage
         logger.warning(f'{len(missing)} genes are absent from the rate table and are skipped')
     if zero_rate:
         logger.warning(
-            f'{len(zero_rate)} genes have zero total mutation rate and are skipped. The '
-            'Roulette rate file covers autosomes only, so chrX genes cannot be tested '
-            'with it; supply a rate file with chrX to include them.'
+            f'{len(zero_rate)} genes are present in the rate table but have zero total '
+            'mutation rate, and are skipped. If these are chrX genes, the rate table was '
+            'probably built from Roulette, which covers autosomes only; the default '
+            'gnomAD rate file includes chrX.'
         )
     skip = set(missing) | set(zero_rate)
     uniprot_id_list = [u for u in uniprot_id_list if u not in skip]
@@ -482,18 +542,26 @@ def _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage
 
     logger.info(
         f'Selected {len(uniprot_id_list)} of {len(grouped)} genes for analysis '
-        f'(more than {min_denovo} de novos each)'
+        f'(at least {min_denovo} de novos each)'
     )
     return uniprot_id_list
 
 
 def _process_proteins_batch_mu(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
                                results_dir, n_sims, pval_file, lambda_hat, mu_lookup,
-                               seed=None, max_residues=None, direction='enrichment'):
-    """Run both tests for each protein. Returns per-gene totals for the output table."""
+                               seed=None, max_residues=None,
+                               conditioning=None, min_retained=DEFAULT_MIN_RETAINED,
+                               seed_salt=None):
+    """
+    Run both tests for each protein. Returns per-gene totals for the output table.
+
+    `conditioning` maps uniprot_id -> [(aa_pos, radius), ...], the neighborhoods already
+    called in earlier rounds that this scan conditions on.
+    """
     pdb_file_pos_guide = f'{reference_dir}/pdb_pae_file_pos_guide.tsv'
     pdb_dir = f'{reference_dir}/pdb_files/'
     pae_dir = f'{reference_dir}/pae_files/'
+    conditioning = conditioning or {}
 
     # Skip very long proteins up front. get_distance_matrix_structure allocates an
     # n_res x n_res float matrix, which is 9.4 GB for titin (34,350 residues); without
@@ -522,15 +590,33 @@ def _process_proteins_batch_mu(df_rvas, uniprot_id_list, reference_dir, radius, 
         logger.info(f'Processing {uniprot_id} (protein {i+1} out of {n_proteins})')
         try:
             df = df_rvas[df_rvas.uniprot_id == uniprot_id]
+
+            keep_residues = None
+            entry = conditioning.get(uniprot_id)
+            if entry:
+                keep_residues, _, removed = build_conditioning_mask(
+                    pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id, entry, pae_cutoff
+                )
+                for key, n_removed in removed.items():
+                    what = ('component' if key == 'residues'
+                            else f'neighborhood of residue {key}')
+                    logger.info(f'{uniprot_id}: conditioning out {what} '
+                                f'({n_removed} residues)')
+
             # Derive a per-protein stream from the seed so the null draws stay
             # independent across proteins. The stream depends on the protein's index in
             # this batch, so a different gene split gives a given protein a different
             # stream; reproducing a run means re-running the same list in the same order.
             protein_seed = None if seed is None else [seed, i]
-            df_a, df_b, _, mu_coverage = compute_all_pvals_mu(
+            if protein_seed is not None and seed_salt is not None:
+                # Conditional rounds re-scan the same protein: without a per-round salt
+                # every round would replay the identical null draws.
+                protein_seed = protein_seed + [seed_salt]
+            df_a, df_b, mu_coverage = compute_all_pvals_mu(
                 df, pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id,
                 n_sims, lambda_hat, mu_lookup, radius, pae_cutoff, seed=protein_seed,
-                direction=direction,
+                keep_residues=keep_residues,
+                min_retained=min_retained,
             )
             write_df_pvals_mu(results_dir, uniprot_id, df_a, pval_file, POISSON_GROUP)
             write_df_pvals_mu(results_dir, uniprot_id, df_b, pval_file, BINOMIAL_GROUP)
@@ -562,11 +648,14 @@ def _merge_test_results(df_a, df_b, fdr_cutoff=0.05, fwer_cutoff=0.05):
               'exp_binomial', 'obs_exp_binomial', 'radius_binomial']
     merged = a.merge(b[keep_b], on=['uniprot_id', 'aa_pos'], how='inner')
 
-    # A neighborhood passes only if it passes both tests.
-    merged['fdr_max'] = merged[['fdr_poisson', 'fdr_binomial']].max(axis=1)
-    merged['fwer_max'] = merged[['fwer_poisson', 'fwer_binomial']].max(axis=1)
-    merged['sig_fwer_both'] = merged['fwer_max'] < fwer_cutoff
-    merged['sig_fdr_both'] = merged['fdr_max'] < fdr_cutoff
+    # A neighborhood passes only if it passes both tests, so the reported fdr/fwer is
+    # the max over the two. They are named `fdr` and `fwer` -- the same names the
+    # case/control scan uses -- so that everything downstream reads one set of column
+    # names in both modes; the per-test columns stay alongside for inspection.
+    merged['fdr'] = merged[['fdr_poisson', 'fdr_binomial']].max(axis=1)
+    merged['fwer'] = merged[['fwer_poisson', 'fwer_binomial']].max(axis=1)
+    merged['sig_fwer_both'] = merged['fwer'] < fwer_cutoff
+    merged['sig_fdr_both'] = merged['fdr'] < fdr_cutoff
     return merged
 
 
@@ -582,8 +671,8 @@ def _compute_both_fdrs(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pv
 
 
 def summarize_mu_results(df_results, fdr_cutoff):
-    top = df_results.loc[df_results.groupby('uniprot_id')['fdr_max'].idxmin()]
-    sig = top[top.fdr_max < fdr_cutoff].sort_values(by='fdr_max')
+    top = df_results.loc[df_results.groupby('uniprot_id')['fdr'].idxmin()]
+    sig = top[top.fdr < fdr_cutoff].sort_values(by='fdr')
     logger.info('')
     logger.info(f'{len(sig)} of {len(top)} proteins have a neighborhood passing BOTH tests '
                 f'at FDR < {fdr_cutoff}')
@@ -626,7 +715,10 @@ def mutation_rate_scan_test(
     min_mu_coverage=0.0,
     max_residues=10000,
     simulate_null=False,
-    direction='enrichment',
+    conditioning=None,
+    min_retained=DEFAULT_MIN_RETAINED,
+    seed_salt=None,
+    gene_list=None,
 ):
     """3D neighborhood test against a mutation-rate null. See module docstring."""
 
@@ -639,9 +731,6 @@ def mutation_rate_scan_test(
 
     logger.info(f'Input dataset contains {len(df_rvas)} variants across '
                 f'{df_rvas["uniprot_id"].nunique()} proteins')
-    if direction == 'depletion':
-        logger.info('Testing DEPLETION: lower-tail p-values, i.e. fewer variants in the '
-                    'neighborhood than the mutation rate predicts.')
 
     calibration_genes = None
     if rate_calibration_genes is not None:
@@ -674,14 +763,19 @@ def mutation_rate_scan_test(
         df_rvas = simulate_null_input(df_rvas, mu_lookup, lambda_hat, seed)
         lambda_hat = estimate_lambda(df_rvas, df_mu, rate_calibration, calibration_genes, n_trios)
 
-    uniprot_id_list = _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage)
-    if len(uniprot_id_list) == 0:
-        raise ValueError('No genes passed the --min-denovo filter; nothing to test.')
+    # A conditional round passes its own gene list so only the re-scanned genes are
+    # touched; everything else in the p-value file is carried over from the round before.
+    if gene_list is None:
+        uniprot_id_list = _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage)
+        if len(uniprot_id_list) == 0:
+            raise ValueError('No genes passed the --min-denovo filter; nothing to test.')
+    else:
+        uniprot_id_list = list(gene_list)
 
     gene_totals = _process_proteins_batch_mu(
         df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
         results_dir, n_sims, pval_file, lambda_hat, mu_lookup, seed, max_residues,
-        direction,
+        conditioning, min_retained, seed_salt,
     )
 
     with h5py.File(os.path.join(results_dir, pval_file), 'a') as fid:
@@ -690,12 +784,15 @@ def mutation_rate_scan_test(
         fid.attrs['rate_calibration'] = rate_calibration
         fid.attrs['n_sims'] = n_sims
         fid.attrs['min_denovo'] = min_denovo
-        fid.attrs['direction'] = direction
+        fid.attrs['direction'] = 'enrichment'
         if seed is not None:
             fid.attrs['seed'] = seed
 
     if no_fdr:
-        return
+        # Returned rather than dropped: these totals are computed from the conditioned
+        # arrays, so a conditional round needs them to report the n_g and m_g its own
+        # p-values were actually computed against.
+        return gene_totals
 
     fdr_filter = df_fdr_filter
     if fdr_filter is None:
@@ -711,3 +808,4 @@ def mutation_rate_scan_test(
 
     summarize_mu_results(df_results, fdr_cutoff)
     df_results.to_csv(f'{results_dir}/{fdr_file}', sep='\t', index=False)
+    return gene_totals

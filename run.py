@@ -1,4 +1,6 @@
 import argparse
+import sys
+
 import pandas as pd
 import numpy as np
 import os
@@ -8,7 +10,6 @@ from pathlib import Path
 from scan_test import scan_test
 from scan_test_cmh import scan_test_cmh, DEFAULT_SCREEN_CHI2
 from read_data import map_to_protein, filter_by_total_ac
-from pymol_code import make_movie_from_pse
 from logger_config import get_logger
 from utils import get_nbhd_info
 from annotation_test_permutation import run_annotation_test, read_table
@@ -132,6 +133,48 @@ def map_and_filter_rvas(
     return df_rvas, df_filter
 
 
+def remove_nbhd_conditioning(args):
+    """
+    Turn --remove-nbhd into the per-protein conditioning dict the scan takes.
+
+    The positions are literal residue numbers in one protein, so --uniprot-id has to
+    name exactly one. Previously the same positions were applied to every protein in
+    the run, which silently removed unrelated residues from every other gene.
+    """
+    if args.remove_nbhd is None:
+        return None
+    if args.uniprot_id is None:
+        raise ValueError('--remove-nbhd requires --uniprot-id: the positions are '
+                         'residue numbers in one specific protein')
+    if os.path.exists(args.uniprot_id):
+        uniprot_list = [x.rstrip() for x in open(args.uniprot_id).readlines() if x.strip()]
+    else:
+        uniprot_list = args.uniprot_id.split(',')
+    if len(uniprot_list) != 1:
+        raise ValueError(f'--remove-nbhd applies to a single protein, but --uniprot-id '
+                         f'names {len(uniprot_list)}')
+    radius = (15.0 if args.neighborhood_radius in ('multiple-small', 'multiple-big')
+              else args.neighborhood_radius)
+    if args.conditional_radius != 'best':
+        radius = float(args.conditional_radius)
+        if args.test_method == 'cmh':
+            # scan_test_cmh._remove_neighborhood ignores the per-centre radius and
+            # uses the adjacency matrix, which is built at --neighborhood-radius.
+            logger.warning(
+                f'--test-method cmh removes the --neighborhood-radius '
+                f'({args.neighborhood_radius}) neighborhood; --conditional-radius '
+                f'{radius} is ignored.'
+            )
+    elif args.neighborhood_radius in ('multiple-small', 'multiple-big'):
+        logger.warning(
+            'With a multi-radius scan there is no single neighborhood to remove; '
+            '--remove-nbhd is using radius 15. Set --conditional-radius to choose, or '
+            'use --conditional to let each hit use the radius its own scan picked.'
+        )
+    centers = [(int(p), radius) for p in args.remove_nbhd.split(',')]
+    return {uniprot_list[0]: centers}
+
+
 def _neighborhood_radius_type(value):
     if value in ('multiple-small', 'multiple-big'):
         return value
@@ -142,7 +185,13 @@ def _neighborhood_radius_type(value):
             f"Invalid neighborhood radius: '{value}'. Must be a number, 'multiple-small', or 'multiple-big'."
         )
 
-if __name__ == '__main__':
+def build_parser():
+    """
+    The command-line interface.
+
+    Split out so the parser can be built without running anything -- for --help,
+    for tests, and so a driver script can inspect or reuse it.
+    """
     parser=argparse.ArgumentParser()
     parser.add_argument(
         '--rvas-data-to-map',
@@ -185,6 +234,7 @@ if __name__ == '__main__':
         Pass the flag with no argument to use
         <reference-dir>/gnomad_mu_snp_by_variant.parquet. Switches on the
         mutation-rate null. Mutually exclusive with --mu-col.
+        A Roulette file can be given explicitly instead; note it has no chrX.
         '''
     )
     parser.add_argument(
@@ -204,9 +254,9 @@ if __name__ == '__main__':
         help='''
         Per-residue mutation rate table built by precompute_mu_per_residue.py, giving the
         summed rate over ALL possible missense variants at each residue. Required with
-        --mu-file; defaults to <reference-dir>/mu_per_residue_gnomad.parquet. This is what
-        makes the denominator the gene's real mutational opportunity rather than only the
-        variants present in the de novo file.
+        --mu-file; defaults to <reference-dir>/mu_per_residue_gnomad.parquet. This is
+        what makes the denominator the gene's real mutational opportunity rather than
+        only the variants present in the de novo file.
         '''
     )
     parser.add_argument(
@@ -227,18 +277,6 @@ if __name__ == '__main__':
         Replace the observed de novo counts with draws from the mutation rate model and
         run the full pipeline on them, as a null calibration check. P-values should be
         uniform and FDR should come out at its nominal level.
-        '''
-    )
-    parser.add_argument(
-        '--test-direction',
-        type=str,
-        default='enrichment',
-        choices=['enrichment', 'depletion'],
-        help='''
-        Which tail to test. 'enrichment' (default) asks whether a neighborhood holds more
-        variants than the mutation rate predicts; 'depletion' asks whether it holds fewer,
-        which is the direction selection acts in and the relevant one for variant classes
-        that have already been filtered by it.
         '''
     )
     parser.add_argument(
@@ -281,7 +319,7 @@ if __name__ == '__main__':
         default=5,
         help='''
         Minimum case allele count per gene for the mutation-rate test, applied as
-        strictly greater than this value (so the default of 5 requires at least 6),
+        inclusive, so the default of 5 admits a gene with exactly 5,
         matching the existing 3DNT gene filter.
         '''
     )
@@ -436,10 +474,109 @@ if __name__ == '__main__':
         type=str,
         default=None,
         help='''
-        Analogous to a conditional analysis: remove all case and control mutations in 
-        these neighborhood(s) in --uniprot-id. Can be a comma-separated list of positions
-        or a single position. This flag will automatically analyze only the protein 
-        in --uniprot-id.
+        One conditional round, with the neighborhood(s) to condition on given by hand:
+        mask every residue within the neighborhood of these position(s) and scan what is
+        left. Comma-separated list of positions, or a single position, in --uniprot-id,
+        which must name exactly one protein. Masking zeroes the residues in place -- and
+        under a mutation-rate null it zeroes their mutational opportunity too, so the
+        null does not keep expecting variants where they were just removed. With
+        --test-method cmh the variants are dropped instead, which comes to the same
+        thing there because the CMH test has no opportunity term. Use --conditional to
+        have the positions chosen and iterated automatically.
+        '''
+    )
+    parser.add_argument(
+        '--include-depletion',
+        action='store_true',
+        default=False,
+        help='''
+        Test both directions with the standard case/control 3DNT. By default a
+        neighborhood with fewer case variants than expected gets p = 1 and is never
+        called: the tool looks for clusters of case variants, and spending
+        multiple-testing burden on the opposite direction costs power. Setting this
+        restores the two-sided Fisher test, and with it the old behaviour. Has no effect
+        on the mutation-rate null, which only ever tests enrichment.
+        '''
+    )
+    parser.add_argument(
+        '--conditional',
+        action=argparse.BooleanOptionalAction,
+        default=None,   # None = auto: on unless an incompatible flag is present
+        help='''
+        Conditional analysis with --run-3dnt, ON BY DEFAULT; pass --no-conditional to
+        turn it off. Run the scan, then repeat it with each significant gene's called
+        COMPONENT masked out, until no further signal remains. A gene qualifies on
+        --conditional-gene-criterion (FWER by default) and its component is built from
+        every neighborhood passing --conditional-criterion (FDR), so the whole signal is
+        masked rather than only its best window. Per protein: only genes with a hit are
+        re-scanned. Writes <fdr-file stem>.components.tsv and .conditional.tsv alongside
+        the full exome-wide table for each round. Silently does not apply with
+        --fdr-only, --remove-nbhd or without --run-3dnt.
+        '''
+    )
+    parser.add_argument(
+        '--conditional-gene-criterion',
+        type=str,
+        default='fwer',
+        choices=['fdr', 'fwer'],
+        help='''
+        which correction decides whether a GENE is considered for conditioning at all
+        (default fwer). Its components are then built from the neighborhoods passing
+        --conditional-criterion, which is the looser member gate.
+        '''
+    )
+    parser.add_argument(
+        '--conditional-gene-cutoff',
+        type=float,
+        default=0.05,
+        help='cutoff for --conditional-gene-criterion (default 0.05)'
+    )
+    parser.add_argument(
+        '--conditional-max-rounds',
+        type=int,
+        default=5,
+        help='maximum number of conditional rounds after the unconditioned scan (default 5)'
+    )
+    parser.add_argument(
+        '--conditional-criterion',
+        type=str,
+        default='fdr',
+        choices=['fdr', 'fwer'],
+        help='''
+        which correction decides whether a neighborhood is called, and so whether it is
+        conditioned out in the next round. With a mutation-rate null this reads
+        the max over both tests, so passing requires passing both.
+        '''
+    )
+    parser.add_argument(
+        '--conditional-cutoff',
+        type=float,
+        default=None,
+        help='cutoff for --conditional-criterion. Defaults to --fdr-cutoff.'
+    )
+    parser.add_argument(
+        '--conditional-radius',
+        type=str,
+        default='best',
+        help='''
+        radius in Angstroms of the neighborhood removed around each position given to
+        --remove-nbhd. 'best' (default) takes the radius from --neighborhood-radius.
+        The mask is built before any scan has run, so there is no per-position chosen
+        radius to use: under --neighborhood-radius multiple-small/multiple-big, 'best'
+        falls back to 15 with a warning, and you should set this flag explicitly.
+        Conditional analysis does not use this: it masks a component's own residue set,
+        recorded in the components file. --test-method cmh ignores it too, and removes
+        the --neighborhood-radius neighborhood instead.
+        '''
+    )
+    parser.add_argument(
+        '--conditional-min-retained',
+        type=float,
+        default=0.5,
+        help='''
+        after masking, a position is only re-tested if at least this fraction of its
+        neighborhood's residues survive (default 0.5). Positions mostly inside the
+        conditioned region are re-reporting the same signal through a narrower window.
         '''
     )
     parser.add_argument(
@@ -471,32 +608,20 @@ if __name__ == '__main__':
         '''
     )
     parser.add_argument(
-        '--permute',
-        action='store_true',
-        default=False,
+        '--min-alleles',
+        type=int,
+        default=5,
         help='''
-        Permute case/control allele counts within each gene (uniprot_id) before saving
-        with --save-df-rvas. Within each gene the total case and control allele counts are
-        preserved; individual variant counts are redrawn from the hypergeometric distribution
-        (equivalent to shuffling allele labels at random). Requires --save-df-rvas.
-        '''
-    )
-    parser.add_argument(
-        '--permute-gene-filter',
-        type=str,
-        default=None,
-        help='''
-        Comma-separated list of filter files (same format as --df-filter) whose uniprot_id
-        columns are intersected to define the set of genes to permute. Only variants in those
-        genes are written to the --save-df-rvas output; all variants per gene are retained
-        (no position-level filtering). Requires --permute.
+        Minimum case and control alleles a gene needs to be analyzed by the standard
+        case/control 3DNT, inclusive -- the default of 5 admits a gene with exactly 5 of
+        each. The mutation-rate null uses --min-denovo, which means the same thing.
         '''
     )
     parser.add_argument(
         '--ignore-ac',
         action='store_true',
         default=False,
-        help='count every variant only once',
+        help='analyze case-only and control-only variants; count every variant only once',
     )
     parser.add_argument(
         '--dont-remove-common',
@@ -521,18 +646,6 @@ if __name__ == '__main__':
         --visualization, --get-nbhd, --remove-nbhd, and optionall
         --save-df-rvas.
         '''
-    )
-    parser.add_argument(
-        '--make_movie',
-        action='store_true',
-        default=False,
-        help='make movie from a Pymol session file',
-    )
-    parser.add_argument(
-        '--pse',
-        type=str,
-        default=None,
-        help='Pymol session to make a movie from'
     )
     parser.add_argument(
         '--aa-pos',
@@ -567,7 +680,17 @@ if __name__ == '__main__':
         the columns used as ids (default all).
         '''
     )
-    args = parser.parse_args()
+    return parser
+
+
+def validate_args(args):
+    """
+    Check the argument combination and fill in what is derived from it.
+
+    Mutates `args` in place -- it resolves --pval-file from --fdr-file, picks a seed,
+    and settles whether conditional analysis applies -- then returns it, so a caller
+    can do `args = validate_args(build_parser().parse_args())`.
+    """
 
     # Derive pval file name from fdr file name if not explicitly set
     if args.pval_file is None:
@@ -610,6 +733,90 @@ if __name__ == '__main__':
     if not (0 < args.fdr_cutoff < 1):
         raise ValueError(f"FDR cutoff must be between 0 and 1, got {args.fdr_cutoff}")
 
+    # Conditional analysis is on by default, so an incompatible flag must switch it off
+    # quietly rather than fail: a command that was valid before this became the default
+    # must stay valid. An EXPLICIT --conditional still errors, because then the user has
+    # asked for two things that cannot both happen.
+    conditional_requested = args.conditional is True
+    incompatible = None
+    if not args.run_3dnt:
+        incompatible = 'it requires --run-3dnt'
+    elif args.fdr_only:
+        incompatible = 'it re-runs the scan each round, so it cannot be combined with --fdr-only'
+    elif args.remove_nbhd is not None:
+        incompatible = 'it chooses what to condition on, so it cannot be combined with --remove-nbhd'
+    elif args.test_method == 'cmh':
+        # conditional_scan drives scan_test or mutation_rate_scan_test; there is no CMH
+        # backend. Without this the conditional branch -- which precedes the CMH branch
+        # and is now on by default -- would silently run the unstratified Fisher scan
+        # for a command that asked for CMH.
+        incompatible = 'there is no CMH backend for it, so --test-method cmh would silently run the unstratified test'
+    elif args.no_fdr:
+        # Each round needs the corrected p-values to decide what to condition on next,
+        # so --no-fdr would leave it nothing to work from. The plain --run-3dnt branch
+        # honours --no-fdr; conditional analysis cannot.
+        incompatible = 'it needs each round\'s FDR to choose what to condition on, so it cannot be combined with --no-fdr'
+
+    if incompatible is not None:
+        if conditional_requested:
+            raise ValueError(f"--conditional cannot be used here: {incompatible}")
+        args.conditional = False
+    elif args.conditional is None:
+        args.conditional = True
+        logger.info('Conditional analysis is on by default; pass --no-conditional to skip it')
+
+    if args.conditional:
+        if args.conditional_max_rounds < 1:
+            raise ValueError(f"--conditional-max-rounds must be at least 1, got "
+                             f"{args.conditional_max_rounds}")
+        if args.conditional_cutoff is not None and not (0 < args.conditional_cutoff < 1):
+            raise ValueError(f"--conditional-cutoff must be between 0 and 1, got "
+                             f"{args.conditional_cutoff}")
+        if not (0 < args.conditional_gene_cutoff < 1):
+            raise ValueError(f"--conditional-gene-cutoff must be between 0 and 1, got "
+                             f"{args.conditional_gene_cutoff}")
+
+    # Outside the --conditional block on purpose: --remove-nbhd sets args.conditional
+    # False above and is the only other consumer of these two, so validating them
+    # there would leave them unchecked on the one path that still reads them.
+    # --conditional-min-retained is the dangerous one: it reaches neutralized_positions
+    # as min_retained either way, and an out-of-range value is not rejected, it is
+    # obeyed -- 5 kills every centre, so every p-value is 1.0 and the results table
+    # comes out empty with no error at all.
+    if not (0 <= args.conditional_min_retained <= 1):
+        raise ValueError(f"--conditional-min-retained must be between 0 and 1, got "
+                         f"{args.conditional_min_retained}")
+    if args.conditional_radius != 'best':
+        try:
+            args.conditional_radius = float(args.conditional_radius)
+        except (TypeError, ValueError):
+            raise ValueError(f"--conditional-radius must be 'best' or a number, got "
+                             f"{args.conditional_radius}")
+        if args.conditional_radius <= 0:
+            raise ValueError("--conditional-radius must be positive")
+
+    # At least 1, not just non-negative: the guard in _process_proteins_batch is
+    # `sum(ac_case) < min_alleles`, so 0 admits a gene with no case alleles at all --
+    # and read_p_values then divides by that count, filling `ratio` with inf and nan
+    # instead of raising. --min-denovo is checked where the mutation-rate block
+    # validates its own flags.
+    if args.min_alleles < 1:
+        raise ValueError(f"--min-alleles must be at least 1, got {args.min_alleles}")
+
+    # Fail before map_and_filter_rvas reads and maps the whole input file: these are
+    # argument errors, and remove_nbhd_conditioning is not reached until main().
+    if args.remove_nbhd is not None:
+        if args.uniprot_id is None:
+            raise ValueError('--remove-nbhd requires --uniprot-id: the positions are '
+                             'residue numbers in one specific protein')
+        if os.path.exists(args.uniprot_id):
+            n_proteins = len([x for x in open(args.uniprot_id).readlines() if x.strip()])
+        else:
+            n_proteins = len(args.uniprot_id.split(','))
+        if n_proteins != 1:
+            raise ValueError(f'--remove-nbhd applies to a single protein, but '
+                             f'--uniprot-id names {n_proteins}')
+
     if args.run_3dnt and args.test_method == 'cmh' and not args.fdr_only:
         if args.stratum_col is None:
             raise ValueError("--test-method cmh requires --stratum-col")
@@ -626,7 +833,6 @@ if __name__ == '__main__':
             raise ValueError(
                 "--test-method cmh cannot be combined with --mu-col/--mu-file"
             )
-
     # Check required directories exist
 
     if args.reference_dir and not os.path.exists(args.reference_dir):
@@ -636,10 +842,6 @@ if __name__ == '__main__':
         logger.info(f"Creating results directory: {args.results_dir}")
         os.makedirs(args.results_dir, exist_ok=True)
 
-    if args.permute and args.save_df_rvas is None:
-        raise ValueError("--permute requires --save-df-rvas")
-    if args.permute_gene_filter is not None and not args.permute:
-        raise ValueError("--permute-gene-filter requires --permute")
     if args.pre_mapped_rvas is not None and args.rvas_data_to_map is not None:
         raise ValueError("--pre-mapped-rvas and --rvas-data-to-map are mutually exclusive")
 
@@ -686,6 +888,23 @@ if __name__ == '__main__':
                     f"--reference-dir {args.reference_dir}"
                 )
 
+    return args
+
+
+def main(argv=None):
+    """
+    Run one analysis. `argv` defaults to sys.argv[1:].
+
+    Returns 0 on success. Raises on an unusable argument combination, which is how
+    the CLI reports it too.
+    """
+    args = validate_args(build_parser().parse_args(argv))
+
+    # Which null is in play. validate_args works this out too, for its own checks; it is
+    # cheap and derived purely from the arguments, so it is recomputed rather than
+    # smuggled across on the namespace.
+    mutation_rate_mode = (args.mu_col is not None) or (args.mu_file is not None)
+
     df_rvas, df_filter = map_and_filter_rvas(
         args.rvas_data_to_map,
         args.pre_mapped_rvas,
@@ -722,35 +941,6 @@ if __name__ == '__main__':
     did_nothing = True
 
     if args.save_df_rvas is not None:
-        if args.permute:
-            logger.info("Permuting case/control labels within each gene (hypergeometric)")
-            if args.permute_gene_filter is not None:
-                filter_files = args.permute_gene_filter.split(',')
-                gene_sets = [
-                    set(pd.read_csv(f, sep='\t')['uniprot_id'].unique())
-                    for f in filter_files
-                ]
-                permute_uniprot_ids = gene_sets[0].intersection(*gene_sets[1:])
-                df_rvas = df_rvas[df_rvas['uniprot_id'].isin(permute_uniprot_ids)].reset_index(drop=True)
-                logger.info(f"Restricting permutation to {len(permute_uniprot_ids)} genes from --permute-gene-filter")
-            rng = np.random.default_rng()
-            for uniprot, idx in df_rvas.groupby('uniprot_id').groups.items():
-                ac_case = df_rvas.loc[idx, 'ac_case'].values.astype(int)
-                ac_control = df_rvas.loc[idx, 'ac_control'].values.astype(int)
-                n_each = ac_case + ac_control
-                # Explode: one entry per allele across all variants, 1=case 0=control
-                labels = np.repeat([1, 0], [ac_case.sum(), ac_control.sum()])
-                rng.shuffle(labels)
-                # Group back: count case alleles per variant
-                ends = np.cumsum(n_each)
-                starts = np.concatenate([[0], ends[:-1]])
-                new_ac_case = np.array([labels[s:e].sum() for s, e in zip(starts, ends)])
-                df_rvas.loc[idx, 'ac_case'] = new_ac_case
-                df_rvas.loc[idx, 'ac_control'] = n_each - new_ac_case
-            # Remove any variants that appear in more than one gene
-            counts = df_rvas['Variant ID'].value_counts()
-            df_rvas = df_rvas[df_rvas['Variant ID'].isin(counts[counts == 1].index)].reset_index(drop=True)
-            logger.info(f"After removing multi-gene variants: {len(df_rvas)} variants")
         logger.info(f"Saving mapped RVAS dataframe to {args.save_df_rvas}")
         df_rvas.to_csv(args.save_df_rvas, sep='\t', index=False)
         did_nothing = False
@@ -763,7 +953,7 @@ if __name__ == '__main__':
             df_filter, args.fdr_file, args.pval_file, args.rate_calibration,
             args.rate_calibration_genes, args.min_denovo, args.n_trios, args.seed,
             args.mu_residue_file, args.mu_col is not None, args.min_mu_coverage,
-            args.max_residues, args.simulate_null_from_mu, args.test_direction,
+            args.max_residues, args.simulate_null_from_mu,
         )
         did_nothing = False
 
@@ -771,6 +961,51 @@ if __name__ == '__main__':
         from empirical_fdr import compute_fdr
         df_results = compute_fdr(args.results_dir, args.fdr_cutoff, df_filter, args.reference_dir, args.pval_file)
         df_results.to_csv(f'{args.results_dir}/{args.fdr_file}', sep='\t', index=False)
+        did_nothing = False
+
+    elif args.run_3dnt and args.conditional and args.test_method != 'cmh':
+        from conditional_scan import conditional_scan
+        mu_kwargs = None
+        if mutation_rate_mode:
+            mu_kwargs = dict(
+                rate_calibration=args.rate_calibration,
+                rate_calibration_genes=args.rate_calibration_genes,
+                min_denovo=args.min_denovo,
+                n_trios=args.n_trios,
+                seed=args.seed,
+                mu_residue_file=args.mu_residue_file,
+                mu_from_input=args.mu_col is not None,
+                min_mu_coverage=args.min_mu_coverage,
+                max_residues=args.max_residues,
+                simulate_null=args.simulate_null_from_mu,
+            )
+        conditional_scan(
+            df_rvas,
+            args.reference_dir,
+            args.neighborhood_radius,
+            args.pae_cutoff,
+            args.results_dir,
+            args.n_sims,
+            args.fdr_cutoff,
+            df_filter,
+            args.fdr_file,
+            args.pval_file,
+            args.seed,
+            mutation_rate_mode,
+            mu_kwargs=mu_kwargs,
+            max_rounds=args.conditional_max_rounds,
+            criterion=args.conditional_criterion,
+            cutoff=args.conditional_cutoff,
+            min_retained=args.conditional_min_retained,
+            ignore_ac=args.ignore_ac,
+            include_depletion=args.include_depletion,
+            min_alleles=args.min_alleles,
+            gene_criterion=args.conditional_gene_criterion,
+            gene_cutoff=args.conditional_gene_cutoff,
+            min_denovo=args.min_denovo,
+            default_radius=(15.0 if isinstance(args.neighborhood_radius, str)
+                            else float(args.neighborhood_radius)),
+        )
         did_nothing = False
 
     elif args.run_3dnt and mutation_rate_mode:
@@ -799,7 +1034,8 @@ if __name__ == '__main__':
             args.min_mu_coverage,
             args.max_residues,
             args.simulate_null_from_mu,
-            args.test_direction,
+            conditioning=remove_nbhd_conditioning(args),
+            min_retained=args.conditional_min_retained,
         )
         did_nothing = False
 
@@ -819,10 +1055,11 @@ if __name__ == '__main__':
             args.ignore_ac,
             args.fdr_file,
             args.pval_file,
-            args.remove_nbhd,
+            remove_nbhd_conditioning(args),
             args.stratum_col,
             args.cmh_screen_threshold,
             args.seed,
+            args.min_alleles,
         )
         did_nothing = False
 
@@ -842,8 +1079,11 @@ if __name__ == '__main__':
             args.ignore_ac,
             args.fdr_file,
             args.pval_file,
-            args.remove_nbhd,
+            remove_nbhd_conditioning(args),
             args.seed,
+            args.conditional_min_retained,
+            include_depletion=args.include_depletion,
+            min_alleles=args.min_alleles,
         )
         did_nothing = False
     
@@ -875,28 +1115,27 @@ if __name__ == '__main__':
         )
         did_nothing = False
 
-    elif args.make_movie:
-        if not (args.pse and args.results_dir):
-            raise ValueError("For making a movie, you must provide --pse and --results_dir")
-        make_movie_from_pse(args.results_dir, args.pse)
-        did_nothing = False
-
     elif args.get_nbhd:
         if not (args.uniprot_id and args.reference_dir and args.aa_pos):
             raise ValueError("For neighborhood residue lists, you must provide --uniprot_id, --reference_dir and --aa_pos")
         if args.neighborhood_radius in ('multiple-small', 'multiple-big'):
-            # Look up the per-position best radius recorded in the FDR file
+            # Look up the per-position best radius recorded in the FDR file. All
+            # three names, because which one holds it depends on the null: a
+            # case/control run writes `radius`, a mutation-rate run writes one per
+            # test. Checking only `radius` silently fell back to 15 for every
+            # mutation-rate table, which is the opposite of what this branch is for.
+            from utils import best_radius_for_hit
             fdr_path = os.path.join(args.results_dir, args.fdr_file)
-            nbhd_radius = 15.0  # fallback
+            nbhd_radius = 15.0  # fallback when the file or the row is missing
             if os.path.exists(fdr_path):
-                df_fdr_lookup = pd.read_csv(fdr_path, sep='\t')
-                if 'radius' in df_fdr_lookup.columns:
-                    row_match = df_fdr_lookup[
-                        (df_fdr_lookup['uniprot_id'] == args.uniprot_id) &
-                        (df_fdr_lookup['aa_pos'] == args.aa_pos)
-                    ]
-                    if len(row_match) > 0 and not pd.isna(row_match.iloc[0]['radius']):
-                        nbhd_radius = float(row_match.iloc[0]['radius'])
+                # int(): --aa-pos is parsed as a string, and comparing it against
+                # an int64 aa_pos column matches nothing, so the lookup silently
+                # returned the default no matter what the scan recorded.
+                nbhd_radius = best_radius_for_hit(
+                    pd.read_csv(fdr_path, sep='\t'), args.uniprot_id,
+                    int(args.aa_pos), default=nbhd_radius,
+                    radius_cols=('radius', 'radius_binomial', 'radius_poisson'),
+                )
         else:
             nbhd_radius = args.neighborhood_radius
         nbhd, cases, cntrls = get_nbhd_info(df_rvas, args.uniprot_id, args.aa_pos, args.reference_dir, nbhd_radius, args.pae_cutoff)
@@ -904,8 +1143,12 @@ if __name__ == '__main__':
         print(nbhd)
         print('Case Variants in neighborhood:')
         print(cases)
-        print('Control Variants in neighborhood:')
-        print(cntrls)
+        if cntrls is None:
+            print('No control cohort under the mutation-rate null; the case table '
+                  'carries each variant\'s mutation rate instead.')
+        else:
+            print('Control Variants in neighborhood:')
+            print(cntrls)
         did_nothing = False
     
     elif args.combine_pval_files is not None:
@@ -951,4 +1194,13 @@ if __name__ == '__main__':
         did_nothing=False
 
     if did_nothing:
-        raise Exception('no analysis specified')
+        raise ValueError(
+            'No analysis was selected. Pass one of --run-3dnt, --fdr-only, '
+            '--save-df-rvas, --get-nbhd or --combine-pval-files.'
+        )
+    return 0
+
+
+
+if __name__ == '__main__':
+    sys.exit(main())

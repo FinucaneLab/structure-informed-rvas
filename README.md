@@ -39,6 +39,25 @@ To set this up:
 
 All commands in this tutorial should be run from the working directory.
 
+### Calling the tool from Python
+
+`run.py` exposes `build_parser()`, `validate_args(args)` and `main(argv)`, so an
+analysis can be driven in process rather than through a subprocess:
+
+```python
+import run
+run.main([
+    '--rvas-data-to-map', 'input.tsv.gz',
+    '--reference-dir', 'sir-reference-data',
+    '--results-dir', 'results/',
+    '--run-3dnt',
+])
+```
+
+`main` returns 0 and raises `ValueError` on an unusable argument combination, which is
+what the command line reports too. Everything the CLI does is reachable this way; the
+two paths produce identical output.
+
 ## Basic 3DNT 
 
 ```
@@ -216,10 +235,16 @@ python structure-informed-rvas/visualize_and_interpret.py visualize \
   --reference-dir sir-reference-data/
 ```
 
+`visualize_and_interpret.py` is a subcommand tool, so plain `-h` lists only the
+subcommand names. Use `--help-all` to see every subcommand's options at once, or
+`visualize_and_interpret.py <subcommand> -h` for one.
+
 This produces three PSE files under `results_schema/pymol_visualizations/`:
 - `GRIA3_P42263_gray.pse`: plain grey cartoon of the protein structure
 - `GRIA3_P42263_mut.pse`: structure with mutations shown as spheres (blue = control-only, red = case-only, purple = both)
 - `GRIA3_P42263_ratio.pse`: structure colored by case/control neighborhood ratio (green = low, red = high)
+
+For a mutation-rate run the last two differ; see Visualizing mutation-rate results.
 
 Note: proteins whose structure spans multiple AlphaFold fragment files are skipped with a message.
 
@@ -232,6 +257,11 @@ To annotate a single protein, use the `annotate` subcommand:
 ```
 python structure-informed-rvas/visualize_and_interpret.py annotate Q09470 results_epi25/annotations/Q09470_features.tsv
 ```
+
+The family is capped at the 50 best-annotated members (`--max-family-members`). UniProt
+returns up to 500 for a large family and each one costs a full-length pairwise
+alignment, so the cap is most of the difference between a fast run and a slow one; the
+members it drops are the ones with least to transfer.
 
 This writes a TSV with one row per functional feature (feature type, positions, description, alignment confidence). Intermediate alignment results are cached so that re-runs across multiple proteins in the same family are fast.
 
@@ -285,6 +315,163 @@ python structure-informed-rvas/visualize_and_interpret.py run_all \
 
 For each significant protein this produces the PSE files described above, plus `_nbhd.tsv` and `_nbhd_features.tsv` files in `results_schema/neighborhoods/`. Use `--significance-column fwer` to filter by FWER instead of FDR. Use `--skip-visualization` to run only annotation and neighborhood steps without PyMOL.
 
+### Annotating components
+
+A `--conditional` run writes `<stem>.components.tsv`, and `run_all --components` makes
+that the unit of analysis instead of a single neighborhood:
+
+```
+python structure-informed-rvas/visualize_and_interpret.py run_all \
+  --components results_asd/asd.fdr.components.tsv \
+  --pval-file results_asd/asd.pvals.h5 \
+  --results-dir results_asd/ \
+  --reference-dir sir-reference-data/
+```
+
+This is usually what you want. A component is the whole set of overlapping neighborhoods
+reporting one signal, and it is what the conditional analysis actually masked; annotating
+only the best-scoring window describes a part of the finding and calls it the finding.
+`--fdr-file` is not needed -- the components file already holds the called components,
+so `--significance-column` and `--all-signals` do not apply.
+
+The residue set comes from the file rather than being recomputed, so **no structures are
+needed** for the tables (PyMOL is still needed for the PSEs). That also guarantees the
+region annotated is exactly the region conditioned on.
+
+Per component you get, in `neighborhoods/`:
+
+```
+{gene}_{uniprot}_c{id}_{lead}_component.tsv            per-residue counts
+{gene}_{uniprot}_c{id}_{lead}_component_features.tsv   features x component
+```
+
+and in `pymol_visualizations/`, `{gene}_{uniprot}_c{id}_{lead}_component.pse` -- the
+component highlighted on the greyed-out chain with its mutations as spheres. The
+whole-chain PSEs are still written once per protein.
+
+Both the `_mut.pse` and the `_component.pse` also get a **toggleable component object**
+drawn as a transparent orange sphere union, named `component_c{id}_{lead}`. Hide it with
+`disable component_c1_842` and bring it back with `enable`; a protein with several
+components gets one object each, so they can be shown independently. The camera is
+unchanged by it, so `_mut.pse` still opens framed on the whole protein.
+
+That envelope is **approximate**. One sphere per member centre is what a component
+literally is, but 100 overlapping transparent spheres render as an opaque blob, so the
+centres are thinned to roughly half a radius apart -- typically 13-27 spheres out of
+45-104, covering 91-100% of the component's residues. The authoritative residue set is
+`residues_pymol`, and the `_component.pse` colours exactly those residues; the spheres
+are for seeing at a glance where the signal sits. `COMPONENT_SPHERE_SEPARATION`,
+`_ALPHA` and `_COLOR` in `pymol_code.py` tune it.
+
+**The proportions are relative to the region.** `prop_denovo_in_feature` and
+`prop_mu_in_feature` are shares of the region being annotated, so the same feature scores
+differently against a component than against one neighborhood, and the two are not
+directly comparable. A component usually spans more non-domain sequence than a single
+window does, which lowers a domain's share of the opportunity and so sharpens the
+contrast: on the ASD data CDK13's ATP site goes from 2.2x enriched per-neighborhood to
+6.1x for the protein kinase domain per-component, with the Mg2+ site at 31x. Read these
+as "within this region", not as an absolute effect size.
+
+### Visualizing mutation-rate results
+
+Every subcommand above also accepts a mutation-rate p-value file and FDR table, and
+adapts to them automatically -- the layouts are detected from the files themselves, so
+no extra flag is needed to switch modes:
+
+```
+python structure-informed-rvas/visualize_and_interpret.py run_all \
+  --fdr-file results_asd/asd.fdr.tsv \
+  --pval-file results_asd/asd.pvals.h5 \
+  --results-dir results_asd/ \
+  --reference-dir sir-reference-data/
+```
+
+Four things differ from the case/control output.
+
+**Which test.** A mutation-rate run holds two sets of results, one per null. `--test`
+chooses which one drives the output, and defaults to `binomial` (Test B, the within-gene
+comparison and the test of interest). `--test poisson` draws Test A instead; its
+standalone significance is not calibrated (see Limitations), so use it as a
+direction-of-effect check rather than as a second opinion on which hits are real.
+
+**Significance column.** `--significance-column` defaults to `fdr`, as it does for a
+case/control run -- but under this null `fdr` is the max over both tests, so a
+neighborhood is only shown if it passed *both*. Hits are ranked by the selected test's
+p-value. Pass `--significance-column fdr_binomial` to rank on Test B alone.
+
+**No control class.** There is no control cohort, so `_mut.pse` shows de novo positions
+in one colour (darker where a residue carries more than one) rather than the
+blue/red/purple case/control scheme, and `_ratio.pse` is coloured by observed/expected
+against the selected null on a diverging scale: white at obs/exp = 1, red above, blue
+below, clipped at four-fold so one extreme neighborhood cannot flatten the rest.
+
+**Feature tables.** `_nbhd.tsv` carries `mu` (the residue's mutational opportunity)
+instead of `ac_control`, and `_nbhd_features.tsv` replaces `prop_case_only_in_feature`
+with two columns:
+
+| column | meaning |
+| --- | --- |
+| `prop_denovo_in_feature` | share of the neighborhood's de novos inside the feature |
+| `prop_mu_in_feature` | share of the neighborhood's mutational opportunity inside the feature |
+
+The second is the null for the first. A feature that simply covers more of the
+neighborhood, or covers a mutational hotspot, scores highly on `prop_denovo_in_feature`
+on its own; it is the gap between the two columns that says whether de novos are
+concentrated there beyond what the rate predicts.
+
+To visualize every independent signal from a `--conditional` run rather than one
+neighborhood per gene, point `--fdr-file` at the `.conditional.tsv` and pass
+`--all-signals`:
+
+```
+python structure-informed-rvas/visualize_and_interpret.py run_all \
+  --fdr-file results_asd/asd.fdr.conditional.tsv \
+  --pval-file results_asd/asd.pvals.h5 \
+  --results-dir results_asd/ \
+  --reference-dir sir-reference-data/ \
+  --all-signals
+```
+
+Under `--neighborhood-radius multiple-small`/`multiple-big` each hit records the radius
+the scan selected for it, and that radius is used when rebuilding the neighborhood;
+`--radius` is only the fallback for results that record none.
+
+### Direction: enrichment only
+
+The tool looks for clusters of **case** variants. A neighborhood carrying fewer case
+variants than expected gets `p = 1` and is never called.
+
+What this does *not* do is compute one-sided p-values. The cells that survive keep the
+two-sided value `fisher_exact` returns, so enriched p-values are identical to a
+two-sided run -- the two modes stay directly comparable, and the retained values are
+conservative relative to a true one-sided test. Because significance here is empirical,
+with observed and null p-values passing through the same lookup, that monotone
+difference cancels and the discovery set is what a one-sided test would give.
+
+For the standard case/control 3DNT this is applied where Fisher's exact p-values are
+built: the p-value lookup is a grid indexed by (cases in neighborhood, controls in
+neighborhood), and cells with odds ratio < 1 keep `p = 1` without `fisher_exact` ever
+being called for them. Putting it there matters for more than speed -- that same grid is
+indexed into by the observed data and by every `--n-sims` null column, so the empirical
+null is transformed identically and FDR/FWER stay calibrated for free. Applied anywhere
+downstream it would have to be applied to the nulls too, and forgetting would leave the
+null pool full of small depleted p-values the observed data can no longer produce: an
+anti-conservative FDR, and a silent one.
+
+`--include-depletion` restores the two-sided test for the case/control scan. The
+mutation-rate null only ever tests enrichment, so the flag has no effect there and
+there is no way to test depletion with it.
+
+The case/control scan analyzes genes with at least `--min-alleles` (default 5) case and
+control alleles each; the mutation-rate null uses `--min-denovo` the same way. Both are
+inclusive, so the default admits a gene with exactly 5.
+
+**This changes results.** Dropping a direction halves the multiple-testing burden, so
+re-running existing analyses gives more power, not the same answer. On a four-gene
+ClinVar run, FDR < 0.05 went from 1,315 neighborhoods to 793 and FWER < 0.05 from 526 to
+481 -- but every one of the 481 is enriched, against 454 of the 526. P-values for
+enriched neighborhoods are bit-for-bit unchanged; only the correction moves.
+
 ## 3DNT with a mutation-rate null
 
 The basic 3DNT compares case to control variants within a neighborhood. For de novo
@@ -315,11 +502,15 @@ unconstrained regions, and a neighborhood there looks enriched without being spe
 Such a neighborhood sits at `X_i ~ lambda_hat * M_i`, so Test A does not call it.
 
 Each test is corrected separately by the usual empirical FDR/FWER machinery, and a
-neighborhood passes when it passes both: `fdr_max = max(fdr_poisson, fdr_binomial)`,
-likewise `fwer_max`. On simulated data each test rejects at 4% under the true null,
-Test B inflates to 17% under regional constraint while Test A stays at 4%, Test A
-inflates to 80% under uniform gene-level enrichment while Test B stays at 4%, and
-requiring both still recovers an injected cluster with at least 98% power.
+neighborhood passes when it passes both, which is what the reported `fdr` holds:
+`fdr = max(fdr_poisson, fdr_binomial)`, likewise `fwer`. Those are the same column
+names the case/control scan writes, so nothing downstream has to know which null
+produced a table; the per-test `fdr_poisson` / `fdr_binomial` stay alongside.
+
+On simulated data each test rejects at 4% under the true null, Test B inflates to 17%
+under regional constraint while Test A stays at 4%, Test A inflates to 80% under
+uniform gene-level enrichment while Test B stays at 4%, and requiring both still
+recovers an injected cluster with at least 98% power.
 
 ### Setting up the rate reference
 
@@ -338,8 +529,9 @@ python structure-informed-rvas/precompute_mu_per_residue.py \
   --reference-dir sir-reference-data/
 ```
 
-This writes `sir-reference-data/mu_per_residue_gnomad.parquet` (11.1M residues, 19,576 genes,
-chrX included).
+This writes `sir-reference-data/mu_per_residue_gnomad.parquet` (11.1M residues,
+19,576 genes, chrX included). Point `--mu-file` at the Roulette parquet and `--out`
+at `mu_per_residue.parquet` to build the Roulette-derived table instead.
 
 ### Running it
 
@@ -355,9 +547,32 @@ python structure-informed-rvas/run.py \
   --fdr-file ASD_mutation_rate.fdr.tsv
 ```
 
-`--mu-file` with no argument uses `<reference-dir>/gnomad_mu_snp_by_variant.parquet`.
-The input file supplies only the observed de novo counts, in `ac_case` (or via
-`--ac-case-col`); no control column is needed.
+`--mu-file` with no argument uses `<reference-dir>/gnomad_mu_snp_by_variant.parquet`,
+and `--mu-residue-file` defaults to the matching
+`<reference-dir>/mu_per_residue_gnomad.parquet`. The input file supplies only the
+observed de novo counts, in `ac_case` (or via `--ac-case-col`); no control column is
+needed.
+
+#### Using Roulette instead
+
+Roulette rates are still shipped in the reference directory and can be used by naming
+both files explicitly:
+
+```
+--mu-file <reference-dir>/roulette_missenses_filtered.parquet \
+--mu-residue-file <reference-dir>/mu_per_residue.parquet
+```
+
+**Roulette has no chrX.** The file covers autosomes only, so every chrX gene gets a
+total mutation rate of zero and is skipped with a message. In the ASD analysis that
+costs 1,510 genes (2.83M possible missense variants, 421,858 residues) — including
+hits such as ALG13 and NAA10, which are only testable under gnomAD. Use Roulette for
+comparison against the default, not as the primary rate model.
+
+The two rate models are on different scales (per-residue `mu` has a median near 0.3
+under Roulette and around 2e-08 under gnomAD), so `lambda_hat` is not comparable
+between them and a `--rate-calibration fixed:` value from one must never be reused
+with the other.
 
 `--mu-col NAME` is the alternative: a rate column already present in the input file,
 for comparison against a rate reference. It is only valid if that file enumerates every
@@ -379,10 +594,12 @@ to 1 for a model that already gives absolute expected counts.
 
 ### Other flags
 
-- `--min-denovo` (default 5) minimum de novos per gene, applied as strictly greater
-  than, matching `scan_test._filter_proteins_by_allele_count`; so the default requires
-  at least 6. Note the existing gene filter is internally inconsistent — it gates on
-  `> 5` in one place and `< 5` in another — and this mode mirrors the binding one.
+- `--min-denovo` (default 5) minimum de novos per gene, inclusive: the default admits a
+  gene with exactly 5. `--min-alleles` is the same filter for the case/control scan.
+  Measured on the ASD analysis, "at least 5" tests 1,267 genes against 805 for "more
+  than 5". Nothing is lost at FWER — all 20 genes and all 227 neighborhoods survive, and
+  one more gene is gained — and at FDR it goes from 87 genes to 91, the nine that drop
+  out all moving from just under the line to just over it.
 - `--max-residues` (default 10000) skips very long proteins; the distance matrix scales
   as `n_res^2`, so titin alone would need 9.4 GB.
 - `--min-mu-coverage` (default 0, i.e. report only) skips genes whose rate coverage is
@@ -398,7 +615,7 @@ to 1 for a model that already gives absolute expected counts.
 
 Results are written per test into the `poisson` and `binomial` HDF5 groups of the
 p-value file, and merged into one TSV with `p_`/`fdr_`/`fwer_` columns for each test,
-plus `fdr_max`, `fwer_max`, per-gene `n_denovo_gene`, `mu_gene`, and `mu_coverage`.
+plus the combined `fdr`, `fwer`, and per-gene `n_denovo_gene`, `mu_gene`, `mu_coverage`.
 
 ### Splitting the scan across jobs
 
@@ -416,10 +633,10 @@ Combining warns if the chunks disagree on `lambda_hat`.
 
 ### Limitations
 
-- **The Roulette rate file covers autosomes only.** No chrX rates are available in it,
-  so 1,510 genes (2.83M possible missense variants, 421,858 residues) cannot be tested;
-  they are skipped with an explicit message. Supply a rate file including chrX to
-  include them.
+- **Rate coverage is not complete, and what is missing depends on the rate file.** The
+  default gnomAD file covers chrX; Roulette does not (see "Using Roulette instead"
+  above), and against a Roulette-derived table all 1,510 chrX genes are skipped with an
+  explicit message. The coverage figures below were measured on Roulette.
 - Autosomal rate coverage is 82–96% per chromosome (median ~92%, lowest on chr19), and
   the gaps cluster spatially within low-coverage genes. This costs power rather than
   biasing the tests: a variant's de novo count and its rate are dropped together, so
@@ -436,13 +653,13 @@ Combining warns if the chunks disagree on `lambda_hat`.
   1.50, and Test A's per-gene FWER came out at 14.3% against a nominal 5%.
 
   Read Test A as a direction-of-effect guard, not as significance. Two things follow.
-  Quote `fdr_binomial` / `fwer_binomial` and the combined `fdr_max` / `fwer_max`, never
+  Quote `fdr_binomial` / `fwer_binomial` and the combined `fdr` / `fwer`, never
   `fdr_poisson` on its own. And since Test A is the guard against regional constraint, a
   too-liberal Test A under-flags, so "passes Test B but not Test A" coming out empty is
   weak evidence rather than a demonstration that no hit is a constraint artifact.
 
   Test B is unaffected (4.3% on the same run) because conditioning on `N_g` cancels the
-  selection exactly, and `fdr_max < q` requires `fdr_binomial < q`, so the reported set
+  selection exactly, and `fdr < q` requires `fdr_binomial < q`, so the reported set
   is a subset of the Test B set and inherits its validity. Running without `--min-denovo`
   removes the issue at the cost of testing every gene.
 - FDR control over the *intersection* of two rejection sets is not guaranteed by the two
@@ -538,3 +755,214 @@ The stratum should define a group within which case/control labels are
 exchangeable under the null.  Examples include ancestry x cohort or ancestry x
 sequencing batch.  CMH conditions on the protein-wide case burden separately in
 each stratum; it does not estimate a parametric covariate effect.
+
+## Conditional analysis
+
+A gene can carry more than one 3D signal, but a single strong neighborhood makes that
+hard to see: every neighborhood overlapping it inherits its variants, so the second,
+third and fourth best hits in a gene are usually the same cluster viewed through
+slightly shifted windows. Conditional analysis answers the question directly. Call the
+signal, mask it out, and scan what is left.
+
+**This runs by default** with `--run-3dnt`, for both nulls. Pass `--no-conditional` to
+skip it. It also does not apply, silently, with `--fdr-only`, with `--remove-nbhd`, or
+without `--run-3dnt`.
+
+```
+python structure-informed-rvas/run.py \
+  --rvas-data-to-map input/SCHEMA_tutorial.tsv.gz \
+  --reference-dir sir-reference-data/ \
+  --results-dir results/ \
+  --run-3dnt
+```
+
+### Components: the unit that gets conditioned on
+
+The thing masked is a *component*, not a single neighborhood. One real signal is
+reported by every window that overlaps it -- in the ASD analysis the 20 genes with an
+FWER-significant neighborhood carry 746 FDR-significant neighborhoods between them --
+so masking only the best window leaves the rest of the same signal in place for the next
+round to re-find.
+
+Two neighborhoods join the same component when **they share at least one case-mutated
+residue**. The rule is about the mutations, not the geometry: plain residue overlap
+connects any two centres within roughly twice the radius whether or not a variant sits in
+the overlap, which chains distinct sites together across a domain. Requiring a shared
+mutated residue means the two windows are reporting the same variants, which is what
+makes them the same finding. Membership is transitive, so a run of windows walking along
+one cluster of de novos is one component.
+
+**Enriched neighborhoods only.** Components describe clusters of case variants, so
+neighborhoods carrying fewer case variants than expected are excluded and the count is
+logged. Since the scan is enrichment-only by default (see Direction below) this is a no-op on
+fresh runs; it matters when reading results files produced with `--include-depletion` or
+before that default existed. Enrichment is judged the way the test judges it -- observed
+against expected at fixed margins, i.e. odds ratio >= 1 -- not by the reported `ratio`
+column, which is regularized with pseudocounts and a global case/control scaling and so
+disagrees near 1.
+
+**Historic note.** The standard case/control scan is two-sided, so its
+significant set mixes neighborhoods carrying more case variants than expected with ones
+carrying fewer. A component is a cluster of case variants, so depleted neighborhoods are
+excluded -- from the gene gate as well as from membership, since otherwise a gene could
+qualify on a depleted neighborhood and then be conditioned on a cluster it had nothing to
+do with. The count excluded is logged. On the ClinVar results this matters a lot:
+clustering everything gave 1,440 "components" of which 81% were lone neighborhoods
+holding no case variant at all, against 211 real ones. Clustering depletion would need a
+rule based on the controls rather than the cases, which is not implemented. The
+mutation-rate scan tests enrichment only, so the filter is a no-op there.
+
+Two different gates:
+
+| gate | flag | default | what it decides |
+| --- | --- | --- | --- |
+| gene | `--conditional-gene-criterion` / `--conditional-gene-cutoff` | `fwer` < 0.05 | whether a gene is considered at all |
+| member | `--conditional-criterion` / `--conditional-cutoff` | `fdr` < `--fdr-cutoff` | which neighborhoods make up its components |
+
+A gene therefore qualifies on strong evidence but conditions on everything that evidence
+is spread across. FWER significance implies FDR significance at the same cutoff, so the
+gate never admits a gene whose qualifying neighborhood is then left out of its component.
+
+Round 0 is the ordinary scan. Then each round masks each active gene's **top component**
+-- the one holding its best neighborhood -- and re-scans. Genes without a hit are never
+re-scanned, so a round costs one scan per gene still carrying signal rather than a full
+exome scan. The gene gate is re-applied each round, so a gene continues only on fresh
+FWER-strength evidence. The loop stops when no gene has a further component, or at
+`--conditional-max-rounds` (default 5) -- in practice it usually stops much earlier.
+
+### Expect round 1 to be mostly empty, and why
+
+Conditioning on a whole component removes a great deal more than one neighborhood did.
+Measured on the ASD analysis it takes out a median of **13% of a gene's residues but 73%
+of its de novos**; three genes are left with none at all and seven more with one or two.
+
+Those genes are dropped before the re-scan rather than re-scanned to produce a table of
+p = 1. Test B conditions on the gene's remaining de novo total, so with one or two left
+no neighborhood can reach significance and the empty result is arithmetic, not evidence
+of absence. The bar is `--min-denovo`, the same filter a gene had to clear to enter the
+analysis; the log names the genes and their remaining counts.
+
+So an empty round 1 is the normal outcome and means "all of this gene's signal was in
+that component", not "the conditional analysis failed".
+
+### What gets masked
+
+The residues of the called component are zeroed in place: their case and control
+allele counts, and -- under the mutation-rate null -- their mutational opportunity `m`
+along with them.
+
+Masking `m` is not optional there. Zeroing the counts alone would leave both nulls still
+expecting de novos at residues whose variants had just been removed. Every neighborhood
+overlapping the conditioned region would then look depleted in proportion to how much of
+it was masked, and the neighborhoods immediately beside it -- exactly where a second
+independent signal would sit -- would lose the power to show anything. In simulation,
+observed/expected in the partly-masked neighborhoods falls to the surviving fraction of
+the neighborhood (0.76 against a surviving fraction of 0.73) instead of staying at 1.0,
+and power to recover a real adjacent cluster drops roughly threefold. See
+`tests/test_conditional.py`.
+
+A masked residue is never dropped from the results, only zeroed. Positions are recovered
+from row order throughout the codebase, so the per-protein p-value table always keeps
+one row per residue in residue order.
+
+### Which positions are still tested
+
+After masking, a centre is re-tested only if at least `--conditional-min-retained`
+(default 0.5) of its neighborhood's residues survive. Below that, what remains is a
+sliver of the original neighborhood and a small p-value there reflects a handful of rim
+variants rather than residual structure. Positions failing the rule, and the masked
+residues themselves, get p = 1 in both the observed and the null columns. The rule reads
+only the structure and the mask, never the counts, so observed and null are neutralized
+identically and the empirical null stays calibrated.
+
+Under `--neighborhood-radius multiple-small` / `multiple-big` the rule is applied per
+radius before the harmonic-mean combination, so a centre that keeps enough of its small
+neighborhoods still contributes them even if its large ones are mostly masked.
+
+### Multiple testing
+
+Each round writes a p-value file that is the previous round's file with only the
+re-scanned genes overwritten. The empirical null pool therefore still spans every gene
+in the analysis -- unmasked nulls for the genes that were not touched, freshly drawn
+masked nulls for the genes that were -- so FDR and FWER in round *k* are exome-wide and
+on the same footing as in round 0.
+
+What this does *not* correct for is the sequential testing itself. Each round is
+controlled at the nominal level and the rounds are not jointly corrected, which matches
+the usual convention in conditional association analysis. Read a later round as "there
+is additional signal in this gene" rather than as an independently calibrated discovery.
+
+### Output
+
+```
+all_proteins.fdr.tsv               round 0, identical to a plain run
+all_proteins.pvals.h5
+all_proteins.fdr.round1.tsv        full exome-wide table for each later round
+all_proteins.pvals.round1.h5
+all_proteins.fdr.components.tsv    every component found, all rounds
+all_proteins.fdr.conditional.tsv   one row per independent signal, all rounds
+```
+
+Every p-value file records how it was made in its HDF5 attributes: `test_type`
+(`case_control` or `mutation_rate`), `n_sims`, `seed`, and the direction settings
+(`include_depletion` and `min_alleles`, or `direction`, `min_denovo`, `lambda_hat` and
+`rate_calibration`). A file written before these existed has no `test_type`, which the
+readers treat as case/control.
+
+`components.tsv` carries, per component: `residues_pymol` (the union of its member
+neighborhoods, in PyMOL selection notation), `centers_pymol`, `centers_detail`
+(`pos:radius` per member, so a viewer can redraw the component as the union of spheres
+it actually is, correct even under `multiple-*` where each centre picks its own radius),
+`case_pymol` and
+`case_detail` (`pos:count`, so recurrence survives), counts of case residues and alleles,
+the lead neighborhood and its statistics, and `seq_span_aa`. Case/control runs add
+`control_pymol` and control counts; mutation-rate runs add `mu_component` instead, since
+there is no control cohort.
+
+`seq_span_aa` is the span along the *sequence*, not a spatial diameter. A large value is
+not a defect -- it means the component is assembled in 3D from parts of the chain that
+are far apart in sequence, which is exactly what 3DNT exists to find.
+
+The conditional table adds `round`, `conditioned_on` (the positions masked before that
+round) and `n_conditioned_residues` to the usual result columns, plus the component the
+row stands for: `component_id`, `n_centers`, `n_residues`, `n_case_alleles` and, from
+round 1 on, `n_residues_overlapping_mask`. A gene with three rows carries three
+independent 3D signals.
+
+The FDR and FWER columns hold the component's best over its own members, not the value
+at the lead position -- under the mutation-rate null those columns are maxima over both
+tests, so the best-scoring member need not be the one that cleared the cutoff. Both
+columns are always written, whichever `--conditional-criterion` was used.
+
+### Other flags
+
+| flag | meaning |
+| --- | --- |
+| `--conditional-max-rounds` | stop after this many rounds beyond round 0 (default 5) |
+| `--conditional-criterion` | `fdr` (default) or `fwer`; both nulls name these columns the same way, and under a mutation-rate null each is the max over both tests, so passing requires passing both |
+| `--conditional-cutoff` | threshold for that criterion; defaults to `--fdr-cutoff` |
+| `--conditional-radius` | radius of the removed neighborhood for `--remove-nbhd`. `best` (default) takes it from `--neighborhood-radius`; the mask predates the scan, so no per-position radius exists yet, and under a multi-radius run `best` falls back to 15 with a warning -- set this flag explicitly there |
+| `--conditional-min-retained` | fraction of a neighborhood that must survive for its centre to be re-tested (default 0.5) |
+
+### Conditioning by hand: --remove-nbhd
+
+`--remove-nbhd` runs a single conditional round on neighborhoods you name, in one
+protein:
+
+```
+python structure-informed-rvas/run.py \
+  --rvas-data-to-map input/SCHEMA_tutorial.tsv.gz \
+  --reference-dir sir-reference-data/ \
+  --results-dir results/ \
+  --run-3dnt \
+  --uniprot-id P42263 \
+  --remove-nbhd 738
+```
+
+It masks the same way `--conditional` does, and now also works with the mutation-rate
+null. `--uniprot-id` must name exactly one protein: the positions are residue numbers in
+that protein, and applying them to a list of genes would silently remove unrelated
+residues from each of the others. Note that the resulting p-value file holds only that
+protein, so its FDR and FWER are computed against a one-protein null and are not
+comparable to an exome-wide run -- `--conditional` is what keeps the multiple-testing
+correction intact across rounds.

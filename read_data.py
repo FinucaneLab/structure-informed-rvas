@@ -43,10 +43,53 @@ def load_ref_for_chrom(path, chrom, pos_filter):
     return df
 
 
+# Resolved by name, ahead of the pattern fallback. ONLY roulette_rate belongs here:
+# it is the one name whose precedence predates this list, and a file carrying it
+# alongside another rate column must keep resolving the way it used to, because
+# changing which column such a file is read from would silently change a rate model.
+#
+# mu_snp and mu are deliberately NOT here. They match the pattern fallback on their
+# own, so a file carrying just one still resolves; listing them would let a file with
+# two plausible rate columns (say mu and mutation_rate) silently pick one instead of
+# raising, and that file feeds precompute_mu_per_residue.py as well as the scan.
+RATE_COLUMNS_BY_NAME = ('roulette_rate',)
+
+# Named in the error message as the conventional spellings, not resolved by name.
+KNOWN_RATE_COLUMNS = ('roulette_rate', 'mu_snp', 'mu')
+
+
+def identify_rate_column(column_names, path=''):
+    """
+    Pick the mutation-rate column of a rate reference file.
+
+    Named columns first, then the pattern fallback for custom files: anything
+    containing 'rate', a bare 'mu' or 'u', or a 'mu_' prefix -- the last of which is
+    what lets an unlisted mu_<something> column work. More than one match is an error
+    rather than a guess: the same file feeds the scan and the per-residue table, so a
+    silent pick could have them disagree about which rate model is in use.
+
+    Logs the column it settled on, which is otherwise unrecoverable from the output.
+    """
+    for name in RATE_COLUMNS_BY_NAME:
+        if name in column_names:
+            logger.info(f'Using rate column {name} from {path}')
+            return name
+    candidates = [c for c in column_names
+                  if 'rate' in c.lower() or c.lower() in ('mu', 'u')
+                  or c.lower().startswith('mu_')]
+    if len(candidates) != 1:
+        raise ValueError(
+            f'Could not identify a mutation rate column in {path}. '
+            f'Columns present: {list(column_names)}. Known names: {list(KNOWN_RATE_COLUMNS)}.'
+        )
+    logger.info(f'Using rate column {candidates[0]} from {path}')
+    return candidates[0]
+
+
 def load_mu_for_chrom(mu_path, chrom, pos_filter):
     """
     Load per-variant mutation rates for one chromosome from a rate reference file
-    (e.g. gnomad_mu_snp_by_variant.parquet), restricted to the positions present
+    (by default gnomad_mu_snp_by_variant.parquet), restricted to the positions present
     in the RVAS data.
 
     Returns a dataframe indexed by chr-pos-ref-alt with column mu (and mu_adjusted
@@ -62,21 +105,11 @@ def load_mu_for_chrom(mu_path, chrom, pos_filter):
             'Reading --mu-file requires pyarrow. Install it with `pip install pyarrow`.'
         )
 
-    schema_names = pq.ParquetFile(mu_path).schema_arrow.names
-    if 'roulette_rate' in schema_names:
-        rate_col = 'roulette_rate'
-    else:
-        candidates = [c for c in schema_names if 'rate' in c.lower() or c.lower() in ('mu', 'u')
-                      or c.lower().startswith('mu_')]
-        if len(candidates) != 1:
-            raise ValueError(
-                f'Could not identify a mutation rate column in {mu_path}. '
-                f'Columns present: {schema_names}'
-            )
-        rate_col = candidates[0]
+    column_names = pq.ParquetFile(mu_path).schema_arrow.names
+    rate_col = identify_rate_column(column_names, mu_path)
 
     columns = ['chrom', 'pos', 'ref', 'alt', rate_col]
-    if 'adjusted' in schema_names:
+    if 'adjusted' in column_names:
         columns.append('adjusted')
 
     table = pq.read_table(mu_path, columns=columns, filters=[('chrom', '=', chrom)])

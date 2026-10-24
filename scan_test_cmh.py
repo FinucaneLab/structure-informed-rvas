@@ -11,6 +11,7 @@ from scipy.sparse import csr_matrix
 from cmh import cmh_chisq_stat, cmh_expected_variance, exact_cmh_minlike_lookup
 from empirical_fdr import compute_fdr
 from logger_config import get_logger
+from scan_test import DEFAULT_MIN_ALLELES
 from utils import get_adjacency_matrix, write_dataset
 
 
@@ -289,11 +290,11 @@ def write_cmh_pvals(results_dir, uniprot_id, df_pvals, pval_file):
         write_dataset(fid, f"{uniprot_id}_cmh_variance", df_pvals[["cmh_variance"]])
 
 
-def _filter_proteins(df_rvas, df_fdr_filter=None, min_alleles=5):
+def _filter_proteins(df_rvas, df_fdr_filter=None, min_alleles=DEFAULT_MIN_ALLELES):
     grouped = df_rvas.groupby("uniprot_id")[["ac_case", "ac_control"]].sum()
     keep = grouped[
-        (grouped["ac_case"] > min_alleles)
-        & (grouped["ac_control"] > min_alleles)
+        (grouped["ac_case"] >= min_alleles)
+        & (grouped["ac_control"] >= min_alleles)
     ].index.to_numpy()
 
     if df_fdr_filter is not None:
@@ -304,9 +305,24 @@ def _filter_proteins(df_rvas, df_fdr_filter=None, min_alleles=5):
     return keep.tolist()
 
 
-def _remove_neighborhood(df, adjacency_matrix, positions, uniprot_id):
+def _remove_neighborhood(df, adjacency_matrix, centers, uniprot_id):
+    """
+    Drop the variants in the neighborhood of each centre.
+
+    `centers` is the [(aa_pos, radius), ...] list for THIS protein, as built by
+    run.remove_nbhd_conditioning. It used to be the raw --remove-nbhd string, applied
+    to every protein the scan touched -- the same bug the standard path fixed by
+    keying conditioning on uniprot_id.
+
+    The radius in each pair is ignored here: the CMH scan takes one numeric
+    --neighborhood-radius (validate_args enforces that), and the adjacency matrix is
+    already built at it. Unlike the standard path this drops the rows rather than
+    masking residues in place; with no mutational opportunity term in the CMH test the
+    two coincide, but it means the positional contract in utils.py does not apply.
+    """
     out = df.copy()
-    for center in map(int, positions.split(",")):
+    for center, _radius in centers:
+        center = int(center)
         if center < 1 or center > adjacency_matrix.shape[0]:
             raise ValueError(
                 f"Neighborhood center {center} is outside {uniprot_id} structure bounds"
@@ -331,10 +347,11 @@ def scan_test_cmh(
     ignore_ac,
     fdr_file,
     pval_file,
-    remove_nbhd,
+    remove_nbhd,          # {uniprot_id: [(aa_pos, radius), ...]} or None
     stratum_col,
     screen_chi2=DEFAULT_SCREEN_CHI2,
     seed=1,
+    min_alleles=DEFAULT_MIN_ALLELES,
 ):
     if fdr_only:
         df_results = compute_fdr(
@@ -374,7 +391,7 @@ def scan_test_cmh(
     pdb_dir = os.path.join(reference_dir, "pdb_files")
     pae_dir = os.path.join(reference_dir, "pae_files")
 
-    uniprot_ids = _filter_proteins(df_rvas, df_fdr_filter)
+    uniprot_ids = _filter_proteins(df_rvas, df_fdr_filter, min_alleles)
     logger.info(
         f"Selected {len(uniprot_ids)} proteins for stratified CMH analysis"
     )
@@ -386,7 +403,8 @@ def scan_test_cmh(
         try:
             df = df_rvas[df_rvas["uniprot_id"] == uniprot_id].copy()
 
-            if remove_nbhd is not None:
+            centers = (remove_nbhd or {}).get(uniprot_id)
+            if centers:
                 adjacency_matrix = get_adjacency_matrix(
                     pdb_file_pos_guide,
                     pdb_dir,
@@ -402,13 +420,15 @@ def scan_test_cmh(
                 df = _remove_neighborhood(
                     df,
                     adjacency_matrix,
-                    remove_nbhd,
+                    centers,
                     uniprot_id,
                 )
 
-            if (df["ac_case"].sum() < 5) or (df["ac_control"].sum() < 5):
+            if (df["ac_case"].sum() < min_alleles) or (
+                    df["ac_control"].sum() < min_alleles):
                 logger.warning(
-                    f"{uniprot_id}: There must be at least 5 case and 5 control alleles. Skipping."
+                    f"{uniprot_id}: needs at least {min_alleles} case and "
+                    f"{min_alleles} control alleles. Skipping."
                 )
                 continue
 
