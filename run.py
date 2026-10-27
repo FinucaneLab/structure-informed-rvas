@@ -30,6 +30,7 @@ def map_and_filter_rvas(
         stratum_col,
         mu_col=None,
         mu_file=None,
+        delimiter='\t',
 ):
 
     if pre_mapped_rvas is not None:
@@ -47,6 +48,7 @@ def map_and_filter_rvas(
             stratum_col=stratum_col,
             mu_col=mu_col,
             mu_file=mu_file,
+            delimiter=delimiter,
         )
     else:
         df_rvas = None

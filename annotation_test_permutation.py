@@ -11,7 +11,6 @@ pool the null p-values across all tested proteins.
 With stratum_col, the null is redrawn within each stratum and the statistic is the
 Cochran-Mantel-Haenszel sum of case alleles inside the annotation (exact conditional p).
 """
-
 import argparse
 import warnings
 import zlib

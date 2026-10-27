@@ -106,7 +106,7 @@ def map_to_protein(
     reference_directory,
     which_proteins = 'all',
     genome_build = None,
-    delimiter=None,
+    delimiter='\t',
     stratum_col=None,
     mu_col=None,
     mu_file=None,
@@ -125,9 +125,8 @@ def map_to_protein(
     '''
 
     # read data and ensure it has chr, pos and Variant ID columns
-    pandas_engine = 'python' if delimiter is None else None
     compression = 'gzip' if rvas_path.endswith('.bgz') else 'infer' # infer doesn't recognize .bgz extension
-    rvas_data = pd.read_csv(rvas_path, sep=delimiter, engine=pandas_engine, compression=compression)
+    rvas_data = pd.read_csv(rvas_path, sep=delimiter, compression=compression)
     mutation_rate_mode = (mu_col is not None) or (mu_file is not None)
     rvas_data = rvas_data.rename(columns = {
         variant_id_col: 'Variant ID',
@@ -165,6 +164,10 @@ def map_to_protein(
         rvas_data['Variant ID'] = rvas_data['chr'] + '-' + rvas_data['pos'].astype(str) + '-' + rvas_data['ref'] + '-' + rvas_data['alt']
     else:
         rvas_data['Variant ID'] = rvas_data['chr'] + '-' + rvas_data['pos'].astype(str) + '-' + rvas_data['ref'] + '-' + rvas_data['alt']
+
+    # reference is keyed by chr-prefixed names (chr1, chrX); accept 1, X, etc.
+    rvas_data['chr'] = rvas_data['chr'].astype(str).str.replace(r'^(?!chr)', 'chr', regex=True)
+    rvas_data['Variant ID'] = rvas_data['Variant ID'].str.replace(r'^(?!chr)', 'chr', regex=True)
 
     # detect case/control columns
     def identify_column(name):
