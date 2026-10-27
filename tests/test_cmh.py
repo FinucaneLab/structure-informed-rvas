@@ -11,7 +11,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from cmh import exact_cmh_distribution, exact_cmh_pvalue
-from scan_test_cmh import _draw_stratified_null_cases
+from utils import draw_stratified_null_cases
 
 
 class TestExactCMH(unittest.TestCase):
@@ -68,7 +68,7 @@ class TestStratifiedNull(unittest.TestCase):
         n_case = 5
         n_sims = 100
         rng = np.random.default_rng(123)
-        draws = _draw_stratified_null_cases(total, n_case, n_sims, rng)
+        draws = draw_stratified_null_cases(total, n_case, n_sims, rng)
 
         self.assertEqual(draws.shape, (len(total), n_sims))
         self.assertTrue(np.all(draws.sum(axis=0) == n_case))

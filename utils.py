@@ -1,17 +1,21 @@
-import numpy as np
-import pandas as pd
-from Bio.PDB import PDBParser
 import gzip
-import sklearn.metrics
-import hdf5plugin
+import json
 import os
 import re
-import json
-import warnings
+
+import hdf5plugin
+import numpy as np
+import pandas as pd
+import sklearn.metrics
+from Bio.PDB import PDBParser
 from scipy.stats import chi2 as chi2_dist
+
 from logger_config import get_logger
 
 logger = get_logger(__name__)
+
+# 1-df chi2 screen (p~0.1): exact tests run only above it, lenient so no p<0.05 is missed.
+DEFAULT_SCREEN_CHI2 = 2.706
 
 def get_pairwise_distances(pdb_file, *args):
     # optional arguments i and j:
@@ -192,6 +196,8 @@ def get_adjacency_matrix(pdb_pae_file_pos_guide, pdb_dir, pae_dir, uniprot_id, r
     adj_mat = dist_thresh & pae_thresh
     logger.debug(f"Adjacency matrix computed: {np.sum(adj_mat)} edges from {adj_mat.shape[0]} positions")
     return adj_mat
+
+
 def get_chi2_pvals_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_ctrl):
     """Chi-square p-value lookup table over every (case_ac, ctrl_ac) pair in a neighborhood.
 
@@ -245,8 +251,7 @@ def get_chi2_pvals_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_c
     )
 
     pvals = np.where(valid_mask, chi2_dist.sf(chi2_stat, df=1), 1.0)
-    # chi2 = 2.706 (df=1) corresponds to p~0.1: a lenient pre-filter so no p<0.05 case is missed.
-    potential_significant = (chi2_stat > 2.706) & valid_mask
+    potential_significant = (chi2_stat > DEFAULT_SCREEN_CHI2) & valid_mask
     return pvals, potential_significant
 
 
@@ -254,10 +259,8 @@ def valid_for_fisher(contingency_table):
     valid_columns = np.all(np.sum(contingency_table, axis=0) > 0)
     valid_rows = np.all(np.sum(contingency_table, axis=1) > 0)
     all_non_neg = np.all(contingency_table >= 0)
-    if valid_columns and valid_rows and all_non_neg:
-        return True
-    else:
-        return False
+    return bool(valid_columns and valid_rows and all_non_neg)
+
 
 def write_dataset(fid, name, data, clevel=5):
     if name in fid:
@@ -310,6 +313,7 @@ def read_p_values(fid, uniprot_id, mu_mode=False):
                  'radius': radius_vals})
     return pd.DataFrame(base)
 
+
 def read_original_mutation_data(fid, uniprot_id):
     """
     Reads the original per-residue mutation counts for one uniprot_id from an HDF5 results file.
@@ -332,6 +336,7 @@ def read_original_mutation_data(fid, uniprot_id):
                        'ac_case': original_data[:, 0],
                        'ac_control': original_data[:, 1]})
     return df
+
 
 def get_nbhd_info(df_rvas, uniprot_id, aa_pos, reference_dir, radius, pae_cutoff):
     """
@@ -375,3 +380,97 @@ def get_nbhd_info(df_rvas, uniprot_id, aa_pos, reference_dir, radius, pae_cutoff
     #     'residues': residues
     
     return nbhd, cases, cntrls
+
+
+def get_ac_per_residue(df, colname, n_res):
+    case_ac_per_residue = np.zeros((n_res, 1))
+    ac_by_pos = df.groupby('aa_pos')[colname].sum().reset_index()
+    case_ac_per_residue[ac_by_pos.aa_pos - 1, 0] = ac_by_pos[colname]
+    return case_ac_per_residue
+
+
+def get_random_ac_per_residue(case_ac_per_residue, total_ac_per_residue, n_sim, seed=None):
+    # seed is passed straight to default_rng: a previous version called np.random.seed(),
+    # which seeds the legacy global RNG and has no effect on default_rng(), so the seed
+    # was silently ignored and runs were not reproducible.
+    n_alleles = int(  case_ac_per_residue.sum()  )
+    gen = np.random.default_rng(seed)
+    null_ac_per_residue = gen.multivariate_hypergeometric(total_ac_per_residue.astype(int), n_alleles, n_sim).T
+    return null_ac_per_residue
+
+
+def get_case_control_ac_matrix(df, n_res, n_sim, seed=None):
+    case_ac_per_residue = get_ac_per_residue(df, 'ac_case', n_res)
+    control_ac_per_residue = get_ac_per_residue(df, 'ac_control', n_res)
+    total_ac_per_residue = (case_ac_per_residue + control_ac_per_residue).flatten()
+    null_case_ac_per_residue = get_random_ac_per_residue(case_ac_per_residue, total_ac_per_residue, n_sim, seed)
+    null_control_ac_per_residue = total_ac_per_residue[:, np.newaxis] - null_case_ac_per_residue
+    case_ac_matrix = np.hstack([case_ac_per_residue, null_case_ac_per_residue])
+    control_ac_matrix = np.hstack([control_ac_per_residue, null_control_ac_per_residue])
+    return case_ac_matrix, control_ac_matrix
+
+
+def get_stratified_case_ac_matrix(
+    df: pd.DataFrame,
+    stratum_col: str,
+    n_res: int,
+    n_sim: int,
+    seed: int | list[int] | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Stratified permutation null (case labels redrawn within stratum), drawn only on residues with alleles."""
+    if stratum_col not in df.columns:
+        raise KeyError(f"Missing stratum column '{stratum_col}'")
+    if df[stratum_col].isna().any():
+        raise ValueError(f"Missing values found in stratum column '{stratum_col}'")
+    pos = df["aa_pos"].to_numpy(dtype=np.int64) - 1
+    bad = (pos < 0) | (pos >= n_res)
+    if bad.any():
+        raise ValueError(f"Amino-acid positions outside structure bounds: {(pos[bad] + 1)[:10].tolist()}")
+
+    labels = df[stratum_col].astype(str).to_numpy()
+    strata = np.sort(np.unique(labels))
+    if len(strata) == 0:
+        raise ValueError("No strata found")
+    codes = np.searchsorted(strata, labels)
+    case_by_stratum = np.zeros((n_res, len(strata)), dtype=np.int64)
+    total_by_stratum = np.zeros((n_res, len(strata)), dtype=np.int64)
+    ac_case = df["ac_case"].to_numpy(dtype=np.int64)
+    np.add.at(case_by_stratum, (pos, codes), ac_case)
+    np.add.at(total_by_stratum, (pos, codes), ac_case + df["ac_control"].to_numpy(dtype=np.int64))
+
+    rng = np.random.default_rng(seed)
+    null_case = np.zeros((n_res, n_sim), dtype=np.int64)
+    for j in range(len(strata)):
+        idx = np.flatnonzero(total_by_stratum[:, j])
+        if len(idx):
+            null_case[idx] += draw_stratified_null_cases(
+                total_by_stratum[idx, j], case_by_stratum[:, j].sum(), n_sim, rng
+            )
+    case_ac_matrix = np.hstack([case_by_stratum.sum(1)[:, None], null_case])
+    return case_ac_matrix, case_by_stratum, total_by_stratum
+
+
+def draw_stratified_null_cases(total_per_residue, n_case, n_sims, rng):
+    total_per_residue = np.asarray(total_per_residue, dtype=np.int64)
+    n_total = int(total_per_residue.sum())
+    n_case = int(n_case)
+
+    if n_case < 0 or n_case > n_total:
+        raise ValueError("Invalid case total for multivariate hypergeometric draw")
+    if n_sims <= 0:
+        return np.empty((len(total_per_residue), 0), dtype=np.int32)
+    if n_case == 0:
+        return np.zeros((len(total_per_residue), n_sims), dtype=np.int32)
+    if n_case == n_total:
+        return np.repeat(
+            total_per_residue[:, None].astype(np.int32),
+            n_sims,
+            axis=1,
+        )
+
+    draws = rng.multivariate_hypergeometric(
+        total_per_residue,
+        n_case,
+        size=n_sims,
+    )
+    return draws.T.astype(np.int32, copy=False)
