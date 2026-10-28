@@ -568,6 +568,14 @@ if __name__ == '__main__':
         the columns used as ids (default all).
         '''
     )
+    parser.add_argument(
+        '--annotation-result-fn',
+        type=str,
+        default='results',
+        help='''
+        Filename for resulting annotation-test pooled results, without the filetype ending. (default results.tsv.gz).
+        '''
+    )
     args = parser.parse_args()
 
     # Derive pval file name from fdr file name if not explicitly set
@@ -854,19 +862,41 @@ if __name__ == '__main__':
         logger.info('Starting annotation test analysis')
         if args.ignore_ac:
             raise ValueError("--ignore-ac is not supported with --annotation-file")
-        expand = args.annotation_expand
-        if expand and isinstance(args.neighborhood_radius, str):
-            raise ValueError('--annotation-expand needs a numeric --neighborhood-radius')
+        
         if args.annotation_id:
             ann_id_columns = tuple(args.annotation_id.split(','))
         else:
             ann_id_columns = ('*',) if args.annotation_format == 'wide' else ('concept_type', 'concept_value')
+
+        expand = args.annotation_expand
+        # option to use "radius" column in annotation file: 
+        ## if radius column exists, otherwise, use neighborhood argument
+        df_ann = read_table(Path(args.annotation_file))
+        if expand and ('radius' in df_ann.columns):
+            # ensure each annotation type only has one radius
+            radius_nunique = df_ann.groupby(list(ann_id_columns))['radius'].nunique(dropna=False)
+            incohesive = radius_nunique[radius_nunique > 1]
+            if len(incohesive) > 0:
+                raise ValueError(
+                    "Annotation file has a radius that is not the same for every aa_pos "
+                    f"within an annotation (grouped by {ann_id_columns}): "
+                    f"{list(incohesive.index)}"
+                )
+            logger.info("Using annotation file radius column as neighborhood radii")
+        else:
+            if expand and isinstance(args.neighborhood_radius, str):
+                raise ValueError('--annotation-expand needs a numeric --neighborhood-radius when the annotation file has no radius column')
+            logger.info(
+                f"Annotation file has no radius column; using --neighborhood-radius "
+                f"({args.neighborhood_radius}) for every annotation"
+            )
+            df_ann['radius'] = args.neighborhood_radius
+            
         run_annotation_test(
             df_rvas,
             read_table(Path(args.annotation_file)),
             ann_format=args.annotation_format,
             ann_id_columns=ann_id_columns,
-            expand_radius=args.neighborhood_radius if expand else 0,
             expand_include=None if expand in (None, 'all') else expand.split(','),
             pae_cutoff=args.pae_cutoff,
             reference_dir=args.reference_dir,
@@ -876,6 +906,7 @@ if __name__ == '__main__':
             results_dir=Path(args.results_dir) / 'annotation_test',
             cleanup_per_protein=True,
             stratum_col=args.stratum_col if annotation_cmh else None,
+            result_fn=args.annotation_result_fn
         )
         did_nothing = False
 

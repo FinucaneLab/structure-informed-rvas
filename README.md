@@ -270,6 +270,8 @@ python run.py --pre-mapped-rvas rvas.mapped.parquet --reference-dir sir-referenc
 
 `--annotation-expand` takes id prefixes or `all`; without it nothing is expanded. Output is `results/annotation_test/results.tsv.gz` with `p_value`, `local_fdr`/`local_fwer`, `global_fdr`/`global_fwer` and `bh_fdr`. `--df-filter` (columns `uniprot_id`, optionally `aa_pos`, `aa_ref`, `aa_alt`) restricts the RVAS data to those proteins/positions/variants before the test, which also changes the null. A crashed run resumes from `per_protein/` shards if rerun with the same `--results-dir` and `--n-sims`.
 
+For testing radii unique to the annotation type (ex: by `concept_type`), a `radius` column of integer values can be used instead of the `--neighborhood-radius`. An annotation file with a `radius` column will automatically overwrite the `--neighborhood-radius` argument. 
+
 ### Full Pipeline (run_all)
 
 The `run_all` subcommand runs visualization, annotation, and neighborhood feature tables for every significant protein in an FDR results file in a single command:

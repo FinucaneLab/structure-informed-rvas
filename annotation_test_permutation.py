@@ -503,6 +503,7 @@ def summarize_annotation_test(
     reference_dir: str | Path | None = None,
     cleanup_per_protein: bool = False,
     format: str = "tsv.gz",
+    result_fn: str = "results",
 ) -> pd.DataFrame:
     """Pool per-protein permutation nulls into an empirical global FDR/FWER + a BH-FDR baseline.
 
@@ -540,7 +541,7 @@ def summarize_annotation_test(
         df_pvals = df_pvals.merge(guide, on="uniprot_id", how="left")
 
     results_path = results_dir / (
-        "results.parquet" if format == "parquet" else "results.tsv.gz"
+        f"{results_fn}.parquet" if format == "parquet" else f"{results_fn}.tsv.gz"
     )
     if format == "parquet":
         df_pvals.to_parquet(results_path, index=False)
@@ -590,7 +591,6 @@ def process_protein(
     ann_format: str,
     ann_include: list[str] | None,
     ann_id_columns: tuple[str, ...] | list[str] | None,
-    expand_radius: float,
     expand_include: list[str] | None,
     pae_cutoff: float,
     reference_dir: str | Path | None,
@@ -616,22 +616,33 @@ def process_protein(
     if label_matrix.shape[0] == 0:
         return None
 
-    if expand_radius > 0:
-        adjacency_matrix = get_protein_adjacency_matrix(
-            uniprot_id, str(reference_dir), expand_radius, pae_cutoff
-        )
-        if adjacency_matrix is None:
-            warnings.warn(
-                f"{uniprot_id}: no structure in reference dir, skipping expansion",
-                UserWarning,
+    expand_rows = (
+        rows_to_expand(row_meta, expand_include) if expand_include else None
+    )
+    radius_groups: dict[float, list[int]] = {}
+    for i in expand_rows:
+        radius = row_meta[i]["radius"]
+        if radius is not None and pd.notna(radius) and radius > 0:
+            radius_groups.setdefault(float(radius), []).append(i)
+    if radius_groups:
+        # future fix:
+        ## Distance/PAE matrices don't depend on radius - build them once per protein and
+        ## threshold separately for each of this protein's distinct expansion radii, rather
+        ## than re-parsing the pdb/pae files (and rebuilding these O(n_residues^2) matrices)
+        ## once per radius group.
+        for radius, rows in radius_groups.items():
+            adjacency_matrix = get_protein_adjacency_matrix(
+                uniprot_id, str(reference_dir), radius, pae_cutoff
             )
-        else:
-            expand_rows = (
-                rows_to_expand(row_meta, expand_include) if expand_include else None
-            )
-            label_matrix = expand_annotations_neighborhood(
-                label_matrix, adjacency_matrix, expand_rows
-            )
+            if adjacency_matrix is None:
+                warnings.warn(
+                    f"{uniprot_id}: no structure in reference dir, skipping expansion",
+                    UserWarning,
+                )
+            else:
+                label_matrix = expand_annotations_neighborhood(
+                    label_matrix, adjacency_matrix, rows
+                )
 
     if stratum_col is None:
         pvals_df = test_protein_annotations(
@@ -660,7 +671,6 @@ def run_annotation_test(
         "concept_value",
     ),
     expand_include: list[str] | None = None,
-    expand_radius: float = 0,
     pae_cutoff: float = 0,
     reference_dir: str | Path | None = None,
     df_filter: pd.DataFrame | None = None,
@@ -673,6 +683,7 @@ def run_annotation_test(
     cleanup_per_protein: bool = False,
     format: str = "tsv.gz",
     stratum_col: str | None = None,
+    result_fn: str = 'results'
 ) -> pd.DataFrame:
     """Run the annotation test for every protein present in both rvas_df and ann_df.
 
@@ -690,13 +701,10 @@ def run_annotation_test(
           ids, or become one via the {column}_{value} disambiguation when >1 column is
           selected). ann_id_columns=["*"] uses every column except uniprot_id/aa_pos/
           seq_len/length/end. See convert_wide_annotations_to_binary_matrix.
-    expand_radius: if > 0, expand annotations to their 3D structural neighborhood
-        (CA-CA distance within expand_radius Angstrom, + optional pae_cutoff) before
-        testing. 0 (default) disables expansion entirely. Requires reference_dir.
     expand_include: restrict expansion to annotation ids starting with one of these
         (matched against row_meta, so it works for either ann_format), e.g.
         ["Binding site", "Active site"] - broad concepts (Domain, Chain, ...) are left as
-        annotated. None (default) expands every annotation. Ignored if expand_radius <= 0.
+        annotated. None (default) expands every annotation whose radius > 0.
     reference_dir: structure-informed-rvas reference dir (pdb_files/, pae_files/,
         pdb_pae_file_pos_guide.tsv, protein_sequence_guide.tsv). Used for protein length
         and, if expand_radius > 0, for the adjacency matrix.
@@ -724,8 +732,8 @@ def run_annotation_test(
     results_dir = Path(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    if expand_radius > 0 and reference_dir is None:
-        raise ValueError("expand_radius > 0 requires reference_dir")
+    if reference_dir is None and "radius" in ann_df.columns and (ann_df["radius"].fillna(0) > 0).any():
+        raise ValueError("ann_df has annotations with radius > 0, which requires reference_dir")
 
     rvas_df = filter_variants(rvas_df, df_include, mode="include")
     rvas_df = filter_variants(rvas_df, df_filter, mode="exclude")
@@ -762,7 +770,6 @@ def run_annotation_test(
             ann_format=ann_format,
             ann_include=ann_include,
             ann_id_columns=ann_id_columns,
-            expand_radius=expand_radius,
             expand_include=expand_include,
             pae_cutoff=pae_cutoff,
             reference_dir=reference_dir,
@@ -794,6 +801,7 @@ def run_annotation_test(
         reference_dir,
         cleanup_per_protein=cleanup_per_protein,
         format=format,
+        result_fn,
     )
 
 
@@ -837,12 +845,6 @@ def _parse_args() -> argparse.Namespace:
         "--ann-include",
         default=None,
         help="Comma-separated filter on ann_id_columns[0] (long format only), e.g. 'Domain'",
-    )
-    parser.add_argument(
-        "--expand-radius",
-        type=float,
-        default=0,
-        help="3D neighborhood radius in Angstrom; 0 (default) disables expansion",
     )
     parser.add_argument(
         "--expand-include",
@@ -920,6 +922,14 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="rvas column defining CMH strata; adjusts the test for stratum-dependent case fraction",
     )
+    parser.add_argument(
+        '--annotation-result-fn',
+        type=str,
+        default='results',
+        help='''
+        Filename for resulting annotation-test pooled results, without the filetype ending. (default results.tsv.gz).
+        '''
+    )
     return parser.parse_args()
 
 
@@ -932,7 +942,6 @@ def main() -> None:
         ann_include=args.ann_include.split(",") if args.ann_include else None,
         ann_id_columns=tuple(args.ann_id_columns.split(",")),
         expand_include=args.expand_include.split(",") if args.expand_include else None,
-        expand_radius=args.expand_radius,
         pae_cutoff=args.pae_cutoff,
         reference_dir=args.reference_dir,
         df_filter=read_table(args.df_filter_path) if args.df_filter_path else None,
@@ -945,6 +954,7 @@ def main() -> None:
         cleanup_per_protein=args.cleanup_per_protein,
         format=args.format,
         stratum_col=args.stratum_col,
+        result_fn=args.annotation_result_fn
     )
 
 
