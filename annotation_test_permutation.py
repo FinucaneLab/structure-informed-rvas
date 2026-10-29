@@ -104,12 +104,32 @@ def convert_long_annotations_to_binary_matrix(
     *,
     return_radii: bool = False,
 ):
-    """Convert long-format annotations to a binary matrix for one protein.
+    """Binary matrix from long-format annotations (one row per annotation-position, or
+    per annotation-interval), single protein.
 
+    ann_df columns: concept_type, concept_value, start, end, and optionally geometry -
+    or, for single-residue annotations (one row per residue, e.g. a long-format cluster
+    table with uniprot_id/aa_pos/cluster_col/cluster_id), aa_pos instead of start/end.
+    ann_id_columns picks which columns are joined into the annotation id, so a cluster
+    table like that is handled by passing ann_id_columns=("cluster_col", "cluster_id") -
+    no separate format needed. Positions are 1-based, inclusive. geometry == "pair" (e.g.
+    disulfide bonds) marks only start and end; anything else ("range"/"single"/missing/
+    point) fills [start, end]. ann_include restricts to rows whose ann_id_columns[0]
+    value is in this list (e.g. ann_include=["Domain"] with the default id columns to
+    test only Domain annotations). Annotations that end up covering the exact same
+    position set (e.g. a cluster that's stable across two clustering resolutions) are
+    merged into one row so they're tested once, not twice - their ids are kept, joined
+    by "|" in the result's annotation_id.
+    
     When a ``radius`` column is present, annotations with identical positions but
-    different radii remain separate rows. ``return_radii=True`` additionally returns
-    a dict mapping matrix row indices to their radius (or None).
+    different radii remain separate rows.
+
+    Returns: result array containing the following:
+        label_binary_matrix: shape (n_annotations, seq_len), 1 at annotated positions.
+        row_meta: dict mapping row index -> [annotation id, ...] (ids of merged rows).
+        ``return_radii=True`` additionally returns a dict mapping matrix row indices to their radius (or None)
     """
+
     if "start" not in ann_df.columns and "aa_pos" in ann_df.columns:
         ann_df = ann_df.assign(start=ann_df["aa_pos"], end=ann_df["aa_pos"])
     ann_df = ann_df.dropna(subset=["start", "end"])
@@ -168,13 +188,30 @@ def convert_wide_annotations_to_binary_matrix(
     *,
     return_radii: bool = False,
 ):
-    """Convert wide-format residue annotations to a binary matrix for one protein.
+    """Binary matrix from wide-format residue annotations, single protein.
 
+    One row per residue (aa_pos); each of `ann_id_columns` is a key whose value becomes
+    an annotation id (no concatenation - each selected column's values are already
+    annotation ids, or become one via the {column}_{value} disambiguation below). Two
+    supported layouts: a single generic column (e.g. "annotation") whose values are
+    already fully-qualified ids ("Binding site", "Domain_SET", ...) - used as-is; or
+    several columns (concept types / clustering layers, one column per method) where the
+    id is "{column}_{value}" to disambiguate e.g. the same cluster id across layers.
+    Missing values (NaN) mean "not annotated in this column" and are dropped.
+    ann_id_columns=None or ["*"] uses every column except uniprot_id/aa_pos/seq_len/
+    length/end (the non-annotation columns fallback_seq_len also knows about).
+    
     ``radius`` is treated as row-level metadata and applies to each annotation present
     at that residue. Rows are grouped by annotation ID and radius, so equal residue sets
-    at different radii are preserved as distinct tests. ``return_radii=True`` additionally
-    returns a dict mapping matrix row indices to radius (or None).
+    at different radii are preserved as distinct tests.
+
+    Returns: result array containing the following:
+        label_binary_matrix: shape (n_annotations, seq_len), 1 at annotated positions.
+        row_meta: dict mapping row index -> [id, ...] (annotations that share the exact
+            same set of positions are merged into one row).
+        ``return_radii=True`` additionally returns a dict mapping matrix row indices to their radius (or None)
     """
+
     if ann_df.empty:
         empty = (np.zeros((0, seq_len or 0), dtype=np.uint8), {}, {})
         return empty if return_radii else empty[:2]
