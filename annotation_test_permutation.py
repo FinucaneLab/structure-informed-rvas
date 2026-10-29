@@ -100,27 +100,14 @@ def convert_long_annotations_to_binary_matrix(
     seq_len: int | None = None,
     ann_include: list[str] | None = None,
     ann_id_columns: tuple[str, ...] = ("concept_type", "concept_value"),
+    *,
+    return_radii: bool = False,
 ):
-    """Binary matrix from long-format annotations (one row per annotation-position, or
-    per annotation-interval), single protein.
+    """Convert long-format annotations to a binary matrix for one protein.
 
-    ann_df columns: concept_type, concept_value, start, end, and optionally geometry -
-    or, for single-residue annotations (one row per residue, e.g. a long-format cluster
-    table with uniprot_id/aa_pos/cluster_col/cluster_id), aa_pos instead of start/end.
-    ann_id_columns picks which columns are joined into the annotation id, so a cluster
-    table like that is handled by passing ann_id_columns=("cluster_col", "cluster_id") -
-    no separate format needed. Positions are 1-based, inclusive. geometry == "pair" (e.g.
-    disulfide bonds) marks only start and end; anything else ("range"/"single"/missing/
-    point) fills [start, end]. ann_include restricts to rows whose ann_id_columns[0]
-    value is in this list (e.g. ann_include=["Domain"] with the default id columns to
-    test only Domain annotations). Annotations that end up covering the exact same
-    position set (e.g. a cluster that's stable across two clustering resolutions) are
-    merged into one row so they're tested once, not twice - their ids are kept, joined
-    by "|" in the result's annotation_id.
-
-    Returns:
-        label_binary_matrix: shape (n_annotations, seq_len), 1 at annotated positions.
-        row_meta: dict mapping row index -> [annotation id, ...] (ids of merged rows).
+    When a ``radius`` column is present, annotations with identical positions but
+    different radii remain separate rows. ``return_radii=True`` additionally returns
+    a dict mapping matrix row indices to their radius (or None).
     """
     if "start" not in ann_df.columns and "aa_pos" in ann_df.columns:
         ann_df = ann_df.assign(start=ann_df["aa_pos"], end=ann_df["aa_pos"])
@@ -131,100 +118,109 @@ def convert_long_annotations_to_binary_matrix(
         ann_df = ann_df.assign(geometry="range")
 
     if ann_df.empty:
-        return np.zeros((0, seq_len or 0), dtype=np.uint8), {}
-
+        empty = (np.zeros((0, seq_len or 0), dtype=np.uint8), {}, {})
+        return empty if return_radii else empty[:2]
     if seq_len is None:
         seq_len = int(ann_df["end"].max())
 
-    label_binary_matrix = []
-    row_meta = {}
+    label_binary_matrix, row_meta, row_radii = [], {}, {}
     signature_to_row_idx = {}
-    for ann_id, grp in ann_df.groupby(list(ann_id_columns), sort=False):
-        ann_id = "_".join([str(x) for x in ann_id])
+    # Radius is part of the grouping key: one annotation ID can have separate
+    # instances at different radii, and equal footprints at different radii must not merge.
+    group_columns = list(ann_id_columns) + ["radius"]
+    for group_key, grp in ann_df.groupby(group_columns, sort=False, dropna=False):
+        *ann_id_parts, radius_value = group_key
+        ann_id = "_".join(str(x) for x in ann_id_parts)
+        radius = None if pd.isna(radius_value) else float(radius_value)
         row = np.zeros(seq_len, dtype=np.uint8)
         for start, end, geometry in zip(grp["start"], grp["end"], grp["geometry"]):
             start, end = int(start), int(end)
             if geometry == "pair":
-                endpoints = [p - 1 for p in (start, end) if p <= seq_len]
+                endpoints = [p - 1 for p in (start, end) if 1 <= p <= seq_len]
                 row[endpoints] = 1
             else:
-                row[start - 1 : end] = 1
+                start0 = max(start - 1, 0)
+                end0 = min(end, seq_len)
+                if start0 < end0:
+                    row[start0:end0] = 1
 
         signature = tuple(np.flatnonzero(row).tolist())
-        existing_idx = signature_to_row_idx.get(signature)
+        key = (signature, radius)
+        existing_idx = signature_to_row_idx.get(key)
         if existing_idx is None:
-            row_meta[len(label_binary_matrix)] = [ann_id]
-            signature_to_row_idx[signature] = len(label_binary_matrix)
+            row_idx = len(label_binary_matrix)
+            row_meta[row_idx] = [ann_id]
+            row_radii[row_idx] = radius
+            signature_to_row_idx[key] = row_idx
             label_binary_matrix.append(row)
         else:
             row_meta[existing_idx].append(ann_id)
 
-    return np.array(label_binary_matrix, dtype=np.uint8), row_meta
+    result = (np.array(label_binary_matrix, dtype=np.uint8), row_meta, row_radii)
+    return result if return_radii else result[:2]
 
 
 def convert_wide_annotations_to_binary_matrix(
     ann_df: pd.DataFrame,
     seq_len: int | None = None,
     ann_id_columns: list[str] | None = None,
+    *,
+    return_radii: bool = False,
 ):
-    """Binary matrix from wide-format residue annotations, single protein.
+    """Convert wide-format residue annotations to a binary matrix for one protein.
 
-    One row per residue (aa_pos); each of `ann_id_columns` is a key whose value becomes
-    an annotation id (no concatenation - each selected column's values are already
-    annotation ids, or become one via the {column}_{value} disambiguation below). Two
-    supported layouts: a single generic column (e.g. "annotation") whose values are
-    already fully-qualified ids ("Binding site", "Domain_SET", ...) - used as-is; or
-    several columns (concept types / clustering layers, one column per method) where the
-    id is "{column}_{value}" to disambiguate e.g. the same cluster id across layers.
-    Missing values (NaN) mean "not annotated in this column" and are dropped.
-    ann_id_columns=None or ["*"] uses every column except uniprot_id/aa_pos/seq_len/
-    length/end (the non-annotation columns fallback_seq_len also knows about).
-
-    Returns:
-        label_binary_matrix: shape (n_annotations, seq_len), 1 at annotated positions.
-        row_meta: dict mapping row index -> [id, ...] (annotations that share the exact
-            same set of positions are merged into one row).
+    ``radius`` is treated as row-level metadata and applies to each annotation present
+    at that residue. Rows are grouped by annotation ID and radius, so equal residue sets
+    at different radii are preserved as distinct tests. ``return_radii=True`` additionally
+    returns a dict mapping matrix row indices to radius (or None).
     """
-    label_binary_matrix = []
-    row_meta = {}
-    signature_to_row_idx = {}
-
+    if ann_df.empty:
+        empty = (np.zeros((0, seq_len or 0), dtype=np.uint8), {}, {})
+        return empty if return_radii else empty[:2]
     if seq_len is None:
         seq_len = int(ann_df["aa_pos"].max())
 
     if ann_id_columns is None or list(ann_id_columns) == ["*"]:
-        non_annotation_columns = ["uniprot_id", "aa_pos", "seq_len", "length", "end"]
+        non_annotation_columns = [
+            "uniprot_id", "aa_pos", "seq_len", "length", "end", "radius"
+        ]
         ann_id_columns = [c for c in ann_df.columns if c not in non_annotation_columns]
     single_column = len(ann_id_columns) == 1
+    radii = ann_df["radius"].to_numpy() if "radius" in ann_df.columns else np.full(len(ann_df), np.nan)
+    positions = ann_df["aa_pos"].to_numpy(dtype=np.int64) - 1
 
-    aa_pos_0_based = ann_df["aa_pos"].to_numpy(dtype=np.int64) - 1
-
+    label_binary_matrix, row_meta, row_radii = [], {}, {}
+    signature_to_row_idx = {}
     for col in ann_id_columns:
         not_na = ann_df[col].notna().to_numpy()
         col_values = ann_df[col].to_numpy()[not_na]
-        col_positions = aa_pos_0_based[not_na]
-        unique_values, inverse = np.unique(col_values, return_inverse=True)
-
-        for value_idx, value in enumerate(unique_values):
-            positions = col_positions[inverse == value_idx]
-            if positions.size == 0:
+        col_positions = positions[not_na]
+        col_radii = radii[not_na]
+        # Group by both annotation value and radius; this supports radius changes along
+        # a wide-format annotation column without merging distinct expansion definitions.
+        grouping = pd.DataFrame({"value": col_values, "position": col_positions, "radius": col_radii})
+        for (value, radius_value), grp in grouping.groupby(["value", "radius"], sort=False, dropna=False):
+            signature = tuple(np.unique(grp["position"].to_numpy(dtype=np.int64)).tolist())
+            if not signature:
                 continue
-
-            signature = tuple(np.unique(positions).tolist())
-            existing_idx = signature_to_row_idx.get(signature)
+            radius = None if pd.isna(radius_value) else float(radius_value)
             ann_id = str(value) if single_column else f"{col}_{value}"
-
+            key = (signature, radius)
+            existing_idx = signature_to_row_idx.get(key)
             if existing_idx is None:
                 row = np.zeros(seq_len, dtype=np.uint8)
-                row[list(signature)] = 1
+                valid_positions = [p for p in signature if 0 <= p < seq_len]
+                row[valid_positions] = 1
+                row_idx = len(label_binary_matrix)
                 label_binary_matrix.append(row)
-                row_idx = len(label_binary_matrix) - 1
-                signature_to_row_idx[signature] = row_idx
                 row_meta[row_idx] = [ann_id]
+                row_radii[row_idx] = radius
+                signature_to_row_idx[key] = row_idx
             else:
                 row_meta[existing_idx].append(ann_id)
 
-    return np.array(label_binary_matrix, dtype=np.uint8), row_meta
+    result = (np.array(label_binary_matrix, dtype=np.uint8), row_meta, row_radii)
+    return result if return_radii else result[:2]
 
 
 def get_protein_adjacency_matrix(
@@ -541,7 +537,7 @@ def summarize_annotation_test(
         df_pvals = df_pvals.merge(guide, on="uniprot_id", how="left")
 
     results_path = results_dir / (
-        f"{results_fn}.parquet" if format == "parquet" else f"{results_fn}.tsv.gz"
+        f"{result_fn}.parquet" if format == "parquet" else f"{result_fn}.tsv.gz"
     )
     if format == "parquet":
         df_pvals.to_parquet(results_path, index=False)
@@ -603,25 +599,33 @@ def process_protein(
     seq_len = seq_len or fallback_seq_len(prot_rvas_df, prot_ann_df)
 
     if ann_format == "long":
-        label_matrix, row_meta = convert_long_annotations_to_binary_matrix(
+        label_matrix, row_meta, row_radii = convert_long_annotations_to_binary_matrix(
             prot_ann_df,
             seq_len=seq_len,
             ann_include=ann_include,
             ann_id_columns=ann_id_columns,
+            return_radii=True,
         )
     else:
-        label_matrix, row_meta = convert_wide_annotations_to_binary_matrix(
-            prot_ann_df, seq_len=seq_len, ann_id_columns=ann_id_columns
+        label_matrix, row_meta, row_radii = convert_wide_annotations_to_binary_matrix(
+            prot_ann_df,
+            seq_len=seq_len,
+            ann_id_columns=ann_id_columns,
+            return_radii=True,
         )
     if label_matrix.shape[0] == 0:
         return None
 
-    expand_rows = (
-        rows_to_expand(row_meta, expand_include) if expand_include else None
+    # None means expand every annotation row; a provided list restricts expansion
+    # to annotation IDs with one of the requested prefixes. Only positive radii expand.
+    candidate_rows = (
+        range(label_matrix.shape[0])
+        if expand_include is None
+        else rows_to_expand(row_meta, expand_include)
     )
     radius_groups: dict[float, list[int]] = {}
-    for i in expand_rows:
-        radius = row_meta[i]["radius"]
+    for i in candidate_rows:
+        radius = row_radii.get(i)
         if radius is not None and pd.notna(radius) and radius > 0:
             radius_groups.setdefault(float(radius), []).append(i)
     if radius_groups:
@@ -801,7 +805,7 @@ def run_annotation_test(
         reference_dir,
         cleanup_per_protein=cleanup_per_protein,
         format=format,
-        result_fn,
+        result_fn=result_fn,
     )
 
 

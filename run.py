@@ -872,7 +872,7 @@ if __name__ == '__main__':
         # option to use "radius" column in annotation file: 
         ## if radius column exists, otherwise, use neighborhood argument
         df_ann = read_table(Path(args.annotation_file))
-        if expand and ('radius' in df_ann.columns):
+        if 'radius' in df_ann.columns:
             # ensure each annotation type only has one radius
             radius_nunique = df_ann.groupby(list(ann_id_columns))['radius'].nunique(dropna=False)
             incohesive = radius_nunique[radius_nunique > 1]
