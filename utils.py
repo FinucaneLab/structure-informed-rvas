@@ -178,25 +178,64 @@ def get_pae_matrix_structure(pae_file_pos_guide, pae_dir, uniprot_id):
         pae_matrix = np.minimum(pae_matrix, pae_matrix.T)
     return pae_matrix
 
-def get_adjacency_matrix(pdb_pae_file_pos_guide, pdb_dir, pae_dir, uniprot_id, radius, pae_cutoff):
-    logger.debug(f"Computing adjacency matrix for {uniprot_id} with radius={radius}, pae_cutoff={pae_cutoff}")
-    distance_matrix = get_distance_matrix_structure(pdb_pae_file_pos_guide, pdb_dir, uniprot_id)
+def get_distance_and_pae_matrices(
+    pdb_pae_file_pos_guide, pdb_dir, pae_dir, uniprot_id, pae_cutoff
+):
+    """Raw (n_residues, n_residues) distance matrix and, if pae_cutoff != 0, PAE matrix.
+
+    Split out from get_adjacency_matrix so callers that need adjacency matrices at several
+    radii for the same protein (e.g. per-annotation expansion radii) can parse the pdb/pae
+    files once and reuse these via threshold_adjacency_matrix, instead of rebuilding these
+    two O(n_residues^2) matrices from scratch for every radius - the dominant cost for very
+    large proteins (e.g. titin).
+
+    Returns (None, None) if no structure is found for uniprot_id.
+    """
+    distance_matrix = get_distance_matrix_structure(
+        pdb_pae_file_pos_guide, pdb_dir, uniprot_id
+    )
     if distance_matrix is None:
         logger.warning(f"No distance matrix found for {uniprot_id}, returning None")
-        return None
-    dist_thresh = (distance_matrix < radius) * 1
-    if pae_cutoff == 0:
+        return None, None
+
+    pae_matrix = None
+    if pae_cutoff != 0:
+        pae_matrix = get_pae_matrix_structure(
+            pdb_pae_file_pos_guide, pae_dir, uniprot_id
+        )
+    return distance_matrix, pae_matrix
+
+def threshold_adjacency_matrix(distance_matrix, pae_matrix, radius, pae_cutoff):
+    """Adjacency matrix at one radius/pae_cutoff, from matrices built by get_distance_and_pae_matrices.
+
+    bool (not the previous int64-via-`* 1`) - an 8x memory cut on these (n_residues,
+    n_residues) arrays, material for very large proteins. Callers that need 0/1 ints (e.g.
+    matrix-multiplying against allele counts) get the same values: numpy treats True/False
+    as 1/0 in arithmetic.
+    """
+    dist_thresh = distance_matrix < radius
+    if pae_cutoff == 0 or pae_matrix is None:
         pae_thresh = np.ones_like(dist_thresh)
     else:
-        pae_matrix = get_pae_matrix_structure(pdb_pae_file_pos_guide, pae_dir, uniprot_id)
-        if pae_matrix is None:
-            pae_thresh = np.ones_like(dist_thresh)
-        else:
-            pae_thresh = (pae_matrix < pae_cutoff) * 1
+        pae_thresh = pae_matrix < pae_cutoff
     adj_mat = dist_thresh & pae_thresh
-    logger.debug(f"Adjacency matrix computed: {np.sum(adj_mat)} edges from {adj_mat.shape[0]} positions")
+    logger.debug(
+        f"Adjacency matrix computed: {np.sum(adj_mat)} edges from {adj_mat.shape[0]} positions"
+    )
     return adj_mat
 
+def get_adjacency_matrix(
+    pdb_pae_file_pos_guide, pdb_dir, pae_dir, uniprot_id, radius, pae_cutoff
+):
+    logger.debug(
+        f"Computing adjacency matrix for {uniprot_id} with radius={radius}, pae_cutoff={pae_cutoff}"
+    )
+    distance_matrix, pae_matrix = get_distance_and_pae_matrices(
+        pdb_pae_file_pos_guide, pdb_dir, pae_dir, uniprot_id, pae_cutoff
+    )
+    if distance_matrix is None:
+        return None
+    return threshold_adjacency_matrix(distance_matrix, pae_matrix, radius, pae_cutoff)
 
 def get_chi2_pvals_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_ctrl):
     """Chi-square p-value lookup table over every (case_ac, ctrl_ac) pair in a neighborhood.

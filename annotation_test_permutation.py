@@ -34,7 +34,8 @@ from cmh import (
 from logger_config import get_logger
 from utils import (
     DEFAULT_SCREEN_CHI2,
-    get_adjacency_matrix,
+    get_distance_and_pae_matrices,
+    threshold_adjacency_matrix,
     get_case_control_ac_matrix,
     get_chi2_pvals_case_control,
     get_stratified_case_ac_matrix,
@@ -223,21 +224,26 @@ def convert_wide_annotations_to_binary_matrix(
     return result if return_radii else result[:2]
 
 
-def get_protein_adjacency_matrix(
-    uniprot_id: str, reference_dir: str, radius: float, pae_cutoff: float = 0
+def get_protein_distance_pae_matrices(
+    uniprot_id: str, reference_dir: str, pae_cutoff: float = 0
 ):
-    """CA-CA distance (+ optional PAE) adjacency matrix for one protein.
+    """Raw CA-CA distance matrix (+ optional PAE matrix) for one protein.
 
     reference_dir contains pdb_pae_file_pos_guide.tsv, pdb_files/, pae_files/. Row/col i
-    is aa_pos i+1. Returns None if uniprot_id isn't in the guide.
+    is aa_pos i+1. Returns (None, None) if uniprot_id isn't in the guide.
+
+    A protein's annotations can carry several distinct expansion radii (see radius_groups
+    in process_protein); these two matrices don't depend on radius, so callers should build
+    them once per protein and reuse them across radii via utils.threshold_adjacency_matrix,
+    rather than re-parsing the pdb/pae files (and rebuilding these O(n_residues^2) matrices)
+    once per radius - the dominant cost for very large proteins (e.g. titin).
     """
     reference_dir = Path(reference_dir)
-    return get_adjacency_matrix(
+    return get_distance_and_pae_matrices(
         reference_dir / "pdb_pae_file_pos_guide.tsv",
         reference_dir / "pdb_files",
         reference_dir / "pae_files",
         uniprot_id,
-        radius,
         pae_cutoff,
     )
 
@@ -252,7 +258,7 @@ def expand_annotations_neighborhood(
     label_binary_matrix: (n_annotations, seq_len), as returned by the
     convert_*_annotations_to_binary_matrix functions above - radius/pae_cutoff is baked
     into adjacency_matrix, so it applies uniformly to every row picked by rows_to_expand.
-    adjacency_matrix: (n_residues, n_residues) from get_protein_adjacency_matrix.
+    adjacency_matrix: (n_residues, n_residues) from utils.threshold_adjacency_matrix.
     rows_to_expand: row indices to expand (e.g. only "Binding site"/"Active site" rows,
         picked from row_meta - broad concepts like "Domain" don't make sense to expand
         this way). Default: expand every row.
@@ -629,21 +635,24 @@ def process_protein(
         if radius is not None and pd.notna(radius) and radius > 0:
             radius_groups.setdefault(float(radius), []).append(i)
     if radius_groups:
-        # future fix:
-        ## Distance/PAE matrices don't depend on radius - build them once per protein and
-        ## threshold separately for each of this protein's distinct expansion radii, rather
-        ## than re-parsing the pdb/pae files (and rebuilding these O(n_residues^2) matrices)
-        ## once per radius group.
-        for radius, rows in radius_groups.items():
-            adjacency_matrix = get_protein_adjacency_matrix(
-                uniprot_id, str(reference_dir), radius, pae_cutoff
+        # Distance/PAE matrices don't depend on radius - build them once per protein and
+        # threshold separately for each of this protein's distinct expansion radii, rather
+        # than re-parsing the pdb/pae files (and rebuilding these O(n_residues^2) matrices)
+        # once per radius group.
+        distance_matrix, pae_matrix = get_protein_distance_pae_matrices(
+            uniprot_id, str(reference_dir), pae_cutoff
+        )
+        if distance_matrix is None:
+            warnings.warn(
+                f"{uniprot_id}: no structure in reference dir, skipping expansion at radii "
+                f"{sorted(radius_groups)}",
+                UserWarning,
             )
-            if adjacency_matrix is None:
-                warnings.warn(
-                    f"{uniprot_id}: no structure in reference dir, skipping expansion",
-                    UserWarning,
+        else:
+            for radius, rows in radius_groups.items():
+                adjacency_matrix = threshold_adjacency_matrix(
+                    distance_matrix, pae_matrix, radius, pae_cutoff
                 )
-            else:
                 label_matrix = expand_annotations_neighborhood(
                     label_matrix, adjacency_matrix, rows
                 )
