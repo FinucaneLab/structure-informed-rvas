@@ -894,7 +894,7 @@ if __name__ == '__main__':
             
         run_annotation_test(
             df_rvas,
-            read_table(Path(args.annotation_file)),
+            df_ann,
             ann_format=args.annotation_format,
             ann_id_columns=ann_id_columns,
             expand_include=None if expand in (None, 'all') else expand.split(','),
