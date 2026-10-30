@@ -137,6 +137,9 @@ def convert_long_annotations_to_binary_matrix(
         ann_df = ann_df[ann_df[ann_id_columns[0]].isin(ann_include)]
     if "geometry" not in ann_df.columns:
         ann_df = ann_df.assign(geometry="range")
+    if "radius" not in ann_df.columns:
+        ann_df = ann_df.assign(radius=np.nan)  # same fallback as the wide converter
+    ann_df = validate_radius(ann_df)  # before the empty return, so bad radii always fail
 
     if ann_df.empty:
         empty = (np.zeros((0, seq_len or 0), dtype=np.uint8), {}, {})
@@ -212,6 +215,7 @@ def convert_wide_annotations_to_binary_matrix(
         ``return_radii=True`` additionally returns a dict mapping matrix row indices to their radius (or None)
     """
 
+    ann_df = validate_radius(ann_df)
     if ann_df.empty:
         empty = (np.zeros((0, seq_len or 0), dtype=np.uint8), {}, {})
         return empty if return_radii else empty[:2]
@@ -557,6 +561,7 @@ def summarize_annotation_test(
     `{uniprot_id}_annotation_pvals.parquet` shards (results.* already carries every row
     from them, plus global FDR/FWER) and remove the now-empty per_protein/ dir.
     """
+    result_fn = normalize_result_fn(result_fn)
     accumulator = NullPvalAccumulator(n_perm)
     for pvals_df in per_protein_results:
         accumulator.add(pvals_df)
@@ -594,6 +599,92 @@ def summarize_annotation_test(
         per_protein_dir.rmdir()
 
     return df_pvals
+
+
+_RESULT_FN_SUFFIXES = (".tsv.gz", ".parquet", ".tsv")
+
+
+def normalize_result_fn(result_fn: str) -> str:
+    """Bare filename stem for the pooled results file.
+
+    Strips a trailing .tsv.gz/.parquet/.tsv (the extension is added from --format) and
+    rejects anything with a path component, so results never land outside results_dir.
+    """
+    if not result_fn or Path(result_fn).name != result_fn or result_fn in (".", ".."):
+        raise ValueError(
+            f"Annotation result filename must be a plain file name without a directory, got {result_fn!r}"
+        )
+    for suffix in _RESULT_FN_SUFFIXES:
+        if result_fn.endswith(suffix) and len(result_fn) > len(suffix):
+            return result_fn[: -len(suffix)]
+    return result_fn
+
+
+def add_result_fn_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--annotation-result-fn",
+        type=str,
+        default="results",
+        help="File name (no directory) for the pooled annotation-test results; the "
+        "extension comes from the format (default results.tsv.gz). A trailing "
+        ".tsv.gz/.tsv/.parquet is ignored.",
+    )
+
+
+def validate_radius(ann_df: pd.DataFrame) -> pd.DataFrame:
+    """ann_df with a numeric, non-negative ``radius`` column (NaN allowed = no expansion).
+
+    Returns ann_df unchanged if it has no radius column. Raises ValueError for
+    non-numeric (e.g. 'multiple-small') or negative radii.
+    """
+    if "radius" not in ann_df.columns:
+        return ann_df
+    radius = pd.to_numeric(ann_df["radius"], errors="coerce")
+    bad = ann_df["radius"][radius.isna() & ann_df["radius"].notna()]
+    if not bad.empty:
+        raise ValueError(
+            "ann_df 'radius' column must be numeric (Angstroms); got non-numeric values "
+            f"such as {bad.unique()[:3].tolist()}"
+        )
+    if (radius < 0).any():
+        raise ValueError("ann_df 'radius' column must be non-negative")
+    return ann_df.assign(radius=radius)
+
+
+def _expansion_requested(
+    ann_df: pd.DataFrame,
+    ann_format: str,
+    ann_id_columns: tuple[str, ...] | list[str] | None,
+    expand_include: list[str] | None,
+) -> bool:
+    """True if some annotation would be expanded: radius > 0 and (expand_include is None
+    or the annotation id starts with one of its prefixes). Mirrors rows_to_expand, but
+    on the raw table so it can run before any protein is processed."""
+    if "radius" not in ann_df.columns:
+        return False
+    positive = ann_df[ann_df["radius"].fillna(0) > 0]
+    if positive.empty:
+        return False
+    if expand_include is None:
+        return True
+    if not expand_include:
+        return False
+    prefixes = tuple(expand_include)
+    if ann_format == "long":
+        cols = list(ann_id_columns)
+        ids = positive[cols].astype(str).agg("_".join, axis=1)
+        return bool(ids.str.startswith(prefixes).any())
+    if ann_id_columns is None or list(ann_id_columns) == ["*"]:
+        skip = {"uniprot_id", "aa_pos", "seq_len", "length", "end", "radius"}
+        cols = [c for c in positive.columns if c not in skip]
+    else:
+        cols = list(ann_id_columns)
+    for col in cols:
+        values = positive[col].dropna().astype(str).unique()
+        ids = values if len(cols) == 1 else [f"{col}_{v}" for v in values]
+        if any(i.startswith(prefixes) for i in ids):
+            return True
+    return False
 
 
 def fallback_seq_len(prot_rvas_df: pd.DataFrame, prot_ann_df: pd.DataFrame) -> int:
@@ -757,7 +848,7 @@ def run_annotation_test(
         annotated. None (default) expands every annotation whose radius > 0.
     reference_dir: structure-informed-rvas reference dir (pdb_files/, pae_files/,
         pdb_pae_file_pos_guide.tsv, protein_sequence_guide.tsv). Used for protein length
-        and, if expand_radius > 0, for the adjacency matrix.
+        and, for annotations with radius > 0, for the adjacency matrix.
     df_filter: variants/positions/proteins to exclude from rvas_df before testing, see
         filter_variants.
     df_include: variants/positions/proteins to restrict rvas_df to before testing (e.g. a
@@ -782,8 +873,15 @@ def run_annotation_test(
     results_dir = Path(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    if reference_dir is None and "radius" in ann_df.columns and (ann_df["radius"].fillna(0) > 0).any():
-        raise ValueError("ann_df has annotations with radius > 0, which requires reference_dir")
+    result_fn = normalize_result_fn(result_fn)
+    ann_df = validate_radius(ann_df)
+    if reference_dir is None and _expansion_requested(
+        ann_df, ann_format, ann_id_columns, expand_include
+    ):
+        raise ValueError(
+            "ann_df has annotations that would be expanded (radius > 0 and matching "
+            "expand_include), which requires reference_dir"
+        )
 
     rvas_df = filter_variants(rvas_df, df_include, mode="include")
     rvas_df = filter_variants(rvas_df, df_filter, mode="exclude")
@@ -899,7 +997,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--expand-include",
         default=None,
-        help="Comma-separated annotation id prefixes to expand, e.g. 'Binding site,Active site' (default: expand all)",
+        help="Comma-separated annotation id prefixes to expand, e.g. 'Binding site,Active site' (default: expand every annotation with radius > 0)",
+    )
+    parser.add_argument(
+        "--expand-radius",
+        type=float,
+        default=None,
+        help="Neighborhood radius (Angstroms) for expansion, used when the annotation table has no 'radius' column (default: no expansion)",
     )
     parser.add_argument(
         "--pae-cutoff",
@@ -972,22 +1076,18 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="rvas column defining CMH strata; adjusts the test for stratum-dependent case fraction",
     )
-    parser.add_argument(
-        '--annotation-result-fn',
-        type=str,
-        default='results',
-        help='''
-        Filename for resulting annotation-test pooled results, without the filetype ending. (default results.tsv.gz).
-        '''
-    )
+    add_result_fn_argument(parser)
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
+    ann_df = read_table(args.ann_path)
+    if args.expand_radius is not None and "radius" not in ann_df.columns:
+        ann_df["radius"] = args.expand_radius
     run_annotation_test(
         read_table(args.rvas_path),
-        read_table(args.ann_path),
+        ann_df,
         ann_format=args.ann_format,
         ann_include=args.ann_include.split(",") if args.ann_include else None,
         ann_id_columns=tuple(args.ann_id_columns.split(",")),
