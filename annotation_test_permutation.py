@@ -33,6 +33,7 @@ from cmh import (
 )
 from logger_config import get_logger
 from utils import (
+    DEFAULT_MIN_ALLELES,
     DEFAULT_SCREEN_CHI2,
     SCREEN_CHI2_GREATER,
     fisher_greater_pvals,
@@ -86,16 +87,16 @@ def filter_variants(
 
 
 def filter_proteins_by_allele_count(
-    rvas_df: pd.DataFrame, min_alleles: int = 5
+    rvas_df: pd.DataFrame, min_alleles: int = DEFAULT_MIN_ALLELES
 ) -> list[str]:
-    """uniprot_ids with more than min_alleles total case AND control alleles.
+    """uniprot_ids with at least min_alleles total case AND control alleles.
 
     Below that, the permutation null still runs, but there's not enough signal for the
     result to mean much - drop these proteins rather than let them pad the total test count.
     """
     totals = rvas_df.groupby("uniprot_id")[["ac_case", "ac_control"]].sum()
     return totals[
-        (totals["ac_case"] > min_alleles) & (totals["ac_control"] > min_alleles)
+        (totals["ac_case"] >= min_alleles) & (totals["ac_control"] >= min_alleles)
     ].index.tolist()
 
 
@@ -845,7 +846,7 @@ def run_annotation_test(
     reference_dir: str | Path | None = None,
     df_filter: pd.DataFrame | None = None,
     df_include: pd.DataFrame | None = None,
-    min_alleles: int = 5,
+    min_alleles: int = DEFAULT_MIN_ALLELES,
     n_perm: int = 1000,
     seed: int = 0,
     n_workers: int = 1,
@@ -883,7 +884,7 @@ def run_annotation_test(
         filter_variants.
     df_include: variants/positions/proteins to restrict rvas_df to before testing (e.g. a
         gene panel) - applied together with df_filter, not instead of it.
-    min_alleles: proteins need more than this many total case AND control alleles to be
+    min_alleles: proteins need at least this many total case AND control alleles to be
         tested, see filter_proteins_by_allele_count.
     stratum_col: if set, CMH-adjust for this rvas_df column (e.g. ancestry/sex strata): null
         redrawn within strata, see test_protein_annotations_cmh. None (default) = unadjusted.
@@ -1063,8 +1064,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--min-alleles",
         type=int,
-        default=5,
-        help="Proteins need more than this many total case AND control alleles",
+        default=DEFAULT_MIN_ALLELES,
+        help="Proteins need at least this many total case AND control alleles",
     )
     parser.add_argument(
         "--n-perm",
@@ -1114,7 +1115,14 @@ def _parse_args() -> argparse.Namespace:
         help="greater = one-sided case enrichment inside the annotation",
     )
     add_result_fn_argument(parser)
-    return parser.parse_args()
+    args = parser.parse_args()
+    # At least 1, matching run.py. The comparison in
+    # filter_proteins_by_allele_count is inclusive, so 0 is vacuously true and
+    # admits proteins with no case alleles at all; each contributes a vacuous
+    # p_value = 1.0 row that pads the global FDR and FWER pools.
+    if args.min_alleles < 1:
+        parser.error(f"--min-alleles must be at least 1, got {args.min_alleles}")
+    return args
 
 
 def main() -> None:

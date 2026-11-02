@@ -19,6 +19,17 @@ DEFAULT_SCREEN_CHI2 = 2.706
 # same one-sided p (0.10) margin as 2.706 two-sided
 SCREEN_CHI2_GREATER = 1.642
 
+# Allele floor for the case/control scan, applied inclusively: the default of 5
+# keeps a gene with 5 case and 5 control alleles.
+#
+# Shared because two filters enforce it at different moments and must not drift.
+# The gene-level filter chooses which genes to scan at all; the per-protein guard
+# re-checks what is LEFT after --remove-nbhd conditioning has deleted variants,
+# which is the only reason that second check exists. They previously disagreed --
+# the filter kept `> 5` while the guard skipped on `< 5` -- so a conditioned gene
+# was held to a looser floor than an unconditioned one.
+DEFAULT_MIN_ALLELES = 5
+
 def get_pairwise_distances(pdb_file, *args):
     # optional arguments i and j:
     # i: start from aminoacid i (inclusive)
@@ -441,6 +452,40 @@ def get_ac_per_residue(df, colname, n_res):
     ac_by_pos = df.groupby('aa_pos')[colname].sum().reset_index()
     case_ac_per_residue[ac_by_pos.aa_pos - 1, 0] = ac_by_pos[colname]
     return case_ac_per_residue
+
+
+def restrict_to_structure(df, n_res, uniprot_id=''):
+    """
+    Drop variants whose aa_pos falls outside the structure's 1..n_res.
+
+    Variants are mapped against a protein's UniProt isoform, which can be longer
+    than the structure solved for it -- and the guide's structure can be a
+    fragment. Out-of-range positions reach get_ac_per_residue, which indexes
+    `[aa_pos - 1]` with no check: aa_pos > n_res raises IndexError and costs the
+    whole protein to the batch handler, while aa_pos < 1 indexes from the end and
+    silently credits the wrong residue, which is the worse of the two.
+
+    Returns (df_kept, dropped_positions). dropped_positions is sorted and unique,
+    so the caller can name them; it is empty when nothing was out of range.
+    """
+    in_range = df['aa_pos'].between(1, n_res)
+    if bool(in_range.all()):
+        return df, []
+    out = df.loc[~in_range, 'aa_pos']
+    # A missing aa_pos is not in range and is not an integer either. Counted and
+    # dropped, but kept out of the position list, which int() cannot represent --
+    # and which would otherwise raise ValueError, caught by the batch handler and
+    # costing the whole protein over one blank cell.
+    n_missing = int(out.isna().sum())
+    dropped = sorted(int(p) for p in out.dropna().unique())
+    shown = ', '.join(str(d) for d in dropped[:10]) or 'none'
+    logger.warning(
+        f'{uniprot_id}: dropping {int((~in_range).sum())} variant(s) outside the '
+        f'structure (1..{n_res}); positions {shown}'
+        + (' ...' if len(dropped) > 10 else '')
+        + (f'; {n_missing} with no aa_pos' if n_missing else '')
+    )
+    return df.loc[in_range], dropped
 
 
 def get_random_ac_per_residue(case_ac_per_residue, total_ac_per_residue, n_sim, seed=None):

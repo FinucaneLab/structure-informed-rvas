@@ -19,7 +19,7 @@ neighborhood sits at X_i ~= lambda_hat * M_i, so Test A does not call it.
 
 Both tests are one-sided (upper tail). Each is corrected separately by the existing
 empirical FDR/FWER machinery; a neighborhood passes when it passes both, which is
-recorded as fdr_max = max(fdr_poisson, fdr_binomial) and likewise for FWER.
+recorded as fdr = max(fdr_poisson, fdr_binomial) and likewise for fwer.
 
 M_i must be the summed rate of ALL possible missense SNVs in the neighborhood, so it
 comes from the precomputed per-residue table (precompute_mu_per_residue.py), not from
@@ -36,7 +36,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import poisson, binom
 
-from utils import get_adjacency_matrix, write_dataset
+from utils import get_adjacency_matrix, restrict_to_structure, write_dataset
 from logger_config import get_logger
 from empirical_fdr import compute_fdr
 from scan_test import MULTI_RADII_SMALL, MULTI_RADII_BIG, P_FLOOR
@@ -163,19 +163,6 @@ def estimate_lambda(df_rvas, df_mu, rate_calibration, calibration_genes=None, n_
 # ---------------------------------------------------------------------------
 # per-residue aggregation
 # ---------------------------------------------------------------------------
-
-def restrict_to_structure(df, n_res, uniprot_id):
-    """Drop variants whose residue position falls outside the solved structure."""
-    in_range = (df.aa_pos >= 1) & (df.aa_pos <= n_res)
-    n_out = int((~in_range).sum())
-    if n_out:
-        logger.warning(
-            f'{uniprot_id}: dropping {n_out} variants with aa_pos outside the structure '
-            f'(n_res = {n_res})'
-        )
-        df = df[in_range]
-    return df
-
 
 def sum_per_residue(df, colname, n_res, dtype=float):
     """Sum a per-variant column onto residues. Returns an (n_res, 1) column vector."""
@@ -336,7 +323,7 @@ def compute_all_pvals_mu(
         raise FileNotFoundError(f'No structure available for {uniprot_id}')
 
     n_res = adj_matrices[radii[0]].shape[0]
-    df = restrict_to_structure(df, n_res, uniprot_id)
+    df, _ = restrict_to_structure(df, n_res, uniprot_id)
 
     x_obs = sum_per_residue(df, 'ac_case', n_res, dtype=int)
     # Opportunity comes from the full possible-missense universe, not from the observed
@@ -436,12 +423,11 @@ def _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage
     Gene-level selection. Called AFTER estimate_lambda -- see the note there on why the
     order matters.
 
-    Applied as strictly greater than min_denovo, matching the existing 3DNT gene filter
-    in scan_test._filter_proteins_by_allele_count (which uses `> min_alleles`), so the
-    default of 5 requires at least 6 de novos.
+    Applied inclusively, so the default of 5 keeps a gene with 5 de novos, matching
+    the 3DNT gene filter in scan_test._filter_proteins_by_allele_count.
     """
     grouped = df_rvas.groupby('uniprot_id')['ac_case'].sum()
-    uniprot_id_list = grouped[grouped > min_denovo].index.tolist()
+    uniprot_id_list = grouped[grouped >= min_denovo].index.tolist()
 
     # A gene is only testable if it carries a nonzero total mutation rate. Genes with
     # rows in the table but zero total rate are those the rate model does not cover at
@@ -482,7 +468,7 @@ def _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage
 
     logger.info(
         f'Selected {len(uniprot_id_list)} of {len(grouped)} genes for analysis '
-        f'(more than {min_denovo} de novos each)'
+        f'(at least {min_denovo} de novos each)'
     )
     return uniprot_id_list
 
@@ -562,11 +548,16 @@ def _merge_test_results(df_a, df_b, fdr_cutoff=0.05, fwer_cutoff=0.05):
               'exp_binomial', 'obs_exp_binomial', 'radius_binomial']
     merged = a.merge(b[keep_b], on=['uniprot_id', 'aa_pos'], how='inner')
 
-    # A neighborhood passes only if it passes both tests.
-    merged['fdr_max'] = merged[['fdr_poisson', 'fdr_binomial']].max(axis=1)
-    merged['fwer_max'] = merged[['fwer_poisson', 'fwer_binomial']].max(axis=1)
-    merged['sig_fwer_both'] = merged['fwer_max'] < fwer_cutoff
-    merged['sig_fdr_both'] = merged['fdr_max'] < fdr_cutoff
+    # A neighborhood passes only if it passes both tests, so the combined
+    # correction is the max of the two. Named `fdr`/`fwer` rather than
+    # fdr_max/fwer_max so that a results table carries the same column names
+    # whichever null produced it: the per-test values stay available as
+    # fdr_poisson/fdr_binomial, and nothing downstream has to know which file
+    # it is reading in order to find the correction to threshold on.
+    merged['fdr'] = merged[['fdr_poisson', 'fdr_binomial']].max(axis=1)
+    merged['fwer'] = merged[['fwer_poisson', 'fwer_binomial']].max(axis=1)
+    merged['sig_fwer_both'] = merged['fwer'] < fwer_cutoff
+    merged['sig_fdr_both'] = merged['fdr'] < fdr_cutoff
     return merged
 
 
@@ -582,8 +573,8 @@ def _compute_both_fdrs(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pv
 
 
 def summarize_mu_results(df_results, fdr_cutoff):
-    top = df_results.loc[df_results.groupby('uniprot_id')['fdr_max'].idxmin()]
-    sig = top[top.fdr_max < fdr_cutoff].sort_values(by='fdr_max')
+    top = df_results.loc[df_results.groupby('uniprot_id')['fdr'].idxmin()]
+    sig = top[top.fdr < fdr_cutoff].sort_values(by='fdr')
     logger.info('')
     logger.info(f'{len(sig)} of {len(top)} proteins have a neighborhood passing BOTH tests '
                 f'at FDR < {fdr_cutoff}')

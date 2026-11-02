@@ -322,8 +322,11 @@ unconstrained regions, and a neighborhood there looks enriched without being spe
 Such a neighborhood sits at `X_i ~ lambda_hat * M_i`, so Test A does not call it.
 
 Each test is corrected separately by the usual empirical FDR/FWER machinery, and a
-neighborhood passes when it passes both: `fdr_max = max(fdr_poisson, fdr_binomial)`,
-likewise `fwer_max`. On simulated data each test rejects at 4% under the true null,
+neighborhood passes when it passes both: `fdr = max(fdr_poisson, fdr_binomial)`,
+likewise `fwer`. Those carry the same names the case/control scan writes, so the
+column to threshold on is the same either way. Only the corrections are shared:
+this table has no `p_value` column, keeping the per-test `p_poisson` and
+`p_binomial` instead. On simulated data each test rejects at 4% under the true null,
 Test B inflates to 17% under regional constraint while Test A stays at 4%, Test A
 inflates to 80% under uniform gene-level enrichment while Test B stays at 4%, and
 requiring both still recovers an injected cluster with at least 98% power.
@@ -386,10 +389,15 @@ to 1 for a model that already gives absolute expected counts.
 
 ### Other flags
 
-- `--min-denovo` (default 5) minimum de novos per gene, applied as strictly greater
-  than, matching `scan_test._filter_proteins_by_allele_count`; so the default requires
-  at least 6. Note the existing gene filter is internally inconsistent — it gates on
-  `> 5` in one place and `< 5` in another — and this mode mirrors the binding one.
+- `--min-denovo` (default 5) minimum de novos per gene, applied inclusively, so the
+  default keeps a gene with 5. Mirrors `--min-alleles` in the case/control scan.
+  Must be at least 1: 0 is vacuously true and would admit every gene in the table.
+- `--min-alleles` (default 5) minimum case AND control alleles per gene for the
+  case/control scan and the annotation test, applied inclusively. It is enforced
+  three times — choosing which genes to scan, re-checking what survives
+  `--remove-nbhd` conditioning, and re-checking what falls inside the structure —
+  and must be at least 1, since 0 admits a gene with no case alleles and the
+  per-neighborhood ratio then divides by zero.
 - `--max-residues` (default 10000) skips very long proteins; the distance matrix scales
   as `n_res^2`, so titin alone would need 9.4 GB.
 - `--min-mu-coverage` (default 0, i.e. report only) skips genes whose rate coverage is
@@ -405,7 +413,8 @@ to 1 for a model that already gives absolute expected counts.
 
 Results are written per test into the `poisson` and `binomial` HDF5 groups of the
 p-value file, and merged into one TSV with `p_`/`fdr_`/`fwer_` columns for each test,
-plus `fdr_max`, `fwer_max`, per-gene `n_denovo_gene`, `mu_gene`, and `mu_coverage`.
+plus the combined `fdr` and `fwer`, per-gene `n_denovo_gene`, `mu_gene`, and
+`mu_coverage`.
 
 ### Splitting the scan across jobs
 
@@ -443,13 +452,13 @@ Combining warns if the chunks disagree on `lambda_hat`.
   1.50, and Test A's per-gene FWER came out at 14.3% against a nominal 5%.
 
   Read Test A as a direction-of-effect guard, not as significance. Two things follow.
-  Quote `fdr_binomial` / `fwer_binomial` and the combined `fdr_max` / `fwer_max`, never
+  Quote `fdr_binomial` / `fwer_binomial` and the combined `fdr` / `fwer`, never
   `fdr_poisson` on its own. And since Test A is the guard against regional constraint, a
   too-liberal Test A under-flags, so "passes Test B but not Test A" coming out empty is
   weak evidence rather than a demonstration that no hit is a constraint artifact.
 
   Test B is unaffected (4.3% on the same run) because conditioning on `N_g` cancels the
-  selection exactly, and `fdr_max < q` requires `fdr_binomial < q`, so the reported set
+  selection exactly, and `fdr < q` requires `fdr_binomial < q`, so the reported set
   is a subset of the Test B set and inherits its validity. Running without `--min-denovo`
   removes the issue at the cost of testing every gene.
 - FDR control over the *intersection* of two rejection sets is not guaranteed by the two
