@@ -266,9 +266,16 @@ python run.py --pre-mapped-rvas rvas.mapped.parquet --reference-dir sir-referenc
 python run.py --pre-mapped-rvas rvas.mapped.parquet --reference-dir sir-reference-data/ \
   --annotation-file clusters.parquet --annotation-format wide --annotation-id cluster_id \
   --results-dir results/
+
+# long, radius column in the file, expand every annotation
+python run.py --pre-mapped-rvas rvas.mapped.parquet --reference-dir sir-reference-data/ \
+  --annotation-file annotations_with_radius.parquet --annotation-expand all \
+  --results-dir results/
 ```
 
-`--annotation-expand` takes id prefixes or `all`; without it nothing is expanded. Output is `results/annotation_test/results.tsv.gz` with `p_value`, `local_fdr`/`local_fwer`, `global_fdr`/`global_fwer` and `bh_fdr`. `--df-filter` (columns `uniprot_id`, optionally `aa_pos`, `aa_ref`, `aa_alt`) restricts the RVAS data to those proteins/positions/variants before the test, which also changes the null. A crashed run resumes from `per_protein/` shards if rerun with the same `--results-dir` and `--n-sims`.
+`--annotation-expand` takes id prefixes or `all`; without it nothing is expanded. Expansion requires `--reference-dir`. Output is `results/annotation_test/results.tsv.gz` (change the name with `--annotation-result-fn`: a plain file name with no directory; a trailing `.tsv.gz`, `.tsv` or `.parquet` is ignored and the extension comes from the format) with `p_value`, `local_fdr`/`local_fwer`, `global_fdr`/`global_fwer` and `bh_fdr`. `--df-filter` (columns `uniprot_id`, optionally `aa_pos`, `aa_ref`, `aa_alt`) restricts the RVAS data to those proteins/positions/variants before the test, which also changes the null. A crashed run resumes from `per_protein/` shards if rerun with the same `--results-dir` and `--n-sims`. Note that existing shards are reused even if the radius, seed or annotations have changed, so use a fresh `--results-dir` after changing any of those.
+
+To use a different radius per annotation type (e.g. by `concept_type`), add a numeric `radius` column (Angstroms) to the annotation file. It is used instead of `--neighborhood-radius`, but only for annotations selected by `--annotation-expand` (use `all` to expand every annotation). Rows with radius 0 or empty are not expanded. In long format, every row of a given annotation must have the same radius. `--neighborhood-radius` applies only when the file has no `radius` column, and must then be numeric (`multiple-small`/`multiple-big` are not supported for annotation expansion). Without `--annotation-expand`, the `radius` column is ignored.
 
 ### Full Pipeline (run_all)
 
