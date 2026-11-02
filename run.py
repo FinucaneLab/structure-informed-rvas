@@ -9,7 +9,7 @@ from scan_test import scan_test
 from scan_test_cmh import scan_test_cmh, DEFAULT_SCREEN_CHI2
 from read_data import map_to_protein, filter_by_total_ac
 from logger_config import get_logger
-from utils import get_nbhd_info
+from utils import DEFAULT_MIN_ALLELES, get_nbhd_info
 from annotation_test_permutation import (
     add_result_fn_argument,
     normalize_result_fn,
@@ -282,13 +282,26 @@ if __name__ == '__main__':
         '''
     )
     parser.add_argument(
+        '--min-alleles',
+        type=int,
+        default=DEFAULT_MIN_ALLELES,
+        help='''
+        Minimum case AND control alleles per gene, applied inclusively (so the
+        default of 5 keeps a gene with 5 of each). Used to choose which genes to
+        scan; again, after any --remove-nbhd conditioning, to decide whether enough
+        is left to scan; again after out-of-structure positions are dropped; and by
+        the annotation test. --min-denovo is the same floor for the mutation-rate
+        test, which counts de novos rather than case and control alleles.
+        '''
+    )
+    parser.add_argument(
         '--min-denovo',
         type=int,
         default=5,
         help='''
-        Minimum case allele count per gene for the mutation-rate test, applied as
-        strictly greater than this value (so the default of 5 requires at least 6),
-        matching the existing 3DNT gene filter.
+        Minimum de novo count per gene for the mutation-rate test, applied
+        inclusively (so the default of 5 keeps a gene with 5), matching
+        --min-alleles in the case/control scan.
         '''
     )
     parser.add_argument(
@@ -654,6 +667,15 @@ if __name__ == '__main__':
     if args.pre_mapped_rvas is not None and args.rvas_data_to_map is not None:
         raise ValueError("--pre-mapped-rvas and --rvas-data-to-map are mutually exclusive")
 
+    # Checked unconditionally: --min-alleles governs the case/control scan, so
+    # validating it inside the mutation-rate block would check it in the one mode
+    # that does not use it and leave it unchecked everywhere it does.
+    # At least 1, not 0: the guard is `sum(ac_case) < min_alleles`, so 0 admits a
+    # gene with no case alleles at all, and read_p_values then divides by that count
+    # and fills the ratio column with inf and nan rather than failing.
+    if args.min_alleles < 1:
+        raise ValueError(f"--min-alleles must be at least 1, got {args.min_alleles}")
+
     if args.mu_col is not None and args.mu_file is not None:
         raise ValueError("--mu-col and --mu-file are mutually exclusive")
 
@@ -683,8 +705,12 @@ if __name__ == '__main__':
                 float(args.rate_calibration.split(':', 1)[1])
             except ValueError:
                 raise ValueError(f"Could not parse a number from --rate-calibration {args.rate_calibration}")
-        if args.min_denovo < 0:
-            raise ValueError(f"--min-denovo must be non-negative, got {args.min_denovo}")
+        # At least 1, like --min-alleles. Under the old exclusive rule 0 meant "at
+        # least 1 de novo"; now that the comparison is inclusive, 0 is vacuously
+        # true and admits every gene in the table, including genes with no observed
+        # de novos, padding the FDR and FWER pools.
+        if args.min_denovo < 1:
+            raise ValueError(f"--min-denovo must be at least 1, got {args.min_denovo}")
         if args.mu_file is not None:
             if args.mu_residue_file is None:
                 if not args.reference_dir:
@@ -832,6 +858,7 @@ if __name__ == '__main__':
             args.stratum_col,
             args.cmh_screen_threshold,
             args.seed,
+            args.min_alleles,
         )
         did_nothing = False
 
@@ -853,6 +880,7 @@ if __name__ == '__main__':
             args.pval_file,
             args.remove_nbhd,
             args.seed,
+            args.min_alleles,
         )
         did_nothing = False
     
@@ -913,6 +941,7 @@ if __name__ == '__main__':
             results_dir=Path(args.results_dir) / 'annotation_test',
             cleanup_per_protein=True,
             stratum_col=args.stratum_col if annotation_cmh else None,
+            min_alleles=args.min_alleles,
             result_fn=args.annotation_result_fn
         )
         did_nothing = False

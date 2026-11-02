@@ -386,10 +386,15 @@ to 1 for a model that already gives absolute expected counts.
 
 ### Other flags
 
-- `--min-denovo` (default 5) minimum de novos per gene, applied as strictly greater
-  than, matching `scan_test._filter_proteins_by_allele_count`; so the default requires
-  at least 6. Note the existing gene filter is internally inconsistent — it gates on
-  `> 5` in one place and `< 5` in another — and this mode mirrors the binding one.
+- `--min-denovo` (default 5) minimum de novos per gene, applied inclusively, so the
+  default keeps a gene with 5. Mirrors `--min-alleles` in the case/control scan.
+  Must be at least 1: 0 is vacuously true and would admit every gene in the table.
+- `--min-alleles` (default 5) minimum case AND control alleles per gene for the
+  case/control scan and the annotation test, applied inclusively. It is enforced
+  three times — choosing which genes to scan, re-checking what survives
+  `--remove-nbhd` conditioning, and re-checking what falls inside the structure —
+  and must be at least 1, since 0 admits a gene with no case alleles and the
+  per-neighborhood ratio then divides by zero.
 - `--max-residues` (default 10000) skips very long proteins; the distance matrix scales
   as `n_res^2`, so titin alone would need 9.4 GB.
 - `--min-mu-coverage` (default 0, i.e. report only) skips genes whose rate coverage is

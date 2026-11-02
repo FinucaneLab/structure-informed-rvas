@@ -11,7 +11,8 @@ from scipy.sparse import csr_matrix
 from cmh import cmh_expected_variance, screen_and_exact_pvalues
 from empirical_fdr import compute_fdr
 from logger_config import get_logger
-from utils import DEFAULT_SCREEN_CHI2, draw_stratified_null_cases, get_adjacency_matrix, write_dataset
+from utils import (DEFAULT_MIN_ALLELES, DEFAULT_SCREEN_CHI2, draw_stratified_null_cases,
+                   get_adjacency_matrix, write_dataset)
 
 
 logger = get_logger(__name__)
@@ -219,11 +220,12 @@ def write_cmh_pvals(results_dir, uniprot_id, df_pvals, pval_file):
         write_dataset(fid, f"{uniprot_id}_cmh_variance", df_pvals[["cmh_variance"]])
 
 
-def _filter_proteins(df_rvas, df_fdr_filter=None, min_alleles=5):
+def _filter_proteins(df_rvas, df_fdr_filter=None, min_alleles=DEFAULT_MIN_ALLELES):
+    """Applied inclusively, matching scan_test._filter_proteins_by_allele_count."""
     grouped = df_rvas.groupby("uniprot_id")[["ac_case", "ac_control"]].sum()
     keep = grouped[
-        (grouped["ac_case"] > min_alleles)
-        & (grouped["ac_control"] > min_alleles)
+        (grouped["ac_case"] >= min_alleles)
+        & (grouped["ac_control"] >= min_alleles)
     ].index.to_numpy()
 
     if df_fdr_filter is not None:
@@ -265,6 +267,7 @@ def scan_test_cmh(
     stratum_col,
     screen_chi2=DEFAULT_SCREEN_CHI2,
     seed=1,
+    min_alleles=DEFAULT_MIN_ALLELES,
 ):
     if fdr_only:
         df_results = compute_fdr(
@@ -304,7 +307,7 @@ def scan_test_cmh(
     pdb_dir = os.path.join(reference_dir, "pdb_files")
     pae_dir = os.path.join(reference_dir, "pae_files")
 
-    uniprot_ids = _filter_proteins(df_rvas, df_fdr_filter)
+    uniprot_ids = _filter_proteins(df_rvas, df_fdr_filter, min_alleles)
     logger.info(
         f"Selected {len(uniprot_ids)} proteins for stratified CMH analysis"
     )
@@ -336,9 +339,17 @@ def scan_test_cmh(
                     uniprot_id,
                 )
 
-            if (df["ac_case"].sum() < 5) or (df["ac_control"].sum() < 5):
+            # NOTE: unlike the default scan, this path does not drop variants whose
+            # aa_pos falls outside the structure. get_stratified_case_ac_matrix
+            # raises ValueError on them, the handler below catches it, and the whole
+            # protein is skipped -- where the default scan truncates it and names it
+            # in the end-of-run summary. Same input, two behaviours, chosen by
+            # --test-method. Worth unifying; not done here because the stratified
+            # null builds its own per-residue matrices.
+            if (df["ac_case"].sum() < min_alleles) or (df["ac_control"].sum() < min_alleles):
                 logger.warning(
-                    f"{uniprot_id}: There must be at least 5 case and 5 control alleles. Skipping."
+                    f"{uniprot_id}: There must be at least {min_alleles} case and "
+                    f"{min_alleles} control alleles. Skipping."
                 )
                 continue
 
