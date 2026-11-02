@@ -473,6 +473,57 @@ if __name__ == '__main__':
         Required when --run-hmp is used without --fdr-only.
         ''',
     )
+    parser.add_argument(
+        '--explore-nhbds-traits',
+        action='store_true',
+        default=False,
+        help='''
+        Post-discovery exploration: for a batch of (protein, aa_pos, discovery_trait)
+        neighborhoods, find every trait with a missense signal for that protein
+        (via --missense-trait-dir) and compute the average betahat in the
+        neighborhood for each trait, at a radius controlled by --fixed-radius.
+        Requires --triplets-file, --missense-trait-dir, and --input-dir-hmp.
+        ''',
+    )
+    parser.add_argument(
+        '--triplets-file',
+        type=str,
+        default=None,
+        help='''
+        Tab-delimited file with columns (protein, aa_pos, discovery_trait), one
+        neighborhood of interest per row. Required by --explore-nhbds-traits.
+        ''',
+    )
+    parser.add_argument(
+        '--missense-trait-dir',
+        type=str,
+        default=None,
+        help='''
+        Directory containing per-trait missense gene-signal lists, named
+        ukbb_{trait}_missense_genes_p1e04_p1e02_uniprotid.ids_only. Used by
+        --explore-nhbds-traits to find every trait with a missense signal for
+        a given protein.
+        ''',
+    )
+    parser.add_argument(
+        '--fixed-radius',
+        action='store_true',
+        default=False,
+        help='''
+        Used with --explore-nhbds-traits. If set, force every trait to use the
+        discovery trait's own best radius for each neighborhood, recomputing
+        the betahat aggregate from that trait's raw mapped variant data
+        (--rvas-data-to-map, as a template with a {trait} placeholder). If not
+        set (default), use each trait's own stored best radius from its
+        p_values.h5, with no recomputation.
+        ''',
+    )
+    parser.add_argument(
+        '--explore-output-file',
+        type=str,
+        default='nbhd_trait_betahat_exploration.tsv',
+        help='file in the results directory to write --explore-nhbds-traits output to',
+    )
     args = parser.parse_args()
 
     # Input validation
@@ -536,6 +587,12 @@ if __name__ == '__main__':
                 df_filter = pd.merge(df_filter, _read_fdr_filter(f))
         else:
             df_filter = None
+    elif args.explore_nhbds_traits:
+        # Reads pre-computed per-trait h5 files (and raw rvas-to-map files when
+        # --fixed-radius is set); no upfront RVAS mapping needed here.
+        df_rvas = None
+        df_filter = None
+        select_nbhds = None
     else:
         df_rvas, df_filter = map_and_filter_rvas(
             args.rvas_data_to_map,
@@ -640,6 +697,33 @@ if __name__ == '__main__':
                 args.reference_dir, args.pval_file, args.stat_method,
             )
             df_results.to_csv(f'{args.results_dir}/{args.fdr_file}', sep='\t', index=False)
+        did_nothing = False
+
+    elif args.explore_nhbds_traits:
+        if args.triplets_file is None:
+            raise ValueError('--explore-nhbds-traits requires --triplets-file')
+        if args.missense_trait_dir is None:
+            raise ValueError('--explore-nhbds-traits requires --missense-trait-dir')
+        if args.input_dir_hmp is None:
+            raise ValueError('--explore-nhbds-traits requires --input-dir-hmp')
+        if args.fixed_radius and args.rvas_data_to_map is None:
+            raise ValueError("--explore-nhbds-traits --fixed-radius requires --rvas-data-to-map (as a template with a '{trait}' placeholder)")
+        from explore_nbhds_traits import run_explore_nbhds_traits
+        logger.info(f"Starting neighborhood/trait exploration (fixed_radius={args.fixed_radius})")
+        run_explore_nbhds_traits(
+            args.triplets_file,
+            args.missense_trait_dir,
+            args.input_dir_hmp,
+            args.stat_method,
+            args.pval_file,
+            args.reference_dir,
+            args.pae_cutoff,
+            args.rvas_data_to_map,
+            args.beta_col,
+            args.genome_build,
+            args.fixed_radius,
+            os.path.join(args.results_dir, args.explore_output_file),
+        )
         did_nothing = False
 
     elif args.make_movie:
