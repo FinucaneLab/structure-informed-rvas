@@ -138,6 +138,109 @@ def map_and_filter_rvas(
     return df_rvas, df_filter
 
 
+def build_components_file(args, logger):
+    """
+    Group each gene's significant neighborhoods into components and write them.
+
+    Reads the results table and p-value file already in the results directory, so it
+    runs after a scan or on its own via --components. Returns the output path.
+    """
+    from components import components_for_genes, FDR_COLUMN, FWER_COLUMN
+    from utils import read_original_mutation_data, resolve_pval_node
+
+    fdr_path = os.path.join(args.results_dir, args.fdr_file)
+    pval_path = os.path.join(args.results_dir, args.pval_file)
+    for path in (fdr_path, pval_path):
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f'building components needs an existing results file; {path} not found'
+            )
+    df_results = pd.read_csv(fdr_path, sep='\t')
+
+    # The mutation-rate results table carries per-test p-values and no p_value
+    # column; the case/control table is the other way round.
+    mu_results = 'p_binomial' in df_results.columns
+    p_col = 'p_binomial' if mu_results else 'p_value'
+    # Under multiple-* each test picks its own best radius. Test B is the test of
+    # interest, so its radius defines the neighborhood.
+    radius_cols = ('radius_binomial', 'radius_poisson') if mu_results else ('radius',)
+    gate_col = FWER_COLUMN if args.component_gene_criterion == 'fwer' else FDR_COLUMN
+    for col in (p_col, gate_col, FDR_COLUMN, FWER_COLUMN):
+        if col not in df_results.columns:
+            raise ValueError(
+                f"Column '{col}' not found in {fdr_path}. "
+                f'Available: {list(df_results.columns)}'
+            )
+
+    with h5py.File(pval_path, 'r') as fid:
+        node, mu_pvals = resolve_pval_node(fid, 'binomial')
+        # Mismatched pair: a mutation-rate results table read against a case/control
+        # p-value file would silently take ac_control as mu, or the reverse. Both
+        # produce a plausible table from the wrong column.
+        if mu_pvals != mu_results:
+            raise ValueError(
+                f'{fdr_path} looks like a '
+                f'{"mutation-rate" if mu_results else "case/control"} results table '
+                f'but {pval_path} is a '
+                f'{"mutation-rate" if mu_pvals else "case/control"} p-value file'
+            )
+
+        # The CMH scan writes a {uid}_cmh_chisq dataset per protein; nothing else does.
+        if any(k.endswith('_cmh_chisq') for k in fid.keys()):
+            logger.warning(
+                'These results came from a stratified (CMH) scan. The direction filter '
+                'that decides which neighborhoods may join a component compares the '
+                'observed case count to its expectation under the POOLED margins, but '
+                'CMH significance comes from per-stratum comparisons. Where strata '
+                'differ in case fraction -- the reason to use CMH at all -- a '
+                'neighborhood enriched within every stratum can fall below the pooled '
+                'expectation and be dropped as depleted. Treat a thin or empty '
+                'component table for a CMH run with suspicion. This goes away when '
+                'the scan becomes one-sided: there is then nothing depleted to drop '
+                'and the filter stops running.'
+            )
+
+        # The neighborhoods are rebuilt here, not read back: only the radius is
+        # recorded in the results table, so the PAE cutoff comes from this invocation.
+        # Rebuilding at a different cutoff than the scan used silently changes which
+        # residues a component contains.
+        logger.info(f'Rebuilding neighborhoods at --pae-cutoff {args.pae_cutoff}; '
+                    'this must match the scan that produced these results.')
+
+        def read_mut(uniprot_id):
+            return read_original_mutation_data(node, uniprot_id, mu_mode=mu_pvals)
+
+        passes_gate = df_results[gate_col] < args.component_gene_cutoff
+        gated = sorted(set(df_results.loc[passes_gate, 'uniprot_id']))
+        logger.info(f'{len(gated)} genes pass the gene gate '
+                    f'({gate_col} < {args.component_gene_cutoff})')
+
+        # A gene qualifies on strong evidence and is then described by everything that
+        # evidence is spread across -- every FDR-significant neighborhood, UNIONED with
+        # whatever cleared the gate. The union is not redundant: the two corrections are
+        # not nested, so a neighborhood can clear the gate and miss --fdr-cutoff, and
+        # without this the gene that qualified would be absent from its own table.
+        member_mask = (df_results[FDR_COLUMN] < args.fdr_cutoff) | passes_gate
+
+        df_components = components_for_genes(
+            df_results, gated, args.reference_dir, args.pae_cutoff, read_mut,
+            p_col, member_mask, radius_cols, mu_pvals, gate_col=gate_col,
+        )
+
+    stem = args.fdr_file[:-4] if args.fdr_file.endswith('.tsv') else args.fdr_file
+    out_path = os.path.join(args.results_dir, f'{stem}.components.tsv')
+    if not len(df_components):
+        # An empty DataFrame has no columns, so to_csv writes a single newline and
+        # pd.read_csv raises EmptyDataError on the way back. Write nothing instead:
+        # no components is the ordinary outcome for a scan with no significant gene,
+        # and an absent file says that more clearly than an unreadable one.
+        logger.info('No components found; no component table written')
+        return None
+    df_components.to_csv(out_path, sep='\t', index=False)
+    logger.info(f'Wrote {len(df_components)} components to {out_path}')
+    return out_path
+
+
 def _neighborhood_radius_type(value):
     if value in ('multiple-small', 'multiple-big'):
         return value
@@ -430,6 +533,44 @@ if __name__ == '__main__':
         '''
     )
     parser.add_argument(
+        '--components',
+        action='store_true',
+        default=False,
+        help='''
+        Group a gene's significant neighborhoods into components and write one row
+        per component to <fdr-file stem>.components.tsv. Reads an existing results
+        file and its p-value file; runs no scan. The scan centres a neighborhood on
+        every residue, so one 3D signal is reported by every window that overlaps
+        it; a component is the unit that is actually one finding.
+        '''
+    )
+    parser.add_argument(
+        '--no-components',
+        action='store_true',
+        default=False,
+        help='''
+        Skip the component table that a scan writes alongside its results file.
+        '''
+    )
+    parser.add_argument(
+        '--component-gene-cutoff',
+        type=float,
+        default=0.05,
+        help='''
+        A gene is clustered if it has a neighborhood below this cutoff on the
+        criterion named by --component-gene-criterion (default FWER). Its components
+        are then built from every neighborhood below --fdr-cutoff, so a gene
+        qualifies on strong evidence but is described by everything that evidence is
+        spread across.
+        '''
+    )
+    parser.add_argument(
+        '--component-gene-criterion',
+        choices=('fwer', 'fdr'),
+        default='fwer',
+        help='correction the gene gate for --components is judged on'
+    )
+    parser.add_argument(
         '--fdr-file',
         type=str,
         default='all_proteins.fdr.tsv',
@@ -679,6 +820,18 @@ if __name__ == '__main__':
     # At least 1, not 0: the guard is `sum(ac_case) < min_alleles`, so 0 admits a
     # gene with no case alleles at all, and read_p_values then divides by that count
     # and fills the ratio column with inf and nan rather than failing.
+    # --components is the head of the dispatch chain, so combining it with a scan
+    # would take the components branch and silently run no scan at all -- building a
+    # table from whatever stale results file happened to be in --results-dir. A scan
+    # already writes components by default, so the combination is never what anyone
+    # wants; refuse it rather than quietly doing the wrong one.
+    if args.components and (args.run_3dnt or args.fdr_only):
+        raise ValueError(
+            '--components builds a component table from results that already exist, '
+            'so it cannot be combined with --run-3dnt or --fdr-only. A scan writes '
+            'one by default; use --no-components to suppress that.'
+        )
+
     if args.min_alleles < 1:
         raise ValueError(f"--min-alleles must be at least 1, got {args.min_alleles}")
 
@@ -796,7 +949,14 @@ if __name__ == '__main__':
         df_rvas.to_csv(args.save_df_rvas, sep='\t', index=False)
         did_nothing = False
 
-    if args.fdr_only and not args.run_3dnt and mutation_rate_mode:
+    wrote_results = False
+
+    if args.components:
+        build_components_file(args, logger)
+        did_nothing = False
+
+    elif args.fdr_only and not args.run_3dnt and mutation_rate_mode:
+        wrote_results = True
         from mutation_rate_test import mutation_rate_scan_test
         mutation_rate_scan_test(
             df_rvas, args.reference_dir, args.neighborhood_radius, args.pae_cutoff,
@@ -809,12 +969,14 @@ if __name__ == '__main__':
         did_nothing = False
 
     elif args.fdr_only and not args.run_3dnt:
+        wrote_results = True
         from empirical_fdr import compute_fdr
         df_results = compute_fdr(args.results_dir, args.fdr_cutoff, df_filter, args.reference_dir, args.pval_file)
         df_results.to_csv(f'{args.results_dir}/{args.fdr_file}', sep='\t', index=False)
         did_nothing = False
 
     elif args.run_3dnt and mutation_rate_mode:
+        wrote_results = True
         logger.info("Starting scan test analysis with a mutation-rate null")
         from mutation_rate_test import mutation_rate_scan_test
         mutation_rate_scan_test(
@@ -845,6 +1007,7 @@ if __name__ == '__main__':
         did_nothing = False
 
     elif args.run_3dnt and args.test_method == 'cmh':
+        wrote_results = True
         logger.info("Starting scan test analysis with CMH")
         scan_test_cmh(
             df_rvas,
@@ -870,6 +1033,7 @@ if __name__ == '__main__':
         did_nothing = False
 
     elif args.run_3dnt:
+        wrote_results = True
         logger.info("Starting scan test analysis")
         scan_test(
             df_rvas,
@@ -1030,6 +1194,21 @@ if __name__ == '__main__':
                         else:
                             fid_out.attrs[name] = value
         did_nothing=False
+
+    # A scan's results table is the input to a component table, so build one by
+    # default: the scan centres a neighborhood on every residue, and the components
+    # are the units that are actually distinct findings. Guarded, because the scan
+    # results are already on disk by this point and a missing structure or an
+    # unreadable p-value file must not turn a completed scan into a failed run.
+    if wrote_results and not args.no_components and not args.no_fdr:
+        try:
+            build_components_file(args, logger)
+        except Exception as e:
+            logger.warning(
+                f'Scan results were written, but the component table could not be '
+                f'built: {e}. Re-run with --components to retry, or --no-components '
+                f'to skip it.'
+            )
 
     if did_nothing:
         raise Exception('no analysis specified')

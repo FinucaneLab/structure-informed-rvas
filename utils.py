@@ -379,28 +379,120 @@ def read_p_values(fid, uniprot_id, mu_mode=False):
     return pd.DataFrame(base)
 
 
-def read_original_mutation_data(fid, uniprot_id):
+def read_original_mutation_data(fid, uniprot_id, mu_mode=False):
     """
     Reads the original per-residue mutation counts for one uniprot_id from an HDF5 results file.
+
+    In mutation-rate mode the second column of `_original` is the residue's mutational
+    opportunity, not a control allele count, and the second column of `_nbhd` is the
+    expected de novo count under that test's null. The returned frame then carries `mu`
+    and `obs_exp` instead of `ac_control` and `ratio`.
+
+    The columns are deliberately NOT aliased onto the case/control names. Mutation rates
+    are not allele counts and their scale depends on the rate model: per-residue gnomAD mu
+    sits around 2e-08, while a Roulette-derived table has a median near 0.3. So a caller
+    testing `ac_control == 0` silently finds no case-only residues under either model, and
+    one testing `ac_control >= 1` silently finds no controls under gnomAD but a scattering
+    of them under Roulette. Both produce a plausible-looking answer from a column that
+    means something else entirely, and the answer changes with the rate file.
     """
     pvalue_data = fid[uniprot_id][:]
     original_data = fid[f'{uniprot_id}_original'][:]
     case_control = fid[f'{uniprot_id}_nbhd'][:]
-    
-    # Calculate ratio on-the-fly using neighborhood data
+
     nbhd_case = case_control[:, 0]
-    nbhd_control = case_control[:, 1]
+    second = case_control[:, 1]
+
+    base = {'uniprot_id': uniprot_id,
+            'aa_pos': np.arange(1, pvalue_data.shape[0]+1),
+            'p_value': pvalue_data[:, 0]}
+
+    if mu_mode:
+        # The same regularized effect size read_p_values reports, so a component table
+        # and the results table agree about direction.
+        base.update({'obs_exp': (nbhd_case + 1) / (second + 1),
+                     'ac_case': original_data[:, 0],
+                     'mu': original_data[:, 1]})
+        return pd.DataFrame(base)
+
+    # Calculate ratio on-the-fly using neighborhood data
+    nbhd_control = second
     n_case_total = nbhd_case.sum()
     n_control_total = nbhd_control.sum()
     ratio = (nbhd_case + 2) / (nbhd_control + 2 * n_control_total / n_case_total)
-    
-    df = pd.DataFrame({'uniprot_id': uniprot_id,
-                       'aa_pos': np.arange(1, pvalue_data.shape[0]+1),
-                       'p_value': pvalue_data[:, 0],
-                       'ratio': ratio,
-                       'ac_case': original_data[:, 0],
-                       'ac_control': original_data[:, 1]})
-    return df
+
+    base.update({'ratio': ratio,
+                 'ac_case': original_data[:, 0],
+                 'ac_control': original_data[:, 1]})
+    return pd.DataFrame(base)
+
+
+MU_TEST_GROUPS = ('poisson', 'binomial')
+
+
+def resolve_pval_node(fid, test='binomial'):
+    """
+    Resolve where one file keeps its per-protein datasets, and say which kind it is.
+
+    The standard 3DNT writes `{uniprot_id}`, `_nbhd`, `_radius` and `_original` at the
+    root. The mutation-rate 3DNT runs two tests against the same observed data and writes
+    one such set per test, under the 'poisson' and 'binomial' groups. Readers that index
+    the root therefore raise KeyError on a mutation-rate file, so every consumer should
+    come through here rather than reaching into `fid` directly.
+
+    Returns (node, mu_mode). `test` selects the group and is ignored for standard files.
+    """
+    # Standard files are either marked 'case_control' or, if written before that
+    # attribute existed, marked with nothing at all. empirical_fdr makes the same test.
+    if fid.attrs.get('test_type') != 'mutation_rate':
+        return fid, False
+    if test not in MU_TEST_GROUPS:
+        raise ValueError(f"test must be one of {MU_TEST_GROUPS}, got {test!r}")
+    if test not in fid:
+        raise KeyError(
+            f"'{test}' group missing from a mutation-rate p-value file "
+            f"(groups present: {sorted(k for k in fid.keys())})"
+        )
+    return fid[test], True
+
+
+def positions_to_pymol_notation(positions):
+    """
+    Encode a collection of 1-based integer positions as a compact PyMOL selection
+    string using run-length range syntax, e.g. [1,2,3,5,6] -> "1-3+5-6".
+    """
+    if positions is None:
+        return ""
+    positions = sorted(set(int(p) for p in positions))
+    if not positions:
+        return ""
+    ranges = []
+    start = end = positions[0]
+    for pos in positions[1:]:
+        if pos == end + 1:
+            end = pos
+        else:
+            ranges.append(str(start) if start == end else f"{start}-{end}")
+            start = end = pos
+    ranges.append(str(start) if start == end else f"{start}-{end}")
+    return "+".join(ranges)
+
+
+def parse_pymol_positions(pymol_str):
+    """Parse PyMOL residue notation like '10+20-25+30' back to a set of integers."""
+    if not pymol_str:
+        return set()
+    positions = set()
+    for part in str(pymol_str).split('+'):
+        part = part.strip()
+        if not part:
+            continue
+        if '-' in part:
+            start, end = part.split('-', 1)
+            positions.update(range(int(start), int(end) + 1))
+        else:
+            positions.add(int(part))
+    return positions
 
 
 def get_nbhd_info(df_rvas, uniprot_id, aa_pos, reference_dir, radius, pae_cutoff):
