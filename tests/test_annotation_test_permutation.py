@@ -339,7 +339,13 @@ strata = summarize_strata(pd.DataFrame({"stratum": ["a", "a", "b"], "ac_case": [
 assert strata.loc["a", "n_variants"] == 2 and strata.loc["b", "case_frac"] == 0
 
 # CMH annotation test: observed counts are consistent; null has the right moments.
-from annotation_test_permutation import test_protein_annotations_cmh
+# Imported under another name: pytest collects any module-level callable whose
+# name begins with test_, and this is a production function, not a unit test.
+# Collected, its first parameter is read as a fixture request and the run
+# errors with "fixture 'uniprot_id' not found".
+from annotation_test_permutation import (
+    test_protein_annotations_cmh as run_protein_annotations_cmh,
+)
 
 rng = np.random.default_rng(1)
 L = 40
@@ -358,7 +364,7 @@ for i, (lo, hi) in enumerate([(0, 8), (5, 15), (10, 11), (20, 40), (30, 33)]):
     labels[i, lo:hi] = True
 meta = {i: (f"a{i}",) for i in range(len(labels))}
 args = ("P1", multi, labels, meta, 4000, "stratum")
-res = test_protein_annotations_cmh(*args)
+res = run_protein_annotations_cmh(*args)
 obs_case = labels @ multi.groupby("aa_pos")["ac_case"].sum().reindex(range(1, L + 1), fill_value=0).to_numpy()
 obs_total = labels @ (multi.groupby("aa_pos")[["ac_case", "ac_control"]].sum().sum(axis=1)).reindex(range(1, L + 1), fill_value=0).to_numpy()
 assert (res["ac_in_case"] == obs_case).all() and (res["ac_in_case"] + res["ac_in_ctrl"] == obs_total).all()
@@ -371,7 +377,7 @@ for r in np.flatnonzero(var > 0):
     assert abs(s_null[r].mean() - exp[r]) < 5 * np.sqrt(var[r] / s_null.shape[1]), r
     assert 0.85 < s_null[r].var() / var[r] < 1.15, r
 
-conf_res = test_protein_annotations_cmh(
+conf_res = run_protein_annotations_cmh(
     "P1", conf, np.isin(np.arange(1, 11), range(1, 6))[None, :], {0: ("x",)}, 200, "stratum"
 )
 assert conf_res["p_value"].iloc[0] > 0.1 and abs(conf_res["odds_ratio"].iloc[0] - 1) < 1e-9

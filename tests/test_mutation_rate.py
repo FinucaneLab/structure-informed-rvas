@@ -15,14 +15,10 @@ from mutation_rate_test import (
     simulate_poisson_null, simulate_multinomial_null,
 )
 
-FAILURES = []
-
-
 def check(name, cond, detail=''):
     status = 'PASS' if cond else 'FAIL'
     print(f'  [{status}] {name}' + (f'  -- {detail}' if detail else ''))
-    if not cond:
-        FAILURES.append(name)
+    assert cond, name
 
 
 def banded_adjacency(n_res, half_width):
@@ -330,5 +326,4 @@ if __name__ == '__main__':
     test_injected_cluster_recovery()
     test_depletion_direction()
     test_min_denovo_selection_bias()
-    print('\n' + ('ALL TESTS PASSED' if not FAILURES else f'FAILURES: {FAILURES}'))
-    sys.exit(1 if FAILURES else 0)
+    print('\nALL TESTS PASSED')
