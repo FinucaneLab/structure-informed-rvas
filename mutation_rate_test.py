@@ -19,7 +19,7 @@ neighborhood sits at X_i ~= lambda_hat * M_i, so Test A does not call it.
 
 Both tests are one-sided (upper tail). Each is corrected separately by the existing
 empirical FDR/FWER machinery; a neighborhood passes when it passes both, which is
-recorded as fdr_max = max(fdr_poisson, fdr_binomial) and likewise for FWER.
+recorded as fdr = max(fdr_poisson, fdr_binomial) and likewise for fwer.
 
 M_i must be the summed rate of ALL possible missense SNVs in the neighborhood, so it
 comes from the precomputed per-residue table (precompute_mu_per_residue.py), not from
@@ -548,11 +548,16 @@ def _merge_test_results(df_a, df_b, fdr_cutoff=0.05, fwer_cutoff=0.05):
               'exp_binomial', 'obs_exp_binomial', 'radius_binomial']
     merged = a.merge(b[keep_b], on=['uniprot_id', 'aa_pos'], how='inner')
 
-    # A neighborhood passes only if it passes both tests.
-    merged['fdr_max'] = merged[['fdr_poisson', 'fdr_binomial']].max(axis=1)
-    merged['fwer_max'] = merged[['fwer_poisson', 'fwer_binomial']].max(axis=1)
-    merged['sig_fwer_both'] = merged['fwer_max'] < fwer_cutoff
-    merged['sig_fdr_both'] = merged['fdr_max'] < fdr_cutoff
+    # A neighborhood passes only if it passes both tests, so the combined
+    # correction is the max of the two. Named `fdr`/`fwer` rather than
+    # fdr_max/fwer_max so that a results table carries the same column names
+    # whichever null produced it: the per-test values stay available as
+    # fdr_poisson/fdr_binomial, and nothing downstream has to know which file
+    # it is reading in order to find the correction to threshold on.
+    merged['fdr'] = merged[['fdr_poisson', 'fdr_binomial']].max(axis=1)
+    merged['fwer'] = merged[['fwer_poisson', 'fwer_binomial']].max(axis=1)
+    merged['sig_fwer_both'] = merged['fwer'] < fwer_cutoff
+    merged['sig_fdr_both'] = merged['fdr'] < fdr_cutoff
     return merged
 
 
@@ -568,8 +573,8 @@ def _compute_both_fdrs(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pv
 
 
 def summarize_mu_results(df_results, fdr_cutoff):
-    top = df_results.loc[df_results.groupby('uniprot_id')['fdr_max'].idxmin()]
-    sig = top[top.fdr_max < fdr_cutoff].sort_values(by='fdr_max')
+    top = df_results.loc[df_results.groupby('uniprot_id')['fdr'].idxmin()]
+    sig = top[top.fdr < fdr_cutoff].sort_values(by='fdr')
     logger.info('')
     logger.info(f'{len(sig)} of {len(top)} proteins have a neighborhood passing BOTH tests '
                 f'at FDR < {fdr_cutoff}')
