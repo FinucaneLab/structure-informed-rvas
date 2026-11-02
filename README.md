@@ -322,8 +322,11 @@ unconstrained regions, and a neighborhood there looks enriched without being spe
 Such a neighborhood sits at `X_i ~ lambda_hat * M_i`, so Test A does not call it.
 
 Each test is corrected separately by the usual empirical FDR/FWER machinery, and a
-neighborhood passes when it passes both: `fdr_max = max(fdr_poisson, fdr_binomial)`,
-likewise `fwer_max`. On simulated data each test rejects at 4% under the true null,
+neighborhood passes when it passes both: `fdr = max(fdr_poisson, fdr_binomial)`,
+likewise `fwer`. Those carry the same names the case/control scan writes, so the
+column to threshold on is the same either way. Only the corrections are shared:
+this table has no `p_value` column, keeping the per-test `p_poisson` and
+`p_binomial` instead. On simulated data each test rejects at 4% under the true null,
 Test B inflates to 17% under regional constraint while Test A stays at 4%, Test A
 inflates to 80% under uniform gene-level enrichment while Test B stays at 4%, and
 requiring both still recovers an injected cluster with at least 98% power.
@@ -410,7 +413,8 @@ to 1 for a model that already gives absolute expected counts.
 
 Results are written per test into the `poisson` and `binomial` HDF5 groups of the
 p-value file, and merged into one TSV with `p_`/`fdr_`/`fwer_` columns for each test,
-plus `fdr_max`, `fwer_max`, per-gene `n_denovo_gene`, `mu_gene`, and `mu_coverage`.
+plus the combined `fdr` and `fwer`, per-gene `n_denovo_gene`, `mu_gene`, and
+`mu_coverage`.
 
 ### Splitting the scan across jobs
 
@@ -448,13 +452,13 @@ Combining warns if the chunks disagree on `lambda_hat`.
   1.50, and Test A's per-gene FWER came out at 14.3% against a nominal 5%.
 
   Read Test A as a direction-of-effect guard, not as significance. Two things follow.
-  Quote `fdr_binomial` / `fwer_binomial` and the combined `fdr_max` / `fwer_max`, never
+  Quote `fdr_binomial` / `fwer_binomial` and the combined `fdr` / `fwer`, never
   `fdr_poisson` on its own. And since Test A is the guard against regional constraint, a
   too-liberal Test A under-flags, so "passes Test B but not Test A" coming out empty is
   weak evidence rather than a demonstration that no hit is a constraint artifact.
 
   Test B is unaffected (4.3% on the same run) because conditioning on `N_g` cancels the
-  selection exactly, and `fdr_max < q` requires `fdr_binomial < q`, so the reported set
+  selection exactly, and `fdr < q` requires `fdr_binomial < q`, so the reported set
   is a subset of the Test B set and inherits its validity. Running without `--min-denovo`
   removes the issue at the cost of testing every gene.
 - FDR control over the *intersection* of two rejection sets is not guaranteed by the two
