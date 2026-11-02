@@ -36,7 +36,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import poisson, binom
 
-from utils import get_adjacency_matrix, write_dataset
+from utils import get_adjacency_matrix, restrict_to_structure, write_dataset
 from logger_config import get_logger
 from empirical_fdr import compute_fdr
 from scan_test import MULTI_RADII_SMALL, MULTI_RADII_BIG, P_FLOOR
@@ -163,19 +163,6 @@ def estimate_lambda(df_rvas, df_mu, rate_calibration, calibration_genes=None, n_
 # ---------------------------------------------------------------------------
 # per-residue aggregation
 # ---------------------------------------------------------------------------
-
-def restrict_to_structure(df, n_res, uniprot_id):
-    """Drop variants whose residue position falls outside the solved structure."""
-    in_range = (df.aa_pos >= 1) & (df.aa_pos <= n_res)
-    n_out = int((~in_range).sum())
-    if n_out:
-        logger.warning(
-            f'{uniprot_id}: dropping {n_out} variants with aa_pos outside the structure '
-            f'(n_res = {n_res})'
-        )
-        df = df[in_range]
-    return df
-
 
 def sum_per_residue(df, colname, n_res, dtype=float):
     """Sum a per-variant column onto residues. Returns an (n_res, 1) column vector."""
@@ -336,7 +323,7 @@ def compute_all_pvals_mu(
         raise FileNotFoundError(f'No structure available for {uniprot_id}')
 
     n_res = adj_matrices[radii[0]].shape[0]
-    df = restrict_to_structure(df, n_res, uniprot_id)
+    df, _ = restrict_to_structure(df, n_res, uniprot_id)
 
     x_obs = sum_per_residue(df, 'ac_case', n_res, dtype=int)
     # Opportunity comes from the full possible-missense universe, not from the observed
@@ -436,12 +423,11 @@ def _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage
     Gene-level selection. Called AFTER estimate_lambda -- see the note there on why the
     order matters.
 
-    Applied as strictly greater than min_denovo, matching the existing 3DNT gene filter
-    in scan_test._filter_proteins_by_allele_count (which uses `> min_alleles`), so the
-    default of 5 requires at least 6 de novos.
+    Applied inclusively, so the default of 5 keeps a gene with 5 de novos, matching
+    the 3DNT gene filter in scan_test._filter_proteins_by_allele_count.
     """
     grouped = df_rvas.groupby('uniprot_id')['ac_case'].sum()
-    uniprot_id_list = grouped[grouped > min_denovo].index.tolist()
+    uniprot_id_list = grouped[grouped >= min_denovo].index.tolist()
 
     # A gene is only testable if it carries a nonzero total mutation rate. Genes with
     # rows in the table but zero total rate are those the rate model does not cover at
@@ -482,7 +468,7 @@ def _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage
 
     logger.info(
         f'Selected {len(uniprot_id_list)} of {len(grouped)} genes for analysis '
-        f'(more than {min_denovo} de novos each)'
+        f'(at least {min_denovo} de novos each)'
     )
     return uniprot_id_list
 
