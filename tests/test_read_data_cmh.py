@@ -1,9 +1,14 @@
 import os
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import pandas as pd
+
+# pytest's prepend import mode puts tests/ on the path, not the repository root,
+# and nothing puts it there for `python tests/test_read_data_cmh.py` either.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from read_data import filter_by_total_ac, map_to_protein
 
