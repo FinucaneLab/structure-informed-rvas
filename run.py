@@ -10,7 +10,12 @@ from scan_test_cmh import scan_test_cmh, DEFAULT_SCREEN_CHI2
 from read_data import map_to_protein, filter_by_total_ac
 from logger_config import get_logger
 from utils import get_nbhd_info
-from annotation_test_permutation import run_annotation_test, read_table
+from annotation_test_permutation import (
+    add_result_fn_argument,
+    normalize_result_fn,
+    read_table,
+    run_annotation_test,
+)
 
 logger = get_logger(__name__)
 
@@ -568,6 +573,7 @@ if __name__ == '__main__':
         the columns used as ids (default all).
         '''
     )
+    add_result_fn_argument(parser)
     args = parser.parse_args()
 
     # Derive pval file name from fdr file name if not explicitly set
@@ -854,20 +860,51 @@ if __name__ == '__main__':
         logger.info('Starting annotation test analysis')
         if args.ignore_ac:
             raise ValueError("--ignore-ac is not supported with --annotation-file")
-        expand = args.annotation_expand
-        if expand and isinstance(args.neighborhood_radius, str):
-            raise ValueError('--annotation-expand needs a numeric --neighborhood-radius')
+        
         if args.annotation_id:
             ann_id_columns = tuple(args.annotation_id.split(','))
         else:
             ann_id_columns = ('*',) if args.annotation_format == 'wide' else ('concept_type', 'concept_value')
+
+        expand = args.annotation_expand
+        # option to use "radius" column in annotation file:
+        ## if radius column exists, otherwise, use neighborhood argument
+        normalize_result_fn(args.annotation_result_fn)  # fail early on a bad name
+        df_ann = read_table(Path(args.annotation_file))
+        if expand is None:
+            # No --annotation-expand: never expand, whatever radius is in the file/args.
+            if 'radius' in df_ann.columns:
+                logger.warning("Ignoring annotation file radius column: no --annotation-expand given")
+            df_ann['radius'] = 0.0
+            logger.info("No --annotation-expand; annotations are tested without neighborhood expansion")
+        elif 'radius' in df_ann.columns:
+            if args.annotation_format == 'long':
+                # ensure each annotation type only has one radius
+                radius_nunique = df_ann.groupby(list(ann_id_columns))['radius'].nunique(dropna=False)
+                incohesive = radius_nunique[radius_nunique > 1]
+                if len(incohesive) > 0:
+                    raise ValueError(
+                        "Annotation file has a radius that is not the same for every aa_pos "
+                        f"within an annotation (grouped by {ann_id_columns}): "
+                        f"{list(incohesive.index)}"
+                    )
+            # wide format: the converter already splits rows by (value, radius)
+            logger.info("Using annotation file radius column as neighborhood radii")
+        else:
+            if isinstance(args.neighborhood_radius, str):
+                raise ValueError('--annotation-expand needs a numeric --neighborhood-radius when the annotation file has no radius column')
+            logger.info(
+                f"Annotation file has no radius column; using --neighborhood-radius "
+                f"({args.neighborhood_radius}) for every annotation"
+            )
+            df_ann['radius'] = args.neighborhood_radius
+
         run_annotation_test(
             df_rvas,
-            read_table(Path(args.annotation_file)),
+            df_ann,
             ann_format=args.annotation_format,
             ann_id_columns=ann_id_columns,
-            expand_radius=args.neighborhood_radius if expand else 0,
-            expand_include=None if expand in (None, 'all') else expand.split(','),
+            expand_include=[] if expand is None else (None if expand == 'all' else expand.split(',')),
             pae_cutoff=args.pae_cutoff,
             reference_dir=args.reference_dir,
             df_include=df_filter,
@@ -876,6 +913,7 @@ if __name__ == '__main__':
             results_dir=Path(args.results_dir) / 'annotation_test',
             cleanup_per_protein=True,
             stratum_col=args.stratum_col if annotation_cmh else None,
+            result_fn=args.annotation_result_fn
         )
         did_nothing = False
 

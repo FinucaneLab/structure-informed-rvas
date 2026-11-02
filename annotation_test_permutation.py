@@ -34,7 +34,8 @@ from cmh import (
 from logger_config import get_logger
 from utils import (
     DEFAULT_SCREEN_CHI2,
-    get_adjacency_matrix,
+    get_distance_and_pae_matrices,
+    threshold_adjacency_matrix,
     get_case_control_ac_matrix,
     get_chi2_pvals_case_control,
     get_stratified_case_ac_matrix,
@@ -100,6 +101,8 @@ def convert_long_annotations_to_binary_matrix(
     seq_len: int | None = None,
     ann_include: list[str] | None = None,
     ann_id_columns: tuple[str, ...] = ("concept_type", "concept_value"),
+    *,
+    return_radii: bool = False,
 ):
     """Binary matrix from long-format annotations (one row per annotation-position, or
     per annotation-interval), single protein.
@@ -117,11 +120,16 @@ def convert_long_annotations_to_binary_matrix(
     position set (e.g. a cluster that's stable across two clustering resolutions) are
     merged into one row so they're tested once, not twice - their ids are kept, joined
     by "|" in the result's annotation_id.
+    
+    When a ``radius`` column is present, annotations with identical positions but
+    different radii remain separate rows.
 
-    Returns:
+    Returns: result array containing the following:
         label_binary_matrix: shape (n_annotations, seq_len), 1 at annotated positions.
         row_meta: dict mapping row index -> [annotation id, ...] (ids of merged rows).
+        ``return_radii=True`` additionally returns a dict mapping matrix row indices to their radius (or None)
     """
+
     if "start" not in ann_df.columns and "aa_pos" in ann_df.columns:
         ann_df = ann_df.assign(start=ann_df["aa_pos"], end=ann_df["aa_pos"])
     ann_df = ann_df.dropna(subset=["start", "end"])
@@ -129,43 +137,59 @@ def convert_long_annotations_to_binary_matrix(
         ann_df = ann_df[ann_df[ann_id_columns[0]].isin(ann_include)]
     if "geometry" not in ann_df.columns:
         ann_df = ann_df.assign(geometry="range")
+    if "radius" not in ann_df.columns:
+        ann_df = ann_df.assign(radius=np.nan)  # same fallback as the wide converter
+    ann_df = validate_radius(ann_df)  # before the empty return, so bad radii always fail
 
     if ann_df.empty:
-        return np.zeros((0, seq_len or 0), dtype=np.uint8), {}
-
+        empty = (np.zeros((0, seq_len or 0), dtype=np.uint8), {}, {})
+        return empty if return_radii else empty[:2]
     if seq_len is None:
         seq_len = int(ann_df["end"].max())
 
-    label_binary_matrix = []
-    row_meta = {}
+    label_binary_matrix, row_meta, row_radii = [], {}, {}
     signature_to_row_idx = {}
-    for ann_id, grp in ann_df.groupby(list(ann_id_columns), sort=False):
-        ann_id = "_".join([str(x) for x in ann_id])
+    # Radius is part of the grouping key: one annotation ID can have separate
+    # instances at different radii, and equal footprints at different radii must not merge.
+    group_columns = list(ann_id_columns) + ["radius"]
+    for group_key, grp in ann_df.groupby(group_columns, sort=False, dropna=False):
+        *ann_id_parts, radius_value = group_key
+        ann_id = "_".join(str(x) for x in ann_id_parts)
+        radius = None if pd.isna(radius_value) else float(radius_value)
         row = np.zeros(seq_len, dtype=np.uint8)
         for start, end, geometry in zip(grp["start"], grp["end"], grp["geometry"]):
             start, end = int(start), int(end)
             if geometry == "pair":
-                endpoints = [p - 1 for p in (start, end) if p <= seq_len]
+                endpoints = [p - 1 for p in (start, end) if 1 <= p <= seq_len]
                 row[endpoints] = 1
             else:
-                row[start - 1 : end] = 1
+                start0 = max(start - 1, 0)
+                end0 = min(end, seq_len)
+                if start0 < end0:
+                    row[start0:end0] = 1
 
         signature = tuple(np.flatnonzero(row).tolist())
-        existing_idx = signature_to_row_idx.get(signature)
+        key = (signature, radius)
+        existing_idx = signature_to_row_idx.get(key)
         if existing_idx is None:
-            row_meta[len(label_binary_matrix)] = [ann_id]
-            signature_to_row_idx[signature] = len(label_binary_matrix)
+            row_idx = len(label_binary_matrix)
+            row_meta[row_idx] = [ann_id]
+            row_radii[row_idx] = radius
+            signature_to_row_idx[key] = row_idx
             label_binary_matrix.append(row)
         else:
             row_meta[existing_idx].append(ann_id)
 
-    return np.array(label_binary_matrix, dtype=np.uint8), row_meta
+    result = (np.array(label_binary_matrix, dtype=np.uint8), row_meta, row_radii)
+    return result if return_radii else result[:2]
 
 
 def convert_wide_annotations_to_binary_matrix(
     ann_df: pd.DataFrame,
     seq_len: int | None = None,
     ann_id_columns: list[str] | None = None,
+    *,
+    return_radii: bool = False,
 ):
     """Binary matrix from wide-format residue annotations, single protein.
 
@@ -179,69 +203,88 @@ def convert_wide_annotations_to_binary_matrix(
     Missing values (NaN) mean "not annotated in this column" and are dropped.
     ann_id_columns=None or ["*"] uses every column except uniprot_id/aa_pos/seq_len/
     length/end (the non-annotation columns fallback_seq_len also knows about).
+    
+    ``radius`` is treated as row-level metadata and applies to each annotation present
+    at that residue. Rows are grouped by annotation ID and radius, so equal residue sets
+    at different radii are preserved as distinct tests.
 
-    Returns:
+    Returns: result array containing the following:
         label_binary_matrix: shape (n_annotations, seq_len), 1 at annotated positions.
         row_meta: dict mapping row index -> [id, ...] (annotations that share the exact
             same set of positions are merged into one row).
+        ``return_radii=True`` additionally returns a dict mapping matrix row indices to their radius (or None)
     """
-    label_binary_matrix = []
-    row_meta = {}
-    signature_to_row_idx = {}
 
+    ann_df = validate_radius(ann_df)
+    if ann_df.empty:
+        empty = (np.zeros((0, seq_len or 0), dtype=np.uint8), {}, {})
+        return empty if return_radii else empty[:2]
     if seq_len is None:
         seq_len = int(ann_df["aa_pos"].max())
 
     if ann_id_columns is None or list(ann_id_columns) == ["*"]:
-        non_annotation_columns = ["uniprot_id", "aa_pos", "seq_len", "length", "end"]
+        non_annotation_columns = [
+            "uniprot_id", "aa_pos", "seq_len", "length", "end", "radius"
+        ]
         ann_id_columns = [c for c in ann_df.columns if c not in non_annotation_columns]
     single_column = len(ann_id_columns) == 1
+    radii = ann_df["radius"].to_numpy() if "radius" in ann_df.columns else np.full(len(ann_df), np.nan)
+    positions = ann_df["aa_pos"].to_numpy(dtype=np.int64) - 1
 
-    aa_pos_0_based = ann_df["aa_pos"].to_numpy(dtype=np.int64) - 1
-
+    label_binary_matrix, row_meta, row_radii = [], {}, {}
+    signature_to_row_idx = {}
     for col in ann_id_columns:
         not_na = ann_df[col].notna().to_numpy()
         col_values = ann_df[col].to_numpy()[not_na]
-        col_positions = aa_pos_0_based[not_na]
-        unique_values, inverse = np.unique(col_values, return_inverse=True)
-
-        for value_idx, value in enumerate(unique_values):
-            positions = col_positions[inverse == value_idx]
-            if positions.size == 0:
+        col_positions = positions[not_na]
+        col_radii = radii[not_na]
+        # Group by both annotation value and radius; this supports radius changes along
+        # a wide-format annotation column without merging distinct expansion definitions.
+        grouping = pd.DataFrame({"value": col_values, "position": col_positions, "radius": col_radii})
+        for (value, radius_value), grp in grouping.groupby(["value", "radius"], sort=False, dropna=False):
+            signature = tuple(np.unique(grp["position"].to_numpy(dtype=np.int64)).tolist())
+            if not signature:
                 continue
-
-            signature = tuple(np.unique(positions).tolist())
-            existing_idx = signature_to_row_idx.get(signature)
+            radius = None if pd.isna(radius_value) else float(radius_value)
             ann_id = str(value) if single_column else f"{col}_{value}"
-
+            key = (signature, radius)
+            existing_idx = signature_to_row_idx.get(key)
             if existing_idx is None:
                 row = np.zeros(seq_len, dtype=np.uint8)
-                row[list(signature)] = 1
+                valid_positions = [p for p in signature if 0 <= p < seq_len]
+                row[valid_positions] = 1
+                row_idx = len(label_binary_matrix)
                 label_binary_matrix.append(row)
-                row_idx = len(label_binary_matrix) - 1
-                signature_to_row_idx[signature] = row_idx
                 row_meta[row_idx] = [ann_id]
+                row_radii[row_idx] = radius
+                signature_to_row_idx[key] = row_idx
             else:
                 row_meta[existing_idx].append(ann_id)
 
-    return np.array(label_binary_matrix, dtype=np.uint8), row_meta
+    result = (np.array(label_binary_matrix, dtype=np.uint8), row_meta, row_radii)
+    return result if return_radii else result[:2]
 
 
-def get_protein_adjacency_matrix(
-    uniprot_id: str, reference_dir: str, radius: float, pae_cutoff: float = 0
+def get_protein_distance_pae_matrices(
+    uniprot_id: str, reference_dir: str, pae_cutoff: float = 0
 ):
-    """CA-CA distance (+ optional PAE) adjacency matrix for one protein.
+    """Raw CA-CA distance matrix (+ optional PAE matrix) for one protein.
 
     reference_dir contains pdb_pae_file_pos_guide.tsv, pdb_files/, pae_files/. Row/col i
-    is aa_pos i+1. Returns None if uniprot_id isn't in the guide.
+    is aa_pos i+1. Returns (None, None) if uniprot_id isn't in the guide.
+
+    A protein's annotations can carry several distinct expansion radii (see radius_groups
+    in process_protein); these two matrices don't depend on radius, so callers should build
+    them once per protein and reuse them across radii via utils.threshold_adjacency_matrix,
+    rather than re-parsing the pdb/pae files (and rebuilding these O(n_residues^2) matrices)
+    once per radius - the dominant cost for very large proteins (e.g. titin).
     """
     reference_dir = Path(reference_dir)
-    return get_adjacency_matrix(
+    return get_distance_and_pae_matrices(
         reference_dir / "pdb_pae_file_pos_guide.tsv",
         reference_dir / "pdb_files",
         reference_dir / "pae_files",
         uniprot_id,
-        radius,
         pae_cutoff,
     )
 
@@ -256,7 +299,7 @@ def expand_annotations_neighborhood(
     label_binary_matrix: (n_annotations, seq_len), as returned by the
     convert_*_annotations_to_binary_matrix functions above - radius/pae_cutoff is baked
     into adjacency_matrix, so it applies uniformly to every row picked by rows_to_expand.
-    adjacency_matrix: (n_residues, n_residues) from get_protein_adjacency_matrix.
+    adjacency_matrix: (n_residues, n_residues) from utils.threshold_adjacency_matrix.
     rows_to_expand: row indices to expand (e.g. only "Binding site"/"Active site" rows,
         picked from row_meta - broad concepts like "Domain" don't make sense to expand
         this way). Default: expand every row.
@@ -503,6 +546,7 @@ def summarize_annotation_test(
     reference_dir: str | Path | None = None,
     cleanup_per_protein: bool = False,
     format: str = "tsv.gz",
+    result_fn: str = "results",
 ) -> pd.DataFrame:
     """Pool per-protein permutation nulls into an empirical global FDR/FWER + a BH-FDR baseline.
 
@@ -517,6 +561,7 @@ def summarize_annotation_test(
     `{uniprot_id}_annotation_pvals.parquet` shards (results.* already carries every row
     from them, plus global FDR/FWER) and remove the now-empty per_protein/ dir.
     """
+    result_fn = normalize_result_fn(result_fn)
     accumulator = NullPvalAccumulator(n_perm)
     for pvals_df in per_protein_results:
         accumulator.add(pvals_df)
@@ -540,7 +585,7 @@ def summarize_annotation_test(
         df_pvals = df_pvals.merge(guide, on="uniprot_id", how="left")
 
     results_path = results_dir / (
-        "results.parquet" if format == "parquet" else "results.tsv.gz"
+        f"{result_fn}.parquet" if format == "parquet" else f"{result_fn}.tsv.gz"
     )
     if format == "parquet":
         df_pvals.to_parquet(results_path, index=False)
@@ -554,6 +599,92 @@ def summarize_annotation_test(
         per_protein_dir.rmdir()
 
     return df_pvals
+
+
+_RESULT_FN_SUFFIXES = (".tsv.gz", ".parquet", ".tsv")
+
+
+def normalize_result_fn(result_fn: str) -> str:
+    """Bare filename stem for the pooled results file.
+
+    Strips a trailing .tsv.gz/.parquet/.tsv (the extension is added from --format) and
+    rejects anything with a path component, so results never land outside results_dir.
+    """
+    if not result_fn or Path(result_fn).name != result_fn or result_fn in (".", ".."):
+        raise ValueError(
+            f"Annotation result filename must be a plain file name without a directory, got {result_fn!r}"
+        )
+    for suffix in _RESULT_FN_SUFFIXES:
+        if result_fn.endswith(suffix) and len(result_fn) > len(suffix):
+            return result_fn[: -len(suffix)]
+    return result_fn
+
+
+def add_result_fn_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--annotation-result-fn",
+        type=str,
+        default="results",
+        help="File name (no directory) for the pooled annotation-test results; the "
+        "extension comes from the format (default results.tsv.gz). A trailing "
+        ".tsv.gz/.tsv/.parquet is ignored.",
+    )
+
+
+def validate_radius(ann_df: pd.DataFrame) -> pd.DataFrame:
+    """ann_df with a numeric, non-negative ``radius`` column (NaN allowed = no expansion).
+
+    Returns ann_df unchanged if it has no radius column. Raises ValueError for
+    non-numeric (e.g. 'multiple-small') or negative radii.
+    """
+    if "radius" not in ann_df.columns:
+        return ann_df
+    radius = pd.to_numeric(ann_df["radius"], errors="coerce")
+    bad = ann_df["radius"][radius.isna() & ann_df["radius"].notna()]
+    if not bad.empty:
+        raise ValueError(
+            "ann_df 'radius' column must be numeric (Angstroms); got non-numeric values "
+            f"such as {bad.unique()[:3].tolist()}"
+        )
+    if (radius < 0).any():
+        raise ValueError("ann_df 'radius' column must be non-negative")
+    return ann_df.assign(radius=radius)
+
+
+def _expansion_requested(
+    ann_df: pd.DataFrame,
+    ann_format: str,
+    ann_id_columns: tuple[str, ...] | list[str] | None,
+    expand_include: list[str] | None,
+) -> bool:
+    """True if some annotation would be expanded: radius > 0 and (expand_include is None
+    or the annotation id starts with one of its prefixes). Mirrors rows_to_expand, but
+    on the raw table so it can run before any protein is processed."""
+    if "radius" not in ann_df.columns:
+        return False
+    positive = ann_df[ann_df["radius"].fillna(0) > 0]
+    if positive.empty:
+        return False
+    if expand_include is None:
+        return True
+    if not expand_include:
+        return False
+    prefixes = tuple(expand_include)
+    if ann_format == "long":
+        cols = list(ann_id_columns)
+        ids = positive[cols].astype(str).agg("_".join, axis=1)
+        return bool(ids.str.startswith(prefixes).any())
+    if ann_id_columns is None or list(ann_id_columns) == ["*"]:
+        skip = {"uniprot_id", "aa_pos", "seq_len", "length", "end", "radius"}
+        cols = [c for c in positive.columns if c not in skip]
+    else:
+        cols = list(ann_id_columns)
+    for col in cols:
+        values = positive[col].dropna().astype(str).unique()
+        ids = values if len(cols) == 1 else [f"{col}_{v}" for v in values]
+        if any(i.startswith(prefixes) for i in ids):
+            return True
+    return False
 
 
 def fallback_seq_len(prot_rvas_df: pd.DataFrame, prot_ann_df: pd.DataFrame) -> int:
@@ -590,7 +721,6 @@ def process_protein(
     ann_format: str,
     ann_include: list[str] | None,
     ann_id_columns: tuple[str, ...] | list[str] | None,
-    expand_radius: float,
     expand_include: list[str] | None,
     pae_cutoff: float,
     reference_dir: str | Path | None,
@@ -603,35 +733,57 @@ def process_protein(
     seq_len = seq_len or fallback_seq_len(prot_rvas_df, prot_ann_df)
 
     if ann_format == "long":
-        label_matrix, row_meta = convert_long_annotations_to_binary_matrix(
+        label_matrix, row_meta, row_radii = convert_long_annotations_to_binary_matrix(
             prot_ann_df,
             seq_len=seq_len,
             ann_include=ann_include,
             ann_id_columns=ann_id_columns,
+            return_radii=True,
         )
     else:
-        label_matrix, row_meta = convert_wide_annotations_to_binary_matrix(
-            prot_ann_df, seq_len=seq_len, ann_id_columns=ann_id_columns
+        label_matrix, row_meta, row_radii = convert_wide_annotations_to_binary_matrix(
+            prot_ann_df,
+            seq_len=seq_len,
+            ann_id_columns=ann_id_columns,
+            return_radii=True,
         )
     if label_matrix.shape[0] == 0:
         return None
 
-    if expand_radius > 0:
-        adjacency_matrix = get_protein_adjacency_matrix(
-            uniprot_id, str(reference_dir), expand_radius, pae_cutoff
+    # None means expand every annotation row; a provided list restricts expansion
+    # to annotation IDs with one of the requested prefixes. Only positive radii expand.
+    candidate_rows = (
+        range(label_matrix.shape[0])
+        if expand_include is None
+        else rows_to_expand(row_meta, expand_include)
+    )
+    radius_groups: dict[float, list[int]] = {}
+    for i in candidate_rows:
+        radius = row_radii.get(i)
+        if radius is not None and pd.notna(radius) and radius > 0:
+            radius_groups.setdefault(float(radius), []).append(i)
+    if radius_groups:
+        # Distance/PAE matrices don't depend on radius - build them once per protein and
+        # threshold separately for each of this protein's distinct expansion radii, rather
+        # than re-parsing the pdb/pae files (and rebuilding these O(n_residues^2) matrices)
+        # once per radius group.
+        distance_matrix, pae_matrix = get_protein_distance_pae_matrices(
+            uniprot_id, str(reference_dir), pae_cutoff
         )
-        if adjacency_matrix is None:
+        if distance_matrix is None:
             warnings.warn(
-                f"{uniprot_id}: no structure in reference dir, skipping expansion",
+                f"{uniprot_id}: no structure in reference dir, skipping expansion at radii "
+                f"{sorted(radius_groups)}",
                 UserWarning,
             )
         else:
-            expand_rows = (
-                rows_to_expand(row_meta, expand_include) if expand_include else None
-            )
-            label_matrix = expand_annotations_neighborhood(
-                label_matrix, adjacency_matrix, expand_rows
-            )
+            for radius, rows in radius_groups.items():
+                adjacency_matrix = threshold_adjacency_matrix(
+                    distance_matrix, pae_matrix, radius, pae_cutoff
+                )
+                label_matrix = expand_annotations_neighborhood(
+                    label_matrix, adjacency_matrix, rows
+                )
 
     if stratum_col is None:
         pvals_df = test_protein_annotations(
@@ -660,7 +812,6 @@ def run_annotation_test(
         "concept_value",
     ),
     expand_include: list[str] | None = None,
-    expand_radius: float = 0,
     pae_cutoff: float = 0,
     reference_dir: str | Path | None = None,
     df_filter: pd.DataFrame | None = None,
@@ -673,6 +824,7 @@ def run_annotation_test(
     cleanup_per_protein: bool = False,
     format: str = "tsv.gz",
     stratum_col: str | None = None,
+    result_fn: str = 'results'
 ) -> pd.DataFrame:
     """Run the annotation test for every protein present in both rvas_df and ann_df.
 
@@ -690,16 +842,13 @@ def run_annotation_test(
           ids, or become one via the {column}_{value} disambiguation when >1 column is
           selected). ann_id_columns=["*"] uses every column except uniprot_id/aa_pos/
           seq_len/length/end. See convert_wide_annotations_to_binary_matrix.
-    expand_radius: if > 0, expand annotations to their 3D structural neighborhood
-        (CA-CA distance within expand_radius Angstrom, + optional pae_cutoff) before
-        testing. 0 (default) disables expansion entirely. Requires reference_dir.
     expand_include: restrict expansion to annotation ids starting with one of these
         (matched against row_meta, so it works for either ann_format), e.g.
         ["Binding site", "Active site"] - broad concepts (Domain, Chain, ...) are left as
-        annotated. None (default) expands every annotation. Ignored if expand_radius <= 0.
+        annotated. None (default) expands every annotation whose radius > 0.
     reference_dir: structure-informed-rvas reference dir (pdb_files/, pae_files/,
         pdb_pae_file_pos_guide.tsv, protein_sequence_guide.tsv). Used for protein length
-        and, if expand_radius > 0, for the adjacency matrix.
+        and, for annotations with radius > 0, for the adjacency matrix.
     df_filter: variants/positions/proteins to exclude from rvas_df before testing, see
         filter_variants.
     df_include: variants/positions/proteins to restrict rvas_df to before testing (e.g. a
@@ -724,8 +873,15 @@ def run_annotation_test(
     results_dir = Path(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    if expand_radius > 0 and reference_dir is None:
-        raise ValueError("expand_radius > 0 requires reference_dir")
+    result_fn = normalize_result_fn(result_fn)
+    ann_df = validate_radius(ann_df)
+    if reference_dir is None and _expansion_requested(
+        ann_df, ann_format, ann_id_columns, expand_include
+    ):
+        raise ValueError(
+            "ann_df has annotations that would be expanded (radius > 0 and matching "
+            "expand_include), which requires reference_dir"
+        )
 
     rvas_df = filter_variants(rvas_df, df_include, mode="include")
     rvas_df = filter_variants(rvas_df, df_filter, mode="exclude")
@@ -762,7 +918,6 @@ def run_annotation_test(
             ann_format=ann_format,
             ann_include=ann_include,
             ann_id_columns=ann_id_columns,
-            expand_radius=expand_radius,
             expand_include=expand_include,
             pae_cutoff=pae_cutoff,
             reference_dir=reference_dir,
@@ -794,6 +949,7 @@ def run_annotation_test(
         reference_dir,
         cleanup_per_protein=cleanup_per_protein,
         format=format,
+        result_fn=result_fn,
     )
 
 
@@ -839,15 +995,15 @@ def _parse_args() -> argparse.Namespace:
         help="Comma-separated filter on ann_id_columns[0] (long format only), e.g. 'Domain'",
     )
     parser.add_argument(
-        "--expand-radius",
-        type=float,
-        default=0,
-        help="3D neighborhood radius in Angstrom; 0 (default) disables expansion",
-    )
-    parser.add_argument(
         "--expand-include",
         default=None,
-        help="Comma-separated annotation id prefixes to expand, e.g. 'Binding site,Active site' (default: expand all)",
+        help="Comma-separated annotation id prefixes to expand, e.g. 'Binding site,Active site' (default: expand every annotation with radius > 0)",
+    )
+    parser.add_argument(
+        "--expand-radius",
+        type=float,
+        default=None,
+        help="Neighborhood radius (Angstroms) for expansion, used when the annotation table has no 'radius' column (default: no expansion)",
     )
     parser.add_argument(
         "--pae-cutoff",
@@ -920,19 +1076,22 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="rvas column defining CMH strata; adjusts the test for stratum-dependent case fraction",
     )
+    add_result_fn_argument(parser)
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
+    ann_df = read_table(args.ann_path)
+    if args.expand_radius is not None and "radius" not in ann_df.columns:
+        ann_df["radius"] = args.expand_radius
     run_annotation_test(
         read_table(args.rvas_path),
-        read_table(args.ann_path),
+        ann_df,
         ann_format=args.ann_format,
         ann_include=args.ann_include.split(",") if args.ann_include else None,
         ann_id_columns=tuple(args.ann_id_columns.split(",")),
         expand_include=args.expand_include.split(",") if args.expand_include else None,
-        expand_radius=args.expand_radius,
         pae_cutoff=args.pae_cutoff,
         reference_dir=args.reference_dir,
         df_filter=read_table(args.df_filter_path) if args.df_filter_path else None,
@@ -945,6 +1104,7 @@ def main() -> None:
         cleanup_per_protein=args.cleanup_per_protein,
         format=args.format,
         stratum_col=args.stratum_col,
+        result_fn=args.annotation_result_fn
     )
 
 
