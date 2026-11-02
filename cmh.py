@@ -4,7 +4,7 @@ import numpy as np
 from scipy.stats import hypergeom
 
 from logger_config import get_logger
-from utils import DEFAULT_SCREEN_CHI2
+from utils import DEFAULT_SCREEN_CHI2, SCREEN_CHI2_GREATER
 
 logger = get_logger(__name__)
 
@@ -142,6 +142,12 @@ def exact_cmh_minlike_lookup(inside_totals, case_totals, stratum_totals):
     return support, pvals
 
 
+def exact_cmh_upper_lookup(inside_totals, case_totals, stratum_totals):
+    """Support and one-sided P(S >= s) (case enrichment inside)."""
+    support, pmf = exact_cmh_distribution(inside_totals, case_totals, stratum_totals)
+    return support, np.clip(np.cumsum(pmf[::-1])[::-1], 0.0, 1.0)
+
+
 def exact_cmh_pvalue(
     observed_case_inside,
     inside_totals,
@@ -162,7 +168,10 @@ def exact_cmh_pvalue(
     return float(pvals[observed - support[0]])
 
 
-def screen_and_exact_pvalues(cmh, screen_chi2=DEFAULT_SCREEN_CHI2):
+def screen_and_exact_pvalues(cmh, screen_chi2=DEFAULT_SCREEN_CHI2, alternative="greater"):
+    greater = alternative == "greater"
+    if greater and screen_chi2 == DEFAULT_SCREEN_CHI2:
+        screen_chi2 = SCREEN_CHI2_GREATER
     s = cmh["s_case_inside"]
     e = cmh["expected_sum"]
     v = cmh["variance_sum"]
@@ -171,6 +180,9 @@ def screen_and_exact_pvalues(cmh, screen_chi2=DEFAULT_SCREEN_CHI2):
     informative = v > 0
 
     candidate = (stat > float(screen_chi2)) & informative[:, None]
+    if greater:
+        candidate &= s > e[:, None]
+    lookup_fn = exact_cmh_upper_lookup if greater else exact_cmh_minlike_lookup
     pvals = np.ones_like(stat, dtype=np.float64)
 
     inside_by_k = cmh["inside_totals_by_stratum"]
@@ -186,7 +198,7 @@ def screen_and_exact_pvalues(cmh, screen_chi2=DEFAULT_SCREEN_CHI2):
         key = inside.tobytes()
 
         if key not in cache:
-            support, p_lookup = exact_cmh_minlike_lookup(
+            support, p_lookup = lookup_fn(
                 inside,
                 case_totals,
                 totals,

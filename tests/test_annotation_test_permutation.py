@@ -42,6 +42,7 @@ from annotation_test_permutation import (
 # Collected, its first parameter is read as a fixture request and the run errors
 # with "fixture 'uniprot_id' not found".
 from annotation_test_permutation import (
+    test_protein_annotations as run_protein_annotations,
     test_protein_annotations_cmh as run_protein_annotations_cmh,
 )
 from cmh import (
@@ -51,7 +52,7 @@ from cmh import (
     summarize_strata,
 )
 from empirical_fdr import _compute_false_discoveries, _compute_fwer
-from utils import get_case_control_ac_matrix, get_stratified_case_ac_matrix
+from utils import fisher_greater_pvals, get_case_control_ac_matrix, get_stratified_case_ac_matrix
 
 
 # ---------------------------------------------------------------------------
@@ -434,7 +435,7 @@ def test_one_stratum_cmh_equals_pooled_fisher():
         "inside_totals_by_stratum": inside_tot, "case_totals": case_k.sum(0),
         "stratum_totals": tot_k.sum(0),
     }
-    pv, stat = screen_and_exact_pvalues(cmh, 0.0)  # screen off: every informative row gets an exact p
+    pv, stat = screen_and_exact_pvalues(cmh, 0.0, "two-sided")  # screen off: every informative row gets an exact p
     tot_case, tot_ctrl = int(case_k.sum()), int(tot_k.sum() - case_k.sum())
     a = cmh["s_case_inside"]
     b = inside_tot.sum(1)[:, None] - a
@@ -526,6 +527,25 @@ def test_cmh_annotation_test_is_null_on_pure_confounding():
         "P1", conf, np.isin(np.arange(1, 11), range(1, 6))[None, :], {0: ("x",)}, 200, "stratum"
     )
     assert conf_res["p_value"].iloc[0] > 0.1 and abs(conf_res["odds_ratio"].iloc[0] - 1) < 1e-9
+
+
+def test_one_sided_annotation_test():
+    # control-enriched set -> p ~ 1; case-enriched set -> p_greater <= p_two-sided
+    oa = pd.DataFrame({"aa_pos": [1, 2, 3, 4, 5, 6, 7, 8], "ac_case": [8, 6, 1, 1, 0, 1, 1, 0],
+                       "ac_control": [0, 1, 4, 4, 5, 1, 1, 4]})
+    lab = np.zeros((2, 8), dtype=bool)
+    lab[0, :2] = True  # case-enriched
+    lab[1, 2:5] = True  # control-enriched
+    meta = {0: ("case",), 1: ("ctrl",)}
+    two = run_protein_annotations("P1", oa, lab, meta, 8, 50, alternative="two-sided")
+    gr = run_protein_annotations("P1", oa, lab, meta, 8, 50)
+    assert gr["p_value"][0] <= two["p_value"][0] and gr["p_value"][1] > 0.9
+
+
+def test_fisher_greater_matches_scipy():
+    for a, b in [(5, 1), (2, 3), (0, 4)]:
+        ref = fisher_exact([[a, 10 - a], [b, 12 - b]], alternative="greater")[1]
+        assert np.isclose(fisher_greater_pvals(a, b, 10, 12), ref)
 
 
 if __name__ == '__main__':

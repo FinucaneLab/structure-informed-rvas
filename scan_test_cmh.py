@@ -147,6 +147,7 @@ def compute_all_cmh_pvals(
     pae_cutoff=15.0,
     screen_chi2=DEFAULT_SCREEN_CHI2,
     seed=1,
+    alternative="greater",
 ):
     if isinstance(radius, str):
         raise NotImplementedError(
@@ -175,6 +176,7 @@ def compute_all_cmh_pvals(
     pval_matrix, cmh_stat_matrix = screen_and_exact_pvalues(
         cmh,
         screen_chi2=screen_chi2,
+        alternative=alternative,
     )
 
     pval_columns = ["p_value"] + [f"null_pval_{i}" for i in range(n_sims)]
@@ -267,6 +269,7 @@ def scan_test_cmh(
     stratum_col,
     screen_chi2=DEFAULT_SCREEN_CHI2,
     seed=1,
+    alternative="greater",
     min_alleles=DEFAULT_MIN_ALLELES,
 ):
     if fdr_only:
@@ -365,6 +368,7 @@ def scan_test_cmh(
                 pae_cutoff=pae_cutoff,
                 screen_chi2=screen_chi2,
                 seed=seed,
+                alternative=alternative,
             )
             write_cmh_pvals(
                 results_dir,

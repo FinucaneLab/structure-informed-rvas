@@ -347,6 +347,12 @@ if __name__ == '__main__':
         help = 'categorical stratum column used by CMH',
     )
     parser.add_argument(
+        '--alternative',
+        choices=['two-sided', 'greater'],
+        default='greater',
+        help = "scan/annotation test: 'greater' = one-sided case enrichment (applied to the p-value before FWER/FDR)",
+    )
+    parser.add_argument(
         '--cmh-screen-threshold',
         type=float,
         default=DEFAULT_SCREEN_CHI2,
@@ -858,6 +864,7 @@ if __name__ == '__main__':
             args.stratum_col,
             args.cmh_screen_threshold,
             args.seed,
+            args.alternative,
             args.min_alleles,
         )
         did_nothing = False
@@ -880,6 +887,7 @@ if __name__ == '__main__':
             args.pval_file,
             args.remove_nbhd,
             args.seed,
+            args.alternative,
             args.min_alleles,
         )
         did_nothing = False
@@ -941,8 +949,9 @@ if __name__ == '__main__':
             results_dir=Path(args.results_dir) / 'annotation_test',
             cleanup_per_protein=True,
             stratum_col=args.stratum_col if annotation_cmh else None,
+            alternative=args.alternative,
+            result_fn=args.annotation_result_fn,
             min_alleles=args.min_alleles,
-            result_fn=args.annotation_result_fn
         )
         did_nothing = False
 

@@ -10,7 +10,7 @@ ROOT = os.path.abspath(os.path.join(HERE, '..'))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from cmh import exact_cmh_distribution, exact_cmh_pvalue
+from cmh import exact_cmh_distribution, exact_cmh_pvalue, exact_cmh_upper_lookup
 from utils import draw_stratified_null_cases
 
 
@@ -74,6 +74,15 @@ class TestStratifiedNull(unittest.TestCase):
         self.assertTrue(np.all(draws.sum(axis=0) == n_case))
         self.assertTrue(np.all(draws >= 0))
         self.assertTrue(np.all(draws <= total[:, None]))
+
+
+class TestUpperTail(unittest.TestCase):
+    def test_upper_tail_matches_brute_force(self):
+        m, a, n = [3, 4], [2, 3], [6, 7]
+        support, pmf = exact_cmh_distribution(m, a, n)
+        support2, upper = exact_cmh_upper_lookup(m, a, n)
+        for i, s in enumerate(support):
+            self.assertTrue(np.isclose(upper[i], pmf[support >= s].sum()))
 
 
 if __name__ == '__main__':

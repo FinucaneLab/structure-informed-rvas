@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import sklearn.metrics
 from Bio.PDB import PDBParser
-from scipy.stats import chi2 as chi2_dist
+from scipy.stats import chi2 as chi2_dist, hypergeom
 
 from logger_config import get_logger
 
@@ -16,6 +16,8 @@ logger = get_logger(__name__)
 
 # 1-df chi2 screen (p~0.1): exact tests run only above it, lenient so no p<0.05 is missed.
 DEFAULT_SCREEN_CHI2 = 2.706
+# same one-sided p (0.10) margin as 2.706 two-sided
+SCREEN_CHI2_GREATER = 1.642
 
 # Allele floor for the case/control scan, applied inclusively: the default of 5
 # keeps a gene with 5 case and 5 control alleles.
@@ -248,7 +250,7 @@ def get_adjacency_matrix(
         return None
     return threshold_adjacency_matrix(distance_matrix, pae_matrix, radius, pae_cutoff)
 
-def get_chi2_pvals_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_ctrl):
+def get_chi2_pvals_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_ctrl, alternative="greater"):
     """Chi-square p-value lookup table over every (case_ac, ctrl_ac) pair in a neighborhood.
 
     Vectorized 1-df chi-square approximation to the Fisher's exact p-value for every
@@ -256,6 +258,8 @@ def get_chi2_pvals_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_c
     Fisher test afterwards for the (a, b) pairs this flags as borderline - avoids calling
     scipy.stats.fisher_exact per cell/permutation, which dominates runtime at scale.
     Used by annotation_test_permutation.
+    alternative="greater" gives the one-sided (case enrichment, a > expected) p-value and
+    only flags cells with a > expected for the exact test.
 
     Returns:
         pvals: (max_a+1, max_b+1) chi-square p-values.
@@ -300,9 +304,20 @@ def get_chi2_pvals_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_c
         + ((d - expected_d) ** 2 / np.maximum(1e-10, expected_d))
     )
 
-    pvals = np.where(valid_mask, chi2_dist.sf(chi2_stat, df=1), 1.0)
-    potential_significant = (chi2_stat > DEFAULT_SCREEN_CHI2) & valid_mask
+    pvals = chi2_dist.sf(chi2_stat, df=1)
+    if alternative == "greater":
+        enriched = a * n_ctrl > b * n_case
+        pvals = np.where(enriched, pvals / 2, 1 - pvals / 2)
+        potential_significant = (chi2_stat > SCREEN_CHI2_GREATER) & enriched & valid_mask
+    else:
+        potential_significant = (chi2_stat > DEFAULT_SCREEN_CHI2) & valid_mask
+    pvals = np.where(valid_mask, pvals, 1.0)
     return pvals, potential_significant
+
+
+def fisher_greater_pvals(a, b, n_case, n_ctrl):
+    """One-sided Fisher p (case enrichment inside) for tables [[a, n_case-a], [b, n_ctrl-b]]; vectorised."""
+    return hypergeom.sf(a - 1, n_case + n_ctrl, n_case, a + b)
 
 
 def valid_for_fisher(contingency_table):

@@ -6,8 +6,8 @@ import bisect
 import h5py
 from scipy.stats import fisher_exact, binom
 from scipy import special
-from utils import (DEFAULT_MIN_ALLELES, DEFAULT_SCREEN_CHI2, get_adjacency_matrix,
-                   valid_for_fisher, write_dataset, read_p_values,
+from utils import (DEFAULT_MIN_ALLELES, DEFAULT_SCREEN_CHI2, SCREEN_CHI2_GREATER, fisher_greater_pvals,
+                   get_adjacency_matrix, valid_for_fisher, write_dataset, read_p_values,
                    get_case_control_ac_matrix, restrict_to_structure)
 from logger_config import get_logger
 from empirical_fdr import compute_fdr
@@ -18,7 +18,7 @@ MULTI_RADII_SMALL = [6, 9, 12, 15, 18, 21]
 MULTI_RADII_BIG = [10, 15, 20, 30, 40]
 P_FLOOR = np.finfo(float).tiny
 
-def get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_ctrl):
+def get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_ctrl, alternative='greater'):
     max_n_case_nbhd = np.max(n_case_nbhd_mat)
     max_n_control_nbhd = np.max(n_control_nbhd_mat)
     
@@ -67,6 +67,15 @@ def get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_
         ((d - expected_d)**2 / np.maximum(1e-10, expected_d))
     )
     
+    if alternative == 'greater':
+        potential_significant = (chi2 > SCREEN_CHI2_GREATER) & (a * n_ctrl > b * n_case) & valid_mask
+        # only (a, b) pairs actually observed need the exact test
+        observed = np.zeros_like(potential_significant)
+        observed[n_case_nbhd_mat.astype(int).ravel(), n_control_nbhd_mat.astype(int).ravel()] = True
+        sel = potential_significant & observed
+        pvals[sel] = fisher_greater_pvals(a[sel], b[sel], n_case, n_ctrl)
+        return pvals
+
     potential_significant = (chi2 > DEFAULT_SCREEN_CHI2) & valid_mask
     
     # Second pass: Calculate exact p-values only for potentially significant cells
@@ -78,10 +87,10 @@ def get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_
     
     return pvals
 
-def _compute_pval_matrix_for_radius(adjacency_matrix, case_ac_matrix, control_ac_matrix, n_case, n_control):
+def _compute_pval_matrix_for_radius(adjacency_matrix, case_ac_matrix, control_ac_matrix, n_case, n_control, alternative='greater'):
     n_case_nbhd = get_nbhd_counts(adjacency_matrix, case_ac_matrix)
     n_control_nbhd = get_nbhd_counts(adjacency_matrix, control_ac_matrix)
-    pval_lookup = get_pval_lookup_case_control(n_case_nbhd, n_control_nbhd, n_case, n_control)
+    pval_lookup = get_pval_lookup_case_control(n_case_nbhd, n_control_nbhd, n_case, n_control, alternative)
     return pval_lookup[n_case_nbhd, n_control_nbhd], n_case_nbhd, n_control_nbhd
 
 def get_nbhd_counts(adjacency_matrix, ac_per_residue):
@@ -143,6 +152,7 @@ def compute_all_pvals(
         radius = 15,
         pae_cutoff = 15,
         seed = None,
+        alternative = 'greater',
         out_of_structure = None,
         min_alleles = DEFAULT_MIN_ALLELES,
 ):
@@ -162,7 +172,7 @@ def compute_all_pvals(
         nbhd_counts = {}
         for r in radii:
             pval_mat, n_case_nbhd, n_ctrl_nbhd = _compute_pval_matrix_for_radius(
-                adj_matrices[r], case_ac_matrix, control_ac_matrix, n_case, n_control
+                adj_matrices[r], case_ac_matrix, control_ac_matrix, n_case, n_control, alternative
             )
             pval_mats.append(pval_mat)
             nbhd_counts[r] = (n_case_nbhd, n_ctrl_nbhd)
@@ -199,7 +209,7 @@ def compute_all_pvals(
         n_control = control_ac_matrix[:,0].sum()
         n_case_nbhd_mat = get_nbhd_counts(adjacency_matrix, case_ac_matrix)
         n_control_nbhd_mat = get_nbhd_counts(adjacency_matrix, control_ac_matrix)
-        pval_lookup = get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_control)
+        pval_lookup = get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_control, alternative)
         pval_matrix = pval_lookup[n_case_nbhd_mat, n_control_nbhd_mat]
         radius_col = float(radius)
 
@@ -223,7 +233,7 @@ def write_df_pvals(results_dir, uniprot_id, df_pvals, pval_file):
         write_dataset(fid, f'{uniprot_id}_radius', df_pvals[['radius']])
         write_dataset(fid, f'{uniprot_id}_original', df_pvals[['original_case', 'original_control']])
 
-def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir, uniprot_id, radius, pae_cutoff, n_sims, pval_file, seed=None, out_of_structure=None, min_alleles=DEFAULT_MIN_ALLELES):
+def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir, uniprot_id, radius, pae_cutoff, n_sims, pval_file, seed=None, alternative='greater', out_of_structure=None, min_alleles=DEFAULT_MIN_ALLELES):
     df_pvals, adj_mat = compute_all_pvals(
         df,
         pdb_file_pos_guide,
@@ -234,6 +244,7 @@ def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir,
         radius,
         pae_cutoff,
         seed,
+        alternative,
         out_of_structure,
         min_alleles,
     )
@@ -276,7 +287,7 @@ def _filter_proteins_by_allele_count(df_rvas, df_fdr_filter, min_alleles=DEFAULT
     return uniprot_id_list
 
 
-def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, remove_nbhd, pval_file, seed=None, min_alleles=DEFAULT_MIN_ALLELES):
+def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, remove_nbhd, pval_file, seed=None, alternative='greater', min_alleles=DEFAULT_MIN_ALLELES):
     """Process each protein individually with scan test.
 
     Returns the list of (uniprot_id, n_res, dropped_positions) for proteins whose
@@ -322,7 +333,7 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
             scan_test_one_protein(
                 df, pdb_file_pos_guide, pdb_dir, pae_dir, 
                 results_dir, uniprot_id, radius, pae_cutoff, n_sims,
-                pval_file, protein_seed, out_of_structure, min_alleles
+                pval_file, protein_seed, alternative, out_of_structure, min_alleles
             )
         except FileNotFoundError as e:
             logger.error(f'{uniprot_id}: Required file not found - {e}')
@@ -386,6 +397,7 @@ def scan_test(
     pval_file,
     remove_nbhd,
     seed=None,
+    alternative='greater',
     min_alleles=DEFAULT_MIN_ALLELES,
 ):
     """
@@ -414,7 +426,7 @@ def scan_test(
     out_of_structure = _process_proteins_batch(
         df_processed, uniprot_id_list, reference_dir, 
         radius, pae_cutoff, results_dir, n_sims, remove_nbhd,
-        pval_file, seed, min_alleles
+        pval_file, seed, alternative, min_alleles
     )
 
     with h5py.File(os.path.join(results_dir, pval_file), 'a') as fid:

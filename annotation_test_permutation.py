@@ -5,7 +5,7 @@ Per protein: build a binary (n_annotations, seq_len) matrix from the annotation 
 (binding site, active site, ...) to their 3D structural neighborhood, then test each
 annotation against a per-residue permutation null that fixes the total (case+control)
 allele count at each residue and redraws case/control labels (multivariate
-hypergeometric). Local FDR/FWER come from that per-protein null; global_fdr/global_fwer
+hypergeometric). local_fdr and local_fwer come from that per-protein null; global_fdr/global_fwer
 pool the null p-values across all tested proteins.
 
 With stratum_col, the null is redrawn within each stratum and the statistic is the
@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 from scipy.sparse import csr_matrix
-from scipy.stats import chi2, fisher_exact
+from scipy.stats import chi2, fisher_exact, norm
 from statsmodels.stats.multitest import fdrcorrection
 from tqdm.auto import tqdm
 
@@ -35,6 +35,9 @@ from logger_config import get_logger
 from utils import (
     DEFAULT_MIN_ALLELES,
     DEFAULT_SCREEN_CHI2,
+    SCREEN_CHI2_GREATER,
+    fisher_greater_pvals,
+    get_adjacency_matrix,
     get_distance_and_pae_matrices,
     threshold_adjacency_matrix,
     get_case_control_ac_matrix,
@@ -332,8 +335,16 @@ def expand_annotations_neighborhood(
 
 
 def local_fwer_fdr(observed_pvals: np.ndarray, null_pvals: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Within-protein min-P FWER and permutation FDR (same estimator as the global one, with this
+    protein's null): FDR(t) = E[#null p <= t] / #obs p <= t, capped at 1 and monotonised."""
+    n_perm = null_pvals.shape[1]
     local_fwer = (null_pvals.min(axis=0)[None, :] <= observed_pvals[:, None]).mean(axis=1)
-    local_fdr = (null_pvals <= observed_pvals[:, None]).mean(axis=1)
+    false_discoveries = np.searchsorted(np.sort(null_pvals, axis=None), observed_pvals, side="right") / n_perm
+    discoveries = np.searchsorted(np.sort(observed_pvals), observed_pvals, side="right")
+    fdr = np.minimum(1.0, false_discoveries / discoveries)
+    order = np.argsort(observed_pvals)
+    local_fdr = np.empty_like(fdr)
+    local_fdr[order] = np.minimum.accumulate(fdr[order][::-1])[::-1]
     return local_fwer, local_fdr
 
 
@@ -345,6 +356,7 @@ def test_protein_annotations(
     seq_len: int,
     n_perm: int,
     seed: int = 0,
+    alternative: str = "greater",
 ) -> pd.DataFrame:
     """Permutation test for one protein's annotations.
 
@@ -353,6 +365,7 @@ def test_protein_annotations(
     scan_test.get_case_control_ac_matrix). p-value per annotation is chi-square
     (Fisher's exact for borderline cases), against the observed count and against each
     permutation, giving local_fdr/local_fwer within this protein.
+    alternative="greater" tests case enrichment inside the annotation only.
     """
     case_ac_matrix, ctrl_ac_matrix = get_case_control_ac_matrix(
         prot_rvas_df, n_res=seq_len, n_sim=n_perm, seed=protein_seed(uniprot_id, seed)
@@ -370,7 +383,7 @@ def test_protein_annotations(
     total_ac_ctrl = int(ctrl_ac_matrix[:, 0].sum())
 
     pvals_table, potential_significant_table = get_chi2_pvals_case_control(
-        ac_in_case, ac_in_ctrl, total_ac_case, total_ac_ctrl
+        ac_in_case, ac_in_ctrl, total_ac_case, total_ac_ctrl, alternative
     )
     or_table = np.ones_like(pvals_table)
 
@@ -381,9 +394,16 @@ def test_protein_annotations(
     a_obs, b_obs = ac_in_case.ravel(), ac_in_ctrl.ravel()
     valid_pairs = (a_obs + b_obs) > 0
     observed_table[a_obs[valid_pairs], b_obs[valid_pairs]] = True
-    for a, b in np.argwhere(observed_table & potential_significant_table):
-        table = [[a, total_ac_case - a], [b, total_ac_ctrl - b]]
-        or_table[a, b], pvals_table[a, b] = fisher_exact(table)
+    cells = np.argwhere(observed_table & potential_significant_table)
+    if alternative == "greater":
+        a, b = cells[:, 0], cells[:, 1]
+        pvals_table[a, b] = fisher_greater_pvals(a, b, total_ac_case, total_ac_ctrl)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            or_table[a, b] = a * (total_ac_ctrl - b) / ((total_ac_case - a) * b)
+    else:
+        for a, b in cells:
+            table = [[a, total_ac_case - a], [b, total_ac_ctrl - b]]
+            or_table[a, b], pvals_table[a, b] = fisher_exact(table)
 
     pvalues = pvals_table[ac_in_case, ac_in_ctrl]
     odds_ratios = or_table[ac_in_case, ac_in_ctrl]
@@ -417,6 +437,7 @@ def test_protein_annotations_cmh(
     stratum_col: str,
     seed: int = 0,
     screen_chi2: float = DEFAULT_SCREEN_CHI2,
+    alternative: str = "greater",
 ) -> pd.DataFrame:
     """CMH-adjusted version of test_protein_annotations.
 
@@ -445,8 +466,15 @@ def test_protein_annotations_cmh(
         "stratum_totals": stratum_totals,
     }
 
-    pvals, stat = screen_and_exact_pvalues(cmh, screen_chi2)
-    pvals = np.where(stat > screen_chi2, pvals, chi2.sf(stat, 1))
+    pvals, stat = screen_and_exact_pvalues(cmh, screen_chi2, alternative)
+    if alternative == "greater":
+        z = (cmh["s_case_inside"] - expected[:, None]) / np.sqrt(np.where(variance > 0, variance, 1.0))[:, None]
+        fallback = np.where(variance[:, None] > 0, norm.sf(z), 1.0)
+        screened = (stat > (SCREEN_CHI2_GREATER if screen_chi2 == DEFAULT_SCREEN_CHI2 else screen_chi2)) & (z > 0)
+    else:
+        fallback = chi2.sf(stat, 1)
+        screened = stat > screen_chi2
+    pvals = np.where(screened, pvals, fallback)
     local_fwer, local_fdr = local_fwer_fdr(pvals[:, 0], pvals[:, 1:])
 
     inside_totals = cmh["inside_totals_by_stratum"]
@@ -729,6 +757,7 @@ def process_protein(
     results_dir: Path,
     seed: int = 0,
     stratum_col: str | None = None,
+    alternative: str = "greater",
 ) -> pd.DataFrame | None:
     """Build the label matrix, run the permutation test, and write the per-protein parquet."""
     seq_len = seq_len or fallback_seq_len(prot_rvas_df, prot_ann_df)
@@ -788,11 +817,11 @@ def process_protein(
 
     if stratum_col is None:
         pvals_df = test_protein_annotations(
-            uniprot_id, prot_rvas_df, label_matrix, row_meta, seq_len, n_perm, seed
+            uniprot_id, prot_rvas_df, label_matrix, row_meta, seq_len, n_perm, seed, alternative
         )
     else:
         pvals_df = test_protein_annotations_cmh(
-            uniprot_id, prot_rvas_df, label_matrix, row_meta, n_perm, stratum_col, seed
+            uniprot_id, prot_rvas_df, label_matrix, row_meta, n_perm, stratum_col, seed, alternative=alternative
         )
     per_protein_dir = results_dir / "per_protein"
     per_protein_dir.mkdir(exist_ok=True)
@@ -825,7 +854,8 @@ def run_annotation_test(
     cleanup_per_protein: bool = False,
     format: str = "tsv.gz",
     stratum_col: str | None = None,
-    result_fn: str = 'results'
+    alternative: str = "greater",
+    result_fn: str = 'results',
 ) -> pd.DataFrame:
     """Run the annotation test for every protein present in both rvas_df and ann_df.
 
@@ -926,6 +956,7 @@ def run_annotation_test(
             results_dir=results_dir,
             seed=seed,
             stratum_col=stratum_col,
+            alternative=alternative,
         )
 
     n_resumed = sum(
@@ -1077,6 +1108,12 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="rvas column defining CMH strata; adjusts the test for stratum-dependent case fraction",
     )
+    parser.add_argument(
+        "--alternative",
+        default="greater",
+        choices=["two-sided", "greater"],
+        help="greater = one-sided case enrichment inside the annotation",
+    )
     add_result_fn_argument(parser)
     args = parser.parse_args()
     # At least 1, matching run.py. The comparison in
@@ -1112,7 +1149,8 @@ def main() -> None:
         cleanup_per_protein=args.cleanup_per_protein,
         format=args.format,
         stratum_col=args.stratum_col,
-        result_fn=args.annotation_result_fn
+        alternative=args.alternative,
+        result_fn=args.annotation_result_fn,
     )
 
 
