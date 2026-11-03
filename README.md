@@ -275,6 +275,15 @@ python run.py --pre-mapped-rvas rvas.mapped.parquet --reference-dir sir-referenc
 
 `--annotation-expand` takes id prefixes or `all`; without it nothing is expanded. Expansion requires `--reference-dir`. Output is `results/annotation_test/results.tsv.gz` (change the name with `--annotation-result-fn`: a plain file name with no directory; a trailing `.tsv.gz`, `.tsv` or `.parquet` is ignored and the extension comes from the format) with `p_value`, `local_fdr`/`local_fwer`, `global_fdr`/`global_fwer` and `bh_fdr`. `--df-filter` (columns `uniprot_id`, optionally `aa_pos`, `aa_ref`, `aa_alt`) restricts the RVAS data to those proteins/positions/variants before the test, which also changes the null. A crashed run resumes from `per_protein/` shards if rerun with the same `--results-dir` and `--n-sims`. Note that existing shards are reused even if the radius, seed or annotations have changed, so use a fresh `--results-dir` after changing any of those.
 
+#### De novo (mutation-rate) null
+
+For de novo cohorts, `--mu-file` (or `--mu-col`) replaces the case/control null with the mutation-rate null of the scan: Test A `X ~ Poisson(lambda_hat * M)` and Test B `X | N_g ~ Binomial(N_g, M / M_g)`, where M is the annotation's summed rate and M_g the whole sequence's. Results carry `p_poisson`, `p_binomial`, per-test `local_*`/`global_*` corrections, and `global_fdr`/`global_fwer`/`local_fdr`/`local_fwer` = max over the two tests. `--stratum-col`/`cmh` and `--alternative two-sided` are rejected; `--test-direction` picks the tail, `--min-denovo` the gene floor, `--simulate-null-from-mu` runs a calibration check. Use a fresh `--results-dir`.
+
+```bash
+python structure-informed-rvas/run.py --rvas-data-to-map denovo.tsv.gz --reference-dir ref/ --mu-file \
+  --annotation-file annotations.parquet --n-sims 1000 --results-dir results_mu
+```
+
 To use a different radius per annotation type (e.g. by `concept_type`), add a numeric `radius` column (Angstroms) to the annotation file. It is used instead of `--neighborhood-radius`, but only for annotations selected by `--annotation-expand` (use `all` to expand every annotation). Rows with radius 0 or empty are not expanded. In long format, every row of a given annotation must have the same radius. `--neighborhood-radius` applies only when the file has no `radius` column, and must then be numeric (`multiple-small`/`multiple-big` are not supported for annotation expansion). Without `--annotation-expand`, the `radius` column is ignored.
 
 ### Full Pipeline (run_all)

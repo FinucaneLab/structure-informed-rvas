@@ -32,6 +32,15 @@ from cmh import (
     summarize_strata,
 )
 from logger_config import get_logger
+from mutation_rate_test import (
+    binomial_pval_lookup,
+    mu_vector_for_protein,
+    poisson_pval_lookup,
+    simulate_multinomial_null,
+    simulate_poisson_null,
+    sum_per_residue,
+    _select_genes,
+)
 from utils import (
     DEFAULT_MIN_ALLELES,
     DEFAULT_SCREEN_CHI2,
@@ -428,6 +437,75 @@ def test_protein_annotations(
     return pd.concat([pvals_df, null_df], axis=1)
 
 
+def test_protein_annotations_mu(
+    uniprot_id: str,
+    prot_rvas_df: pd.DataFrame,
+    label_matrix: np.ndarray,
+    row_meta: dict,
+    seq_len: int,
+    n_perm: int,
+    lambda_hat: float,
+    mu_lookup: dict,
+    seed: int = 0,
+    direction: str = "enrichment",
+) -> pd.DataFrame:
+    """De novo annotation test against a mutation-rate null (de novo analogue of test_protein_annotations).
+
+    Two tests per annotation, as in mutation_rate_test: Test A (`poisson`) X ~ Poisson(lambda_hat * M)
+    (absolute; guards against regional constraint) and Test B (`binomial`) X | N_g ~ Binomial(N_g, M / M_g)
+    (within gene). M is the annotation's summed per-residue rate, M_g the whole sequence's. Null draws
+    come from simulate_poisson_null / simulate_multinomial_null; the permutations give local
+    FDR/FWER (annotations overlap, p-values are discrete). Returns both tests stacked, `test` column.
+
+    Test A FDR/FWER are anti-conservative under --min-denovo gene selection (see
+    simulate_poisson_null); read it as a direction-of-effect guard. Test B is unaffected.
+    """
+    prot_rvas_df = prot_rvas_df[prot_rvas_df["aa_pos"] <= seq_len]
+    x_obs = sum_per_residue(prot_rvas_df, "ac_case", seq_len, dtype=int)
+    m, mu_cov = mu_vector_for_protein(mu_lookup, uniprot_id, seq_len)
+    n_g, m_g = int(x_obs.sum()), float(m.sum())
+    rng = np.random.default_rng(protein_seed(uniprot_id, seed))
+    x_a = np.hstack([x_obs, simulate_poisson_null(m, lambda_hat, n_perm, rng)])
+    x_b = np.hstack([x_obs, simulate_multinomial_null(m, n_g, n_perm, rng)])
+
+    labels = csr_matrix(label_matrix.astype(np.int8))
+    m_ann = np.asarray(labels @ m).ravel()
+    p_frac = m_ann / m_g
+    rows = np.arange(labels.shape[0])[:, None]
+    annotation_id = ["|".join(row_meta[i]) for i in range(len(row_meta))]
+
+    frames = []
+    for test, x, expected, make_lookup in (
+        ("poisson", x_a, lambda_hat * m_ann,
+         lambda x_max: poisson_pval_lookup(lambda_hat * m_ann, x_max, direction)),
+        ("binomial", x_b, n_g * p_frac,
+         lambda x_max: binomial_pval_lookup(p_frac, n_g, x_max, direction)),
+    ):
+        x_ann = np.asarray(labels @ x)  # (n_annotations, 1 + n_perm)
+        pvals = make_lookup(int(x_ann.max()))[rows, x_ann]
+        local_fwer, local_fdr = local_fwer_fdr(pvals[:, 0], pvals[:, 1:])
+        pvals_df = pd.DataFrame(
+            {
+                "uniprot_id": uniprot_id,
+                "annotation_id": annotation_id,
+                "test": test,
+                "p_value": pvals[:, 0],
+                "local_fwer": local_fwer,
+                "local_fdr": local_fdr,
+                "n_case_in": x_ann[:, 0],
+                "expected": expected,
+                "obs_exp": x_ann[:, 0] / np.maximum(expected, 1e-300),
+                "mu_in": m_ann,
+                "n_denovo_gene": n_g,
+                "mu_gene": m_g,
+                "mu_coverage": mu_cov,
+            }
+        )
+        null_df = pd.DataFrame(pvals[:, 1:], columns=[f"null_pval_{i}" for i in range(n_perm)])
+        frames.append(pd.concat([pvals_df, null_df], axis=1))
+    return pd.concat(frames, ignore_index=True)
+
+
 def test_protein_annotations_cmh(
     uniprot_id: str,
     prot_rvas_df: pd.DataFrame,
@@ -591,19 +669,42 @@ def summarize_annotation_test(
     from them, plus global FDR/FWER) and remove the now-empty per_protein/ dir.
     """
     result_fn = normalize_result_fn(result_fn)
-    accumulator = NullPvalAccumulator(n_perm)
+    accumulators: dict[str | None, NullPvalAccumulator] = {}
     for pvals_df in per_protein_results:
-        accumulator.add(pvals_df)
-    df_pvals, pooled_null_pvals, min_pvals_per_sim = accumulator.finalize()
+        if "test" in pvals_df.columns:  # mutation-rate mode: one frame holds both tests
+            groups = pvals_df.groupby("test")
+        else:
+            groups = [(None, pvals_df)]
+        for test, df in groups:
+            accumulators.setdefault(test, NullPvalAccumulator(n_perm)).add(df)
 
-    false_discoveries = compute_global_fdr(df_pvals, pooled_null_pvals, n_perm)
-    df_pvals["false_discoveries_avg"] = false_discoveries
-    df_pvals["global_fdr"] = [x / (i + 1) for i, x in enumerate(false_discoveries)]
-    df_pvals["global_fdr"] = df_pvals["global_fdr"][::-1].cummin()[::-1]
-    df_pvals["global_fwer"] = compute_global_fwer(df_pvals, min_pvals_per_sim)
-    df_pvals["bh_reject"], df_pvals["bh_fdr"] = fdrcorrection(
-        df_pvals["p_value"].to_numpy(), alpha=0.05
-    )
+    def pool(accumulator: NullPvalAccumulator) -> pd.DataFrame:
+        df_pvals, pooled_null_pvals, min_pvals_per_sim = accumulator.finalize()
+        false_discoveries = compute_global_fdr(df_pvals, pooled_null_pvals, n_perm)
+        df_pvals["false_discoveries_avg"] = false_discoveries
+        df_pvals["global_fdr"] = [x / (i + 1) for i, x in enumerate(false_discoveries)]
+        df_pvals["global_fdr"] = df_pvals["global_fdr"][::-1].cummin()[::-1]
+        df_pvals["global_fwer"] = compute_global_fwer(df_pvals, min_pvals_per_sim)
+        df_pvals["bh_reject"], df_pvals["bh_fdr"] = fdrcorrection(
+            df_pvals["p_value"].to_numpy(), alpha=0.05
+        )
+        return df_pvals
+
+    if None in accumulators:
+        df_pvals = pool(accumulators[None])
+    else:
+        # A unit passes only if it passes both tests, so combined corrections are the max.
+        keys = ["uniprot_id", "annotation_id"]
+        shared = ["n_case_in", "n_denovo_gene", "mu_gene", "mu_coverage", "mu_in"]
+        per_test = {t: pool(a).drop(columns="test") for t, a in accumulators.items()}
+        df_pvals = per_test["poisson"].merge(
+            per_test["binomial"].drop(columns=shared),
+            on=keys, suffixes=("_poisson", "_binomial"),
+        )
+        df_pvals = df_pvals.rename(columns={"p_value_poisson": "p_poisson", "p_value_binomial": "p_binomial"})
+        for col in ("global_fdr", "global_fwer", "local_fdr", "local_fwer", "bh_fdr"):
+            df_pvals[col] = df_pvals[[f"{col}_poisson", f"{col}_binomial"]].max(axis=1)
+        df_pvals = df_pvals.sort_values("global_fdr", ignore_index=True)
 
     if reference_dir is not None:
         guide = pd.read_csv(
@@ -758,6 +859,9 @@ def process_protein(
     seed: int = 0,
     stratum_col: str | None = None,
     alternative: str = "greater",
+    mu_lookup: dict | None = None,
+    lambda_hat: float | None = None,
+    direction: str = "enrichment",
 ) -> pd.DataFrame | None:
     """Build the label matrix, run the permutation test, and write the per-protein parquet."""
     seq_len = seq_len or fallback_seq_len(prot_rvas_df, prot_ann_df)
@@ -815,7 +919,12 @@ def process_protein(
                     label_matrix, adjacency_matrix, rows
                 )
 
-    if stratum_col is None:
+    if mu_lookup is not None:
+        pvals_df = test_protein_annotations_mu(
+            uniprot_id, prot_rvas_df, label_matrix, row_meta, seq_len, n_perm,
+            lambda_hat, mu_lookup, seed, direction,
+        )
+    elif stratum_col is None:
         pvals_df = test_protein_annotations(
             uniprot_id, prot_rvas_df, label_matrix, row_meta, seq_len, n_perm, seed, alternative
         )
@@ -856,6 +965,10 @@ def run_annotation_test(
     stratum_col: str | None = None,
     alternative: str = "greater",
     result_fn: str = 'results',
+    mu_lookup: dict | None = None,
+    lambda_hat: float | None = None,
+    min_denovo: int = 5,
+    direction: str = "enrichment",
 ) -> pd.DataFrame:
     """Run the annotation test for every protein present in both rvas_df and ann_df.
 
@@ -890,6 +1003,11 @@ def run_annotation_test(
         redrawn within strata, see test_protein_annotations_cmh. None (default) = unadjusted.
     n_workers: joblib worker processes for the per-protein loop. -1 (default) uses all
         cores; 1 runs in-process (no joblib), useful for debugging/profiling.
+    mu_lookup, lambda_hat, min_denovo, direction: de novo mode (rvas_df has ac_case only). Null is
+        the mutation-rate model instead of case/control labels, see test_protein_annotations_mu;
+        genes need >= min_denovo de novos and a nonzero rate; lambda_hat must come from
+        estimate_lambda BEFORE gene selection. Use a fresh results_dir (shards of the two modes
+        would collide). Incompatible with stratum_col.
     cleanup_per_protein: delete the per-protein parquet shards once results.* is
         written, see summarize_annotation_test.
     format: "tsv.gz" (default) or "parquet" for the pooled results file. Per-protein
@@ -916,9 +1034,14 @@ def run_annotation_test(
 
     rvas_df = filter_variants(rvas_df, df_include, mode="include")
     rvas_df = filter_variants(rvas_df, df_filter, mode="exclude")
-    if stratum_col is not None:
-        summarize_strata(rvas_df, stratum_col)
-    tested_proteins = set(filter_proteins_by_allele_count(rvas_df, min_alleles))
+    if mu_lookup is not None:
+        if stratum_col is not None:
+            raise ValueError("stratum_col is not supported with a mutation-rate null: all strata share one rate vector")
+        tested_proteins = set(_select_genes(rvas_df, None, min_denovo, mu_lookup))
+    else:
+        if stratum_col is not None:
+            summarize_strata(rvas_df, stratum_col)
+        tested_proteins = set(filter_proteins_by_allele_count(rvas_df, min_alleles))
     uniprot_ids = sorted(tested_proteins & set(ann_df["uniprot_id"].unique()))
     
     # Filter the dataframes to only include tested proteins.
@@ -957,6 +1080,9 @@ def run_annotation_test(
             seed=seed,
             stratum_col=stratum_col,
             alternative=alternative,
+            mu_lookup=mu_lookup,
+            lambda_hat=lambda_hat,
+            direction=direction,
         )
 
     n_resumed = sum(
