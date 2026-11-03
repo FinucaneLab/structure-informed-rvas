@@ -9,6 +9,7 @@ from scan_test import scan_test
 from scan_test_cmh import scan_test_cmh, DEFAULT_SCREEN_CHI2
 from read_data import map_to_protein, filter_by_total_ac
 from logger_config import get_logger
+from scan_test import DEFAULT_MIN_RETAINED
 from utils import (DEFAULT_CONDITIONING_RADIUS, DEFAULT_MIN_ALLELES,
                    best_radius_for_hit, get_nbhd_info)
 from annotation_test_permutation import (
@@ -534,6 +535,68 @@ if __name__ == '__main__':
         '''
     )
     parser.add_argument(
+        '--conditional',
+        action='store_true',
+        default=False,
+        help='''
+        After the scan, repeat it with each gene's called signal masked out, to ask
+        whether the gene carries more than one independent 3D signal. The unit
+        conditioned on is a component, not a single neighborhood: one signal is
+        reported by every window overlapping it, so masking the best window alone
+        leaves the rest in place for the next round to re-find.
+        '''
+    )
+    parser.add_argument(
+        '--conditional-max-rounds',
+        type=int,
+        default=5,
+        help='maximum conditional rounds; stops early when no gene still has signal'
+    )
+    parser.add_argument(
+        '--conditional-criterion',
+        choices=('fdr', 'fwer'),
+        default='fdr',
+        help='correction the MEMBER gate uses (which neighborhoods form a component)'
+    )
+    parser.add_argument(
+        '--conditional-cutoff',
+        type=float,
+        default=None,
+        help='member gate cutoff; defaults to --fdr-cutoff'
+    )
+    parser.add_argument(
+        '--conditional-gene-criterion',
+        choices=('fwer', 'fdr'),
+        default='fwer',
+        help='correction the GENE gate uses (which genes are considered at all)'
+    )
+    parser.add_argument(
+        '--conditional-gene-cutoff',
+        type=float,
+        default=0.05,
+        help='gene gate cutoff'
+    )
+    parser.add_argument(
+        '--conditional-min-retained',
+        type=float,
+        default=DEFAULT_MIN_RETAINED,
+        help='''
+        A conditioned centre is not re-tested when its neighborhood keeps less than
+        this fraction of itself: what is left is a different neighborhood from the
+        one the scan reported. 0 still refuses a neighborhood with nothing left.
+        '''
+    )
+    parser.add_argument(
+        '--keep-round-pvals',
+        action='store_true',
+        default=False,
+        help='''
+        Keep each conditional round's p-value file. By default only round 0's is
+        kept -- the round files are copies of the whole thing, tens of GB apiece on
+        an exome-wide scan. The per-round results tables are kept either way.
+        '''
+    )
+    parser.add_argument(
         '--components',
         action='store_true',
         default=False,
@@ -837,6 +900,55 @@ if __name__ == '__main__':
             'one by default; use --no-components to suppress that.'
         )
 
+    if args.conditional:
+        # CMH has no conditional backend, --fdr-only runs no scan to condition, and
+        # --no-fdr leaves the corrections the rounds choose on. Refused rather than
+        # quietly downgraded: a run that silently did something else would be read as
+        # a conditional analysis that found nothing.
+        for flag, why in (('test_method', None), ('fdr_only', '--fdr-only runs no scan'),
+                          ('no_fdr', '--no-fdr leaves no corrections to gate on')):
+            if flag == 'test_method':
+                if args.test_method == 'cmh':
+                    raise ValueError('--conditional has no CMH backend; use the '
+                                     'default --test-method fisher')
+            elif getattr(args, flag):
+                raise ValueError(f'--conditional cannot be combined with --{flag.replace("_", "-")}: {why}')
+        if not args.run_3dnt:
+            raise ValueError('--conditional needs --run-3dnt')
+        if args.no_components:
+            # conditional_scan needs components to decide what to mask, so it builds
+            # them every round whether or not the table is wanted. Honouring the flag
+            # would save nothing and silently drop the record of what was conditioned
+            # on; ignoring it would contradict its own help text.
+            raise ValueError(
+                '--conditional cannot be combined with --no-components: components '
+                'are what it conditions on, so the table is a record of the analysis '
+                'rather than an optional extra.'
+            )
+        if args.remove_nbhd is not None:
+            # conditional_scan runs its own round 0 unconditioned and derives every
+            # later mask from the components it finds. Passing --remove-nbhd through
+            # would be ignored, so the user would get an unconditioned round 0 that
+            # re-discovers the neighborhood they asked to mask and reports it as
+            # signal, with nothing to say so.
+            raise ValueError(
+                '--conditional cannot be combined with --remove-nbhd: it chooses what '
+                'to mask itself, from the components each round finds.'
+            )
+        # Checked here, not inside a mode branch: --conditional-min-retained out of
+        # range is not rejected downstream, it is obeyed -- 5 kills every centre and
+        # the results come out empty with no error.
+        if not 0 <= args.conditional_min_retained <= 1:
+            raise ValueError('--conditional-min-retained must be between 0 and 1, got '
+                             f'{args.conditional_min_retained}')
+        for name in ('conditional_gene_cutoff', 'conditional_cutoff'):
+            v = getattr(args, name)
+            if v is not None and not 0 < v <= 1:
+                raise ValueError(f'--{name.replace("_", "-")} must be in (0, 1], got {v}')
+        if args.conditional_max_rounds < 1:
+            raise ValueError('--conditional-max-rounds must be at least 1, got '
+                             f'{args.conditional_max_rounds}')
+
     if args.min_alleles < 1:
         raise ValueError(f"--min-alleles must be at least 1, got {args.min_alleles}")
 
@@ -1060,6 +1172,35 @@ if __name__ == '__main__':
         from empirical_fdr import compute_fdr
         df_results = compute_fdr(args.results_dir, args.fdr_cutoff, df_filter, args.reference_dir, args.pval_file)
         df_results.to_csv(f'{args.results_dir}/{args.fdr_file}', sep='\t', index=False)
+        did_nothing = False
+
+    elif args.conditional:
+        from conditional_scan import conditional_scan
+        wrote_results = True
+        logger.info('Starting conditional scan analysis')
+        mu_kwargs = {}
+        if mutation_rate_mode:
+            mu_kwargs = dict(
+                rate_calibration=args.rate_calibration,
+                rate_calibration_genes=args.rate_calibration_genes,
+                min_denovo=args.min_denovo, n_trios=args.n_trios, seed=args.seed,
+                mu_residue_file=args.mu_residue_file,
+                mu_from_input=args.mu_col is not None,
+                min_mu_coverage=args.min_mu_coverage, max_residues=args.max_residues,
+                simulate_null=args.simulate_null_from_mu, direction=args.test_direction,
+            )
+        conditional_scan(
+            df_rvas, args.reference_dir, args.neighborhood_radius, args.pae_cutoff,
+            args.results_dir, args.n_sims, args.fdr_cutoff, df_filter, args.fdr_file,
+            args.pval_file, args.seed, mutation_rate_mode, mu_kwargs=mu_kwargs,
+            max_rounds=args.conditional_max_rounds,
+            criterion=args.conditional_criterion, cutoff=args.conditional_cutoff,
+            min_retained=args.conditional_min_retained, ignore_ac=args.ignore_ac,
+            alternative=args.alternative, min_alleles=args.min_alleles,
+            gene_criterion=args.conditional_gene_criterion,
+            gene_cutoff=args.conditional_gene_cutoff, min_denovo=args.min_denovo,
+            keep_round_pvals=args.keep_round_pvals,
+        )
         did_nothing = False
 
     elif args.run_3dnt and mutation_rate_mode:
@@ -1288,7 +1429,13 @@ if __name__ == '__main__':
     # are the units that are actually distinct findings. Guarded, because the scan
     # results are already on disk by this point and a missing structure or an
     # unreadable p-value file must not turn a completed scan into a failed run.
-    if wrote_results and not args.no_components and not args.no_fdr:
+    # Not after a conditional run: conditional_scan has already written
+    # <stem>.components.tsv covering every round, and this would rebuild it from
+    # round 0 alone -- under --component-gene-cutoff rather than
+    # --conditional-gene-cutoff -- and overwrite it at the same path. --no-components
+    # is refused alongside --conditional for the same reason, so the two cannot
+    # disagree about whether the file should exist.
+    if wrote_results and not args.no_components and not args.no_fdr and not args.conditional:
         try:
             build_components_file(args, logger)
         except Exception as e:

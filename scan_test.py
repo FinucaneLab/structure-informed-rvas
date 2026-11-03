@@ -414,7 +414,7 @@ def _filter_proteins_by_allele_count(df_rvas, df_fdr_filter, min_alleles=DEFAULT
 def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
                             results_dir, n_sims, conditioning, pval_file, seed=None,
                             alternative='greater', min_alleles=DEFAULT_MIN_ALLELES,
-                            min_retained=DEFAULT_MIN_RETAINED):
+                            min_retained=DEFAULT_MIN_RETAINED, seed_salt=None):
     """Process each protein individually with scan test.
 
     Returns the list of (uniprot_id, n_res, dropped_positions) for proteins whose
@@ -471,6 +471,12 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
             # correlate the null draws across proteins, which matters because FWER takes
             # the minimum p-value across proteins within each simulation.
             protein_seed = None if seed is None else [seed, i]
+            if protein_seed is not None and seed_salt is not None:
+                # Conditional rounds re-scan the same protein. Without a per-round
+                # salt every round would replay the identical null draws, so a
+                # neighborhood's p-value would be compared against the same simulated
+                # data it was compared against before conditioning.
+                protein_seed = protein_seed + [seed_salt]
             scan_test_one_protein(
                 df, pdb_file_pos_guide, pdb_dir, pae_dir, 
                 results_dir, uniprot_id, radius, pae_cutoff, n_sims,
@@ -544,6 +550,7 @@ def scan_test(
     min_alleles=DEFAULT_MIN_ALLELES,
     min_retained=DEFAULT_MIN_RETAINED,
     requested=None,
+    seed_salt=None,
 ):
     """
     Perform scan test analysis on protein structure data.
@@ -581,7 +588,7 @@ def scan_test(
     out_of_structure, scanned = _process_proteins_batch(
         df_processed, uniprot_id_list, reference_dir,
         radius, pae_cutoff, results_dir, n_sims, conditioning,
-        pval_file, seed, alternative, min_alleles, min_retained
+        pval_file, seed, alternative, min_alleles, min_retained, seed_salt
     )
 
     skipped = [u for u in uniprot_id_list if u not in scanned]

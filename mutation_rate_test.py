@@ -532,7 +532,7 @@ def _process_proteins_batch_mu(df_rvas, uniprot_id_list, reference_dir, radius, 
                                results_dir, n_sims, pval_file, lambda_hat, mu_lookup,
                                seed=None, max_residues=None, direction='enrichment',
                                conditioning=None, min_retained=DEFAULT_MIN_RETAINED,
-                               min_denovo=None):
+                               min_denovo=None, seed_salt=None):
     """Run both tests for each protein. Returns per-gene totals for the output table.
 
     Only genes present in the returned dict were actually written. A gene can be
@@ -575,6 +575,12 @@ def _process_proteins_batch_mu(df_rvas, uniprot_id_list, reference_dir, radius, 
             # this batch, so a different gene split gives a given protein a different
             # stream; reproducing a run means re-running the same list in the same order.
             protein_seed = None if seed is None else [seed, i]
+            if protein_seed is not None and seed_salt is not None:
+                # Conditional rounds re-scan the same protein. Without a per-round
+                # salt every round would replay the identical null draws, so a
+                # neighborhood's p-value would be compared against the same simulated
+                # data it was compared against before conditioning.
+                protein_seed = protein_seed + [seed_salt]
 
             keep_residues = None
             entry = conditioning.get(uniprot_id) if conditioning else None
@@ -709,6 +715,7 @@ def mutation_rate_scan_test(
     conditioning=None,
     min_retained=DEFAULT_MIN_RETAINED,
     requested=None,
+    seed_salt=None,
 ):
     """3D neighborhood test against a mutation-rate null. See module docstring."""
 
@@ -768,7 +775,7 @@ def mutation_rate_scan_test(
     gene_totals = _process_proteins_batch_mu(
         df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
         results_dir, n_sims, pval_file, lambda_hat, mu_lookup, seed, max_residues,
-        direction, conditioning, min_retained, min_denovo,
+        direction, conditioning, min_retained, min_denovo, seed_salt,
     )
 
     with h5py.File(os.path.join(results_dir, pval_file), 'a') as fid:
