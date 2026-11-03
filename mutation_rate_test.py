@@ -36,10 +36,13 @@ import numpy as np
 import pandas as pd
 from scipy.stats import poisson, binom
 
-from utils import get_adjacency_matrix, restrict_to_structure, write_dataset
+from utils import (get_adjacency_matrix, restrict_to_structure, write_dataset,
+                   check_keep_mask, build_conditioning_mask)
 from logger_config import get_logger
 from empirical_fdr import compute_fdr
-from scan_test import MULTI_RADII_SMALL, MULTI_RADII_BIG, P_FLOOR
+from scan_test import (MULTI_RADII_SMALL, MULTI_RADII_BIG, P_FLOOR,
+                       DEFAULT_MIN_RETAINED, neutralized_positions, _neutralize,
+                       _blank_counts)
 
 logger = get_logger(__name__)
 
@@ -163,6 +166,24 @@ def estimate_lambda(df_rvas, df_mu, rate_calibration, calibration_genes=None, n_
 # ---------------------------------------------------------------------------
 # per-residue aggregation
 # ---------------------------------------------------------------------------
+
+def apply_conditioning(x_obs, m, keep):
+    """
+    Mask conditioned-out residues in the observed counts AND in the mutational
+    opportunity, which have to move together.
+
+    Zeroing only x_obs would leave both nulls still expecting de novos at residues whose
+    variants were just removed: every neighborhood overlapping the conditioned region
+    would look depleted, and the neighborhoods beside it -- exactly where a second
+    independent signal would sit -- would lose the power to show anything.
+
+    Positional, like every per-residue array here: keep[i] refers to residue i + 1, and
+    nothing is dropped, so the arrays keep their length.
+    """
+    if keep is None:
+        return x_obs, m
+    col = keep[:, np.newaxis]
+    return x_obs * col, m * col
 
 def sum_per_residue(df, colname, n_res, dtype=float):
     """Sum a per-variant column onto residues. Returns an (n_res, 1) column vector."""
@@ -305,6 +326,8 @@ def compute_all_pvals_mu(
         pae_cutoff=15,
         seed=None,
         direction='enrichment',
+        keep_residues=None,
+        min_retained=DEFAULT_MIN_RETAINED,
 ):
     """
     Returns (df_pvals_poisson, df_pvals_binomial, adjacency_matrix, mu_coverage)
@@ -325,10 +348,16 @@ def compute_all_pvals_mu(
     n_res = adj_matrices[radii[0]].shape[0]
     df, _ = restrict_to_structure(df, n_res, uniprot_id)
 
+    keep = check_keep_mask(keep_residues, n_res, uniprot_id)
+
     x_obs = sum_per_residue(df, 'ac_case', n_res, dtype=int)
     # Opportunity comes from the full possible-missense universe, not from the observed
     # variants in df -- see the module docstring.
     m, mu_coverage = mu_vector_for_protein(mu_lookup, uniprot_id, n_res)
+    # Masked before the totals are taken, so N_g and M_g both describe the
+    # unconditioned remainder of the gene and the two nulls draw only where a variant
+    # could still have been observed.
+    x_obs, m = apply_conditioning(x_obs, m, keep)
     n_g = int(x_obs.sum())
     m_g = float(m.sum())
     if m_g <= 0:
@@ -342,6 +371,32 @@ def compute_all_pvals_mu(
     per_radius = {r: _pvals_for_radius(adj_matrices[r], x_a, x_b, m, lambda_hat, n_g, m_g,
                                        direction)
                   for r in radii}
+
+    if keep is not None:
+        # Neutralize per radius, before any combining, and identically for the observed
+        # and null columns -- the rule reads only the structure and the mask, never the
+        # counts, so the empirical null stays calibrated.
+        dead_all = np.ones(n_res, dtype=bool)
+        for r in radii:
+            dead_r = neutralized_positions(adj_matrices[r], keep, min_retained)
+            p_a_r, p_b_r, nbhd_r, exp_a_r, exp_b_r = per_radius[r]
+            # The counts and expectations are blanked with the p-values. Left alone
+            # they describe the surviving fragment of a neighborhood nobody tested,
+            # and obs_exp = (x + 1) / (e + 1) over that fragment can outrank the hits
+            # that were tested. Zeroed, obs_exp comes out at exactly 1.
+            per_radius[r] = (_neutralize(p_a_r, dead_r), _neutralize(p_b_r, dead_r),
+                             _blank_counts(nbhd_r, dead_r),
+                             _blank_counts(exp_a_r, dead_r),
+                             _blank_counts(exp_b_r, dead_r))
+            dead_all &= dead_r
+        # A centre is only forced to 1 in the combined result when it is dead at EVERY
+        # radius -- the harmonic mean is deliberately allowed to rest on the surviving
+        # ones -- so the log reports the intersection, not the union.
+        logger.info(
+            f'{uniprot_id}: conditioning masks {int((~keep).sum())} of {n_res} residues '
+            f'({m_g:.4g} of the gene mutation rate left, {n_g} de novos); '
+            f'{int(dead_all.sum())} centres not re-tested at any radius'
+        )
 
     if multi:
         p_a, best_a = _harmonic_mean_combine([per_radius[r][0] for r in radii])
@@ -475,8 +530,15 @@ def _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage
 
 def _process_proteins_batch_mu(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
                                results_dir, n_sims, pval_file, lambda_hat, mu_lookup,
-                               seed=None, max_residues=None, direction='enrichment'):
-    """Run both tests for each protein. Returns per-gene totals for the output table."""
+                               seed=None, max_residues=None, direction='enrichment',
+                               conditioning=None, min_retained=DEFAULT_MIN_RETAINED,
+                               min_denovo=None):
+    """Run both tests for each protein. Returns per-gene totals for the output table.
+
+    Only genes present in the returned dict were actually written. A gene can be
+    skipped for several reasons, and a caller overwriting a previous p-value file
+    needs to know which entries are stale rather than assuming all were redone.
+    """
     pdb_file_pos_guide = f'{reference_dir}/pdb_pae_file_pos_guide.tsv'
     pdb_dir = f'{reference_dir}/pdb_files/'
     pae_dir = f'{reference_dir}/pae_files/'
@@ -513,10 +575,36 @@ def _process_proteins_batch_mu(df_rvas, uniprot_id_list, reference_dir, radius, 
             # this batch, so a different gene split gives a given protein a different
             # stream; reproducing a run means re-running the same list in the same order.
             protein_seed = None if seed is None else [seed, i]
+
+            keep_residues = None
+            entry = conditioning.get(uniprot_id) if conditioning else None
+            if entry:
+                keep_residues, _, removed = build_conditioning_mask(
+                    pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id, entry, pae_cutoff)
+                logger.info(f'{uniprot_id}: conditioning removes '
+                            f'{sum(removed.values())} residues {removed}')
+
+                # _select_genes applied --min-denovo to the UNCONDITIONED counts, so
+                # re-check what the mask left, exactly as the case/control batch does.
+                # Conditioning out the one cluster holding all of a gene's de novos
+                # leaves n_g = 0: the gene is still scanned, a full table of p = 1.0
+                # rows is written for every residue, and those rows enter the FDR and
+                # FWER pools as tested hypotheses, inflating the burden for the genes
+                # that do still have signal.
+                if min_denovo is not None:
+                    kept = np.flatnonzero(np.asarray(keep_residues).ravel()) + 1
+                    n_left = int(df.loc[df.aa_pos.isin(kept), 'ac_case'].sum())
+                    if n_left < min_denovo:
+                        logger.warning(
+                            f'{uniprot_id}: {n_left} de novos left after conditioning, '
+                            f'below --min-denovo {min_denovo}. Skipping.')
+                        continue
+
             df_a, df_b, _, mu_coverage = compute_all_pvals_mu(
                 df, pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id,
                 n_sims, lambda_hat, mu_lookup, radius, pae_cutoff, seed=protein_seed,
-                direction=direction,
+                direction=direction, keep_residues=keep_residues,
+                min_retained=min_retained,
             )
             write_df_pvals_mu(results_dir, uniprot_id, df_a, pval_file, POISSON_GROUP)
             write_df_pvals_mu(results_dir, uniprot_id, df_b, pval_file, BINOMIAL_GROUP)
@@ -618,6 +706,9 @@ def mutation_rate_scan_test(
     max_residues=10000,
     simulate_null=False,
     direction='enrichment',
+    conditioning=None,
+    min_retained=DEFAULT_MIN_RETAINED,
+    requested=None,
 ):
     """3D neighborhood test against a mutation-rate null. See module docstring."""
 
@@ -626,7 +717,9 @@ def mutation_rate_scan_test(
                                         reference_dir, pval_file)
         summarize_mu_results(df_results, fdr_cutoff)
         df_results.to_csv(f'{results_dir}/{fdr_file}', sep='\t', index=False)
-        return
+        # No scan ran, so no gene was freshly written. Empty rather than None, so a
+        # caller can iterate the result of every exit path.
+        return {}
 
     logger.info(f'Input dataset contains {len(df_rvas)} variants across '
                 f'{df_rvas["uniprot_id"].nunique()} proteins')
@@ -669,10 +762,13 @@ def mutation_rate_scan_test(
     if len(uniprot_id_list) == 0:
         raise ValueError('No genes passed the --min-denovo filter; nothing to test.')
 
+    if requested is not None:
+        uniprot_id_list = [u for u in uniprot_id_list if u in set(requested)]
+
     gene_totals = _process_proteins_batch_mu(
         df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
         results_dir, n_sims, pval_file, lambda_hat, mu_lookup, seed, max_residues,
-        direction,
+        direction, conditioning, min_retained, min_denovo,
     )
 
     with h5py.File(os.path.join(results_dir, pval_file), 'a') as fid:
@@ -686,11 +782,17 @@ def mutation_rate_scan_test(
             fid.attrs['seed'] = seed
 
     if no_fdr:
-        return
+        # Same contract as the other exits: callers iterate this to tell which
+        # genes were freshly written from which are stale.
+        return gene_totals
 
-    fdr_filter = df_fdr_filter
-    if fdr_filter is None:
+    # Restricted to the genes actually written, whether or not a filter was given --
+    # a skipped gene keeps its previous, unconditioned datasets in the p-value file,
+    # so an explicit --df-filter has to be intersected rather than taken whole.
+    if df_fdr_filter is None:
         fdr_filter = pd.DataFrame({'uniprot_id': list(gene_totals.keys())})
+    else:
+        fdr_filter = df_fdr_filter[df_fdr_filter.uniprot_id.isin(gene_totals)]
     df_results = _compute_both_fdrs(results_dir, fdr_cutoff, fdr_filter,
                                     reference_dir, pval_file)
 
@@ -702,3 +804,7 @@ def mutation_rate_scan_test(
 
     summarize_mu_results(df_results, fdr_cutoff)
     df_results.to_csv(f'{results_dir}/{fdr_file}', sep='\t', index=False)
+    # Which genes were actually written, and their post-conditioning totals. A caller
+    # that overwrote a previous p-value file needs this to tell fresh entries from
+    # stale ones.
+    return gene_totals

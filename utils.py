@@ -30,6 +30,12 @@ SCREEN_CHI2_GREATER = 1.642
 # was held to a looser floor than an unconditioned one.
 DEFAULT_MIN_ALLELES = 5
 
+# Fallback neighborhood radius when conditioning cannot recover the radius a hit was
+# actually called at. Only reached under --neighborhood-radius multiple-* with no
+# results file to read; it is the tool's default radius, not a meaningful choice for
+# a hit called at 30 or 40 A, so the caller warns when it is used.
+DEFAULT_CONDITIONING_RADIUS = 15.0
+
 def get_pairwise_distances(pdb_file, *args):
     # optional arguments i and j:
     # i: start from aminoacid i (inclusive)
@@ -379,6 +385,209 @@ def read_p_values(fid, uniprot_id, mu_mode=False):
     return pd.DataFrame(base)
 
 
+
+# ---------------------------------------------------------------------------
+# Conditioning: masking called regions out of a gene before it is re-scanned.
+#
+# Every per-residue array in the scan is POSITIONAL -- entry i is residue i + 1 --
+# so conditioning masks in place and never drops rows. Dropping would shift every
+# downstream index silently; a length mismatch instead surfaces as a
+# check_keep_mask ValueError that costs one gene rather than misaligning it.
+# ---------------------------------------------------------------------------
+
+_STRUCT_LEN_CACHE = {}
+
+
+def residues_in_nbhd_idx(adjacency_matrix, center_aa_pos):
+    """
+    Zero-based row indices of the residues in the neighborhood centered on the
+    one-based residue `center_aa_pos`. Add 1 to get aa_pos values back.
+    """
+    n_res = adjacency_matrix.shape[0]
+    i = int(center_aa_pos) - 1
+    if not 0 <= i < n_res:
+        raise ValueError(
+            f'neighborhood center aa_pos {center_aa_pos} is outside the structure '
+            f'(1..{n_res})'
+        )
+    return np.flatnonzero(adjacency_matrix[i] == 1)
+
+
+def check_keep_mask(keep, n_res, uniprot_id=''):
+    """Validate a residue keep-mask against n_res. Returns a bool array, or None."""
+    if keep is None:
+        return None
+    keep = np.asarray(keep).ravel().astype(bool)
+    if keep.shape[0] != n_res:
+        raise ValueError(
+            f'{uniprot_id}: residue keep-mask has length {keep.shape[0]} but the '
+            f'structure has {n_res} residues. The mask is positional -- entry i is '
+            f'residue i+1 -- so a length mismatch would silently shift every residue.'
+        )
+    return keep
+
+
+def structure_length(pdb_file_pos_guide, uniprot_id):
+    """
+    Number of residues in a protein's structure, read from the position guide.
+
+    For a multi-fragment structure this is exactly the n_res the adjacency matrix has,
+    since get_distance_matrix_structure sizes that branch by the maximum end of
+    pos_covered. The single-file branch instead sizes by CA-atom count; the two agree
+    for AlphaFold models, and a mismatch surfaces as a check_keep_mask ValueError that
+    drops the gene from the round rather than misaligning it. Reading the guide is
+    cached because conditioning calls this once per gene per round.
+    """
+    guide = _STRUCT_LEN_CACHE.get(pdb_file_pos_guide)
+    if guide is None:
+        df = pd.read_csv(pdb_file_pos_guide, sep='\t')
+        ends = df.pos_covered.str.extract(r'(\d+)\s*\]')[0].astype(float)
+        guide = df.assign(end=ends).groupby('uniprot_id')['end'].max().to_dict()
+        _STRUCT_LEN_CACHE[pdb_file_pos_guide] = guide
+    n_res = guide.get(uniprot_id)
+    if n_res is None or not np.isfinite(n_res):
+        raise ValueError(f'{uniprot_id}: no structure length in {pdb_file_pos_guide}')
+    return int(n_res)
+
+
+def conditioning_keep_mask(pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id,
+                           centers, pae_cutoff, residues=None, n_res=None):
+    """
+    Build the keep-mask that conditions out one or more called regions.
+
+    Two forms, because the two callers have different things in hand:
+
+      `centers`  an iterable of (aa_pos, radius) pairs. Every residue within `radius` of
+                 any center is dropped. This is what --remove-nbhd passes, and what the
+                 old single-neighborhood conditioning used. Adjacency matrices are built
+                 once per distinct radius.
+
+      `residues` an explicit iterable of 1-based residue positions to drop. Conditional
+                 analysis passes this: a component is the union of many overlapping
+                 neighborhoods, so its residue set is already known and re-deriving it
+                 from centers and radii would just rebuild the same union. Needs `n_res`
+                 unless `centers` is also given.
+
+    Both may be supplied, in which case the masks are unioned.
+
+    Returns (keep, n_res, removed_by_center). removed_by_center maps each center's aa_pos
+    to the number of residues it took out, with the key 'residues' used for the explicit
+    set; counts are of residues not already masked by an earlier entry, so they sum to
+    the total removed.
+    """
+    centers = list(centers or [])
+    if not centers and residues is None:
+        raise ValueError('conditioning_keep_mask needs centers or residues')
+    if not centers and n_res is None:
+        raise ValueError('conditioning_keep_mask needs n_res when only residues are given')
+
+    adj_cache = {}
+    keep = None
+    removed_by_center = {}
+    for aa_pos, radius in centers:
+        if radius not in adj_cache:
+            adj = get_adjacency_matrix(pdb_file_pos_guide, pdb_dir, pae_dir,
+                                       uniprot_id, radius, pae_cutoff)
+            if adj is None:
+                raise FileNotFoundError(f'No structure available for {uniprot_id}')
+            adj_cache[radius] = adj
+        adj = adj_cache[radius]
+        if keep is None:
+            keep = np.ones(adj.shape[0], dtype=bool)
+        elif adj.shape[0] != keep.shape[0]:
+            raise ValueError(
+                f'{uniprot_id}: adjacency matrices disagree on residue count '
+                f'({adj.shape[0]} vs {keep.shape[0]})'
+            )
+        idx = residues_in_nbhd_idx(adj, aa_pos)
+        # Accumulated, not assigned: a repeated position (--remove-nbhd 100,100) would
+        # otherwise record k on the first pass and overwrite it with 0 on the second,
+        # so the caller logs "removes 0 residues" while k were in fact masked.
+        removed_by_center[int(aa_pos)] = (removed_by_center.get(int(aa_pos), 0)
+                                          + int(keep[idx].sum()))
+        keep[idx] = False
+
+    if residues is not None:
+        if keep is None:
+            keep = np.ones(int(n_res), dtype=bool)
+        idx = np.asarray(sorted(set(int(r) for r in residues)), dtype=int) - 1
+        if len(idx) and (idx.min() < 0 or idx.max() >= keep.shape[0]):
+            raise ValueError(
+                f'{uniprot_id}: conditioning residues fall outside the structure '
+                f'(1..{keep.shape[0]})'
+            )
+        removed_by_center['residues'] = int(keep[idx].sum())
+        keep[idx] = False
+
+    return keep, keep.shape[0], removed_by_center
+
+
+def build_conditioning_mask(pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id, entry,
+                            pae_cutoff):
+    """
+    Keep-mask for one gene's conditioning entry, whichever form it takes.
+
+    `entry` is either a list of (aa_pos, radius) pairs -- what --remove-nbhd supplies --
+    or an iterable of 1-based residue positions, which is what conditional analysis
+    supplies now that it masks whole components. Dispatching here keeps the two scan
+    backends from each having to know the difference.
+    """
+    entry = list(entry)
+    if not entry:
+        return None, None, {}
+    is_centers = isinstance(entry[0], (tuple, list))
+    if is_centers:
+        return conditioning_keep_mask(pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id,
+                                      entry, pae_cutoff)
+    n_res = structure_length(pdb_file_pos_guide, uniprot_id)
+    return conditioning_keep_mask(pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id,
+                                  None, pae_cutoff, residues=entry, n_res=n_res)
+
+
+def neighborhood_retention(adjacency_matrix, keep):
+    """
+    Fraction of each neighborhood's residues that survive `keep`, as an (n_res,) float
+    array aligned to the same positional convention. Neighborhoods of size zero -- a
+    residue with no adjacency at all, which the PAE filter can produce -- get 0.0.
+    """
+    sizes = adjacency_matrix.sum(axis=1).astype(float).ravel()
+    retained = (adjacency_matrix @ keep.astype(float)).ravel()
+    out = np.zeros_like(sizes)
+    np.divide(retained, sizes, out=out, where=sizes > 0)
+    return out
+
+
+def best_radius_for_hit(df_fdr, uniprot_id, aa_pos, default=15.0,
+                        radius_cols=('radius',)):
+    """
+    Look up the radius a scan actually chose for one (protein, position).
+
+    Under --neighborhood-radius multiple-small/multiple-big each position picks its own
+    best radius, which the results record; a single-radius run records that radius. The
+    first column in `radius_cols` that is present and non-null wins, else `default`.
+    """
+    if df_fdr is None:
+        return float(default)
+    rows = df_fdr[(df_fdr['uniprot_id'] == uniprot_id) & (df_fdr['aa_pos'] == aa_pos)]
+    if len(rows) == 0:
+        # Silent here would be worse than useless for conditioning: a hit called at
+        # 40 A masked with a 15 A ball leaves most of its neighborhood in place, and
+        # the re-scan re-calls the region as a new independent signal.
+        logger.warning(
+            f'{uniprot_id} aa_pos {aa_pos} has no row in the results table; '
+            f'falling back to radius {default}'
+        )
+        return float(default)
+    row = rows.iloc[0]
+    for col in radius_cols:
+        if col in df_fdr.columns and not pd.isna(row[col]):
+            return float(row[col])
+    logger.warning(
+        f'{uniprot_id} aa_pos {aa_pos} records no radius in {list(radius_cols)}; '
+        f'falling back to radius {default}'
+    )
+    return float(default)
+
 def read_original_mutation_data(fid, uniprot_id, mu_mode=False):
     """
     Reads the original per-residue mutation counts for one uniprot_id from an HDF5 results file.
@@ -590,9 +799,16 @@ def get_random_ac_per_residue(case_ac_per_residue, total_ac_per_residue, n_sim, 
     return null_ac_per_residue
 
 
-def get_case_control_ac_matrix(df, n_res, n_sim, seed=None):
+def get_case_control_ac_matrix(df, n_res, n_sim, seed=None, keep=None):
     case_ac_per_residue = get_ac_per_residue(df, 'ac_case', n_res)
     control_ac_per_residue = get_ac_per_residue(df, 'ac_control', n_res)
+    if keep is not None:
+        # Zero before the totals and before the null draw, so n_case / n_control and
+        # the multivariate hypergeometric both see only the residues still in play.
+        # Zeroing afterwards would leave the null redistributing alleles into masked
+        # residues -- the case/control analogue of masking counts but not opportunity.
+        case_ac_per_residue = case_ac_per_residue * keep[:, np.newaxis]
+        control_ac_per_residue = control_ac_per_residue * keep[:, np.newaxis]
     total_ac_per_residue = (case_ac_per_residue + control_ac_per_residue).flatten()
     null_case_ac_per_residue = get_random_ac_per_residue(case_ac_per_residue, total_ac_per_residue, n_sim, seed)
     null_control_ac_per_residue = total_ac_per_residue[:, np.newaxis] - null_case_ac_per_residue

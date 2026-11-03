@@ -265,7 +265,7 @@ def scan_test_cmh(
     ignore_ac,
     fdr_file,
     pval_file,
-    remove_nbhd,
+    conditioning,
     stratum_col,
     screen_chi2=DEFAULT_SCREEN_CHI2,
     seed=1,
@@ -322,7 +322,12 @@ def scan_test_cmh(
         try:
             df = df_rvas[df_rvas["uniprot_id"] == uniprot_id].copy()
 
-            if remove_nbhd is not None:
+            # Keyed by gene. This used to take the raw --remove-nbhd string and apply
+            # it inside the loop over EVERY protein it scanned: with --pre-mapped-rvas,
+            # --uniprot-id does not restrict df_rvas, so conditioning one gene on one
+            # position silently removed those residues from all of them.
+            entry = conditioning.get(uniprot_id) if conditioning else None
+            if entry:
                 adjacency_matrix = get_adjacency_matrix(
                     pdb_file_pos_guide,
                     pdb_dir,
@@ -335,10 +340,16 @@ def scan_test_cmh(
                     raise FileNotFoundError(
                         f"No usable adjacency matrix for {uniprot_id}"
                     )
+                # Variants are DROPPED here rather than masked. The CMH statistic has
+                # no mutational-opportunity term, so nothing has to stay aligned with
+                # the counts, and this path builds its own per-residue matrices from df
+                # afterwards. The default scan masks instead, because its per-residue
+                # arrays are positional.
                 df = _remove_neighborhood(
                     df,
                     adjacency_matrix,
-                    remove_nbhd,
+                    ','.join(str(int(c[0]) if isinstance(c, (tuple, list)) else int(c))
+                             for c in entry),
                     uniprot_id,
                 )
 
