@@ -9,7 +9,8 @@ from scan_test import scan_test
 from scan_test_cmh import scan_test_cmh, DEFAULT_SCREEN_CHI2
 from read_data import map_to_protein, filter_by_total_ac
 from logger_config import get_logger
-from utils import DEFAULT_MIN_ALLELES, get_nbhd_info
+from utils import (DEFAULT_CONDITIONING_RADIUS, DEFAULT_MIN_ALLELES,
+                   best_radius_for_hit, get_nbhd_info)
 from annotation_test_permutation import (
     add_result_fn_argument,
     normalize_result_fn,
@@ -602,10 +603,14 @@ if __name__ == '__main__':
         type=str,
         default=None,
         help='''
-        Analogous to a conditional analysis: remove all case and control mutations in 
-        these neighborhood(s) in --uniprot-id. Can be a comma-separated list of positions
-        or a single position. This flag will automatically analyze only the protein 
-        in --uniprot-id.
+        Analogous to a conditional analysis: mask all case and control mutations in
+        these neighborhood(s) of --uniprot-id out of the scan. Masked, not deleted:
+        the residues stay in place with zeroed counts (and, under the mutation-rate
+        null, zeroed opportunity), so every per-residue array keeps its positions.
+        Other genes in the input are still scanned, unconditioned -- this does NOT
+        restrict the analysis to --uniprot-id. A comma-separated list of positions,
+        or a single position; --uniprot-id must name exactly one protein, since
+        residue numbering is per protein.
         '''
     )
     parser.add_argument(
@@ -949,6 +954,87 @@ if __name__ == '__main__':
         df_rvas.to_csv(args.save_df_rvas, sep='\t', index=False)
         did_nothing = False
 
+    # --remove-nbhd names positions in ONE protein (--uniprot-id). Keyed by gene so
+    # the scan backends cannot apply it to every protein in the file: with
+    # --pre-mapped-rvas, --uniprot-id does not restrict df_rvas, so an unkeyed string
+    # silently conditioned every gene on the same position.
+    conditioning = None
+    if args.remove_nbhd is not None:
+        if not args.uniprot_id:
+            raise ValueError('--remove-nbhd requires --uniprot-id: it names positions '
+                             'in one protein, not a position shared by every protein')
+        # --uniprot-id is an accession, a comma-separated list, OR a path to a file of
+        # accessions -- see map_and_filter_rvas, which parses it the same way. Using
+        # the raw string as the dict key means a list or a path matches no gene and
+        # conditioning silently does nothing.
+        if os.path.exists(args.uniprot_id):
+            with open(args.uniprot_id) as fh:
+                targets = [x.strip() for x in fh if x.strip()]
+        else:
+            targets = [x.strip() for x in args.uniprot_id.split(',') if x.strip()]
+        if not targets:
+            raise ValueError(f'--uniprot-id named no accessions: {args.uniprot_id!r}')
+        if len(targets) > 1:
+            # Residue numbering is per protein, so one position means different things
+            # in different genes -- and a gene shorter than the position raises, is
+            # skipped, and then drops out of the results entirely.
+            raise ValueError(
+                f'--remove-nbhd names positions in one protein, but --uniprot-id gave '
+                f'{len(targets)} accessions ({targets[:3]}...). Condition one gene at '
+                'a time.'
+            )
+
+        positions = [int(x) for x in
+                     (p.strip() for p in args.remove_nbhd.split(',')) if x]
+        if not positions:
+            raise ValueError(f'--remove-nbhd parsed to no positions: {args.remove_nbhd!r}')
+
+        # Under multiple-* each position was called at its own best radius, recorded in
+        # the results table. Conditioning every one at a flat 15 A would leave most of a
+        # 30 A or 40 A neighborhood unmasked, so the re-scan can re-call the region it
+        # was supposed to have conditioned out and report it as a new signal.
+        multi = isinstance(args.neighborhood_radius, str)
+        df_hits = None
+        if multi:
+            hit_path = os.path.join(args.results_dir, args.fdr_file)
+            if os.path.exists(hit_path):
+                df_hits = pd.read_csv(hit_path, sep='\t')
+            else:
+                logger.warning(
+                    f'--neighborhood-radius {args.neighborhood_radius} with no '
+                    f'{hit_path} to read each hit\'s chosen radius from; conditioning '
+                    f'falls back to {DEFAULT_CONDITIONING_RADIUS} A, which may leave '
+                    'most of a larger neighborhood unmasked.'
+                )
+
+        conditioning = {}
+        for target in targets:
+            centers = []
+            for pos in positions:
+                if multi:
+                    # Order is deliberate. A case/control table has `radius`; a
+                    # mutation-rate table has none, only the per-test columns, and
+                    # Test B is the test of interest (see the mutation_rate_test
+                    # module docstring), so its radius defines the neighborhood.
+                    radius = best_radius_for_hit(
+                        df_hits, target, pos, default=DEFAULT_CONDITIONING_RADIUS,
+                        radius_cols=('radius', 'radius_binomial', 'radius_poisson'))
+                else:
+                    radius = float(args.neighborhood_radius)
+                centers.append((pos, radius))
+            conditioning[target] = centers
+        logger.info(f'Conditioning {len(conditioning)} gene(s) on {len(positions)} '
+                    f'position(s): { {k: v for k, v in list(conditioning.items())[:3]} }')
+
+    # Conditioning is only consumed by the scan backends. Flagged rather than left
+    # silent: --remove-nbhd hard-errors on a missing or multiple --uniprot-id, so a
+    # third configuration that quietly ignores it is an inconsistent contract.
+    if conditioning and not (args.run_3dnt or args.fdr_only):
+        logger.warning(
+            '--remove-nbhd was given but this invocation runs no scan, so nothing is '
+            'conditioned. It applies to --run-3dnt and --fdr-only only.'
+        )
+
     wrote_results = False
 
     if args.components:
@@ -965,6 +1051,7 @@ if __name__ == '__main__':
             args.rate_calibration_genes, args.min_denovo, args.n_trios, args.seed,
             args.mu_residue_file, args.mu_col is not None, args.min_mu_coverage,
             args.max_residues, args.simulate_null_from_mu, args.test_direction,
+            conditioning,
         )
         did_nothing = False
 
@@ -1003,6 +1090,7 @@ if __name__ == '__main__':
             args.max_residues,
             args.simulate_null_from_mu,
             args.test_direction,
+            conditioning,
         )
         did_nothing = False
 
@@ -1023,7 +1111,7 @@ if __name__ == '__main__':
             args.ignore_ac,
             args.fdr_file,
             args.pval_file,
-            args.remove_nbhd,
+            conditioning,
             args.stratum_col,
             args.cmh_screen_threshold,
             args.seed,
@@ -1049,7 +1137,7 @@ if __name__ == '__main__':
             args.ignore_ac,
             args.fdr_file,
             args.pval_file,
-            args.remove_nbhd,
+            conditioning,
             args.seed,
             args.alternative,
             args.min_alleles,

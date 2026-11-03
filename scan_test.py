@@ -8,11 +8,18 @@ from scipy.stats import fisher_exact, binom
 from scipy import special
 from utils import (DEFAULT_MIN_ALLELES, DEFAULT_SCREEN_CHI2, SCREEN_CHI2_GREATER, fisher_greater_pvals,
                    get_adjacency_matrix, valid_for_fisher, write_dataset, read_p_values,
-                   get_case_control_ac_matrix, restrict_to_structure)
+                   get_case_control_ac_matrix, restrict_to_structure,
+                   neighborhood_retention, check_keep_mask,
+                   build_conditioning_mask)
 from logger_config import get_logger
 from empirical_fdr import compute_fdr
 
 logger = get_logger(__name__)
+
+# A conditioned centre is not re-tested when its neighborhood has lost more than
+# half of itself: what is left is a different neighborhood from the one the scan
+# reported, and testing it would quietly change what the p-value refers to.
+DEFAULT_MIN_RETAINED = 0.5
 
 MULTI_RADII_SMALL = [6, 9, 12, 15, 18, 21]
 MULTI_RADII_BIG = [10, 15, 20, 30, 40]
@@ -93,6 +100,55 @@ def _compute_pval_matrix_for_radius(adjacency_matrix, case_ac_matrix, control_ac
     pval_lookup = get_pval_lookup_case_control(n_case_nbhd, n_control_nbhd, n_case, n_control, alternative)
     return pval_lookup[n_case_nbhd, n_control_nbhd], n_case_nbhd, n_control_nbhd
 
+def neutralized_positions(adjacency_matrix, keep, min_retained):
+    """
+    Which centres are not re-tested under a conditioning mask: the masked residues
+    themselves, plus any whose neighborhood has lost too much of itself.
+
+    Depends only on the structure and the mask -- never on the counts -- so the observed
+    and null columns are neutralized identically and the empirical null stays calibrated.
+    """
+    if keep is None:
+        return None
+    retention = neighborhood_retention(adjacency_matrix, keep)
+    # retention <= 0 is checked separately so that a min_retained of 0 still cannot
+    # test a neighborhood with nothing left in it. Under the mutation-rate null such
+    # a centre has expected count 0, which would hand any stray count an arbitrarily
+    # small p-value. min_retained is a parameter, not yet a CLI flag.
+    return (~keep) | (retention < min_retained) | (retention <= 0)
+
+
+def _blank_counts(arr, dead):
+    """Zero the reported counts at centres that were not re-tested.
+
+    A dead centre's p-value is forced to 1.0, but its neighborhood counts and
+    expectations would otherwise still describe the SURVIVING fragment of that
+    neighborhood -- a real measurement, but not of the neighborhood the scan
+    reported, and one nobody tested. Left in place they can outrank the hits that
+    were tested: a fragment holding de novos next to a constrained residue can show
+    obs/exp 4.0 beside p = 1.0, above a genuine 2.8. Zeroed, a dead row reads as
+    nothing in every column.
+
+    Rows are never removed; the row index carries aa_pos.
+    """
+    if dead is None or not dead.any():
+        return arr
+    out = np.array(arr, dtype=arr.dtype, copy=True)
+    out[dead, ...] = 0
+    return out
+
+
+def _neutralize(pval_matrix, dead):
+    """Set every column, observed and null alike, to 1.0 at the dead centres.
+
+    Rows are never removed: the row index carries aa_pos (see the indexing contract in
+    utils.py), and empirical_fdr rebuilds positions from row order."""
+    if dead is None or not dead.any():
+        return pval_matrix
+    out = np.array(pval_matrix, dtype=float, copy=True)
+    out[dead, :] = 1.0
+    return out
+
 def get_nbhd_counts(adjacency_matrix, ac_per_residue):
     # allele count per residue has one row per residue and one
     # column per simulation
@@ -142,6 +198,32 @@ def _record_out_of_structure(collector, uniprot_id, n_res, dropped):
         collector.append((uniprot_id, n_res, dropped))
 
 
+def _refuse_if_nothing_testable(adj_by_radius, keep, min_retained, uniprot_id, n_res):
+    """Raise when conditioning has left no testable neighborhood at any radius.
+
+    Checked before any p-value work: writing the table anyway puts n_res rows of
+    p = 1.0 into the FDR and FWER pools as tested hypotheses, inflating the
+    multiple-testing burden for the genes that do still have signal -- the same
+    argument the mutation-rate path makes for its post-conditioning de novo gate.
+    Raised rather than returned, so _process_proteins_batch skips the gene and it
+    stays out of `scanned`, which is what keeps its stale rows out of the results.
+
+    Early also avoids computing a full table from all-zero counts, where the
+    Fisher expectation divides by a zero total.
+    """
+    if keep is None:
+        return
+    dead = None
+    for adj in adj_by_radius:
+        d = neutralized_positions(adj, keep, min_retained)
+        dead = d if dead is None else (dead & d)
+    if dead is not None and dead.all():
+        raise ValueError(
+            f'conditioning left no testable neighborhood in {uniprot_id}: all '
+            f'{n_res} centres lost more than their share of residues'
+        )
+
+
 def compute_all_pvals(
         df,
         pdb_file_pos_guide,
@@ -155,6 +237,8 @@ def compute_all_pvals(
         alternative = 'greater',
         out_of_structure = None,
         min_alleles = DEFAULT_MIN_ALLELES,
+        keep_residues = None,
+        min_retained = DEFAULT_MIN_RETAINED,
 ):
     if radius in ('multiple-small', 'multiple-big'):
         radii = MULTI_RADII_SMALL if radius == 'multiple-small' else MULTI_RADII_BIG
@@ -164,16 +248,33 @@ def compute_all_pvals(
         }
         n_res = adj_matrices[radii[0]].shape[0]
         df = _restrict_and_recheck(df, n_res, uniprot_id, out_of_structure, min_alleles)
-        case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(df, n_res, n_sims, seed)
+        keep = check_keep_mask(keep_residues, n_res, uniprot_id)
+        _refuse_if_nothing_testable([adj_matrices[r] for r in radii], keep, min_retained, uniprot_id, n_res)
+        case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(
+            df, n_res, n_sims, seed, keep)
         n_case = case_ac_matrix[:,0].sum()
         n_control = control_ac_matrix[:,0].sum()
 
         pval_mats = []
+        dead_all = None
         nbhd_counts = {}
         for r in radii:
             pval_mat, n_case_nbhd, n_ctrl_nbhd = _compute_pval_matrix_for_radius(
                 adj_matrices[r], case_ac_matrix, control_ac_matrix, n_case, n_control, alternative
             )
+            if keep is not None:
+                # Per radius, before combining: a centre can keep enough of its
+                # neighborhood at one radius and lose it at another, and the rule
+                # reads only the structure and the mask, never the counts, so the
+                # observed and null columns are neutralized identically.
+                dead_r = neutralized_positions(adj_matrices[r], keep, min_retained)
+                pval_mat = _neutralize(pval_mat, dead_r)
+                # Only the intersection is reported: a centre is neutralized in the
+                # combined p-value only when it is dead at every radius, since the
+                # harmonic mean is allowed to rest on the surviving ones.
+                dead_all = dead_r if dead_all is None else (dead_all & dead_r)
+                n_case_nbhd = _blank_counts(n_case_nbhd, dead_r)
+                n_ctrl_nbhd = _blank_counts(n_ctrl_nbhd, dead_r)
             pval_mats.append(pval_mat)
             nbhd_counts[r] = (n_case_nbhd, n_ctrl_nbhd)
 
@@ -204,14 +305,31 @@ def compute_all_pvals(
         )
         n_res = adjacency_matrix.shape[0]
         df = _restrict_and_recheck(df, n_res, uniprot_id, out_of_structure, min_alleles)
-        case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(df, n_res, n_sims, seed)
+        keep = check_keep_mask(keep_residues, n_res, uniprot_id)
+        _refuse_if_nothing_testable([adjacency_matrix], keep, min_retained, uniprot_id, n_res)
+        case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(
+            df, n_res, n_sims, seed, keep)
         n_case = case_ac_matrix[:,0].sum()
         n_control = control_ac_matrix[:,0].sum()
         n_case_nbhd_mat = get_nbhd_counts(adjacency_matrix, case_ac_matrix)
         n_control_nbhd_mat = get_nbhd_counts(adjacency_matrix, control_ac_matrix)
         pval_lookup = get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_control, alternative)
         pval_matrix = pval_lookup[n_case_nbhd_mat, n_control_nbhd_mat]
+        # One radius, so the union and the intersection coincide.
+        dead_all = neutralized_positions(adjacency_matrix, keep, min_retained)
+        pval_matrix = _neutralize(pval_matrix, dead_all)
+        n_case_nbhd_mat = _blank_counts(n_case_nbhd_mat, dead_all)
+        n_control_nbhd_mat = _blank_counts(n_control_nbhd_mat, dead_all)
         radius_col = float(radius)
+
+    if keep is not None and dead_all is not None:
+        # Only a centre dead at EVERY radius is neutralized in the combined p-value --
+        # the harmonic mean is deliberately allowed to rest on the surviving radii --
+        # so the count reported is the intersection, not the union.
+        logger.info(
+            f'{uniprot_id}: conditioning masks {int((~keep).sum())} of {n_res} '
+            f'residues; {int(dead_all.sum())} centres not re-tested'
+        )
 
     pval_columns = ['p_value'] + [f'null_pval_{i}' for i in range(n_sims)]
     df_pvals = pd.DataFrame(columns = pval_columns, data = pval_matrix)
@@ -233,7 +351,11 @@ def write_df_pvals(results_dir, uniprot_id, df_pvals, pval_file):
         write_dataset(fid, f'{uniprot_id}_radius', df_pvals[['radius']])
         write_dataset(fid, f'{uniprot_id}_original', df_pvals[['original_case', 'original_control']])
 
-def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir, uniprot_id, radius, pae_cutoff, n_sims, pval_file, seed=None, alternative='greater', out_of_structure=None, min_alleles=DEFAULT_MIN_ALLELES):
+def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir,
+                          uniprot_id, radius, pae_cutoff, n_sims, pval_file, seed=None,
+                          alternative='greater', out_of_structure=None,
+                          min_alleles=DEFAULT_MIN_ALLELES, keep_residues=None,
+                          min_retained=DEFAULT_MIN_RETAINED):
     df_pvals, adj_mat = compute_all_pvals(
         df,
         pdb_file_pos_guide,
@@ -247,6 +369,8 @@ def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir,
         alternative,
         out_of_structure,
         min_alleles,
+        keep_residues,
+        min_retained,
     )
     write_df_pvals(results_dir, uniprot_id, df_pvals, pval_file)
 
@@ -287,13 +411,20 @@ def _filter_proteins_by_allele_count(df_rvas, df_fdr_filter, min_alleles=DEFAULT
     return uniprot_id_list
 
 
-def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff, results_dir, n_sims, remove_nbhd, pval_file, seed=None, alternative='greater', min_alleles=DEFAULT_MIN_ALLELES):
+def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
+                            results_dir, n_sims, conditioning, pval_file, seed=None,
+                            alternative='greater', min_alleles=DEFAULT_MIN_ALLELES,
+                            min_retained=DEFAULT_MIN_RETAINED):
     """Process each protein individually with scan test.
 
     Returns the list of (uniprot_id, n_res, dropped_positions) for proteins whose
     variants fell outside their structure, for the caller to report at the end.
     """
     out_of_structure = []
+    # Which genes actually got written. A gene can be skipped here for several
+    # reasons, and a caller that overwrites a previous p-value file needs to know
+    # which entries are stale rather than assuming every requested gene was redone.
+    scanned = set()
     pdb_file_pos_guide = f'{reference_dir}/pdb_pae_file_pos_guide.tsv'
     pdb_dir = f'{reference_dir}/pdb_files/'
     pae_dir = f'{reference_dir}/pae_files/'
@@ -303,26 +434,36 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
         logger.info(f'Processing {uniprot_id} (protein {i+1} out of {n_proteins})')
         try:
             df = df_rvas[df_rvas.uniprot_id == uniprot_id]
-            if remove_nbhd is not None:
-                    adj_radius = 15 if radius == 'multiple' else radius
-                    adjacency_matrix = get_adjacency_matrix(
-                        pdb_file_pos_guide,
-                        pdb_dir,
-                        pae_dir,
-                        uniprot_id,
-                        adj_radius,
-                        pae_cutoff,
-                    )
-                    for to_remove in map(int, remove_nbhd.split(',')):
-                        logger.info(f'Removing neighborhood of position {to_remove} for {uniprot_id}')
-                        nbhd = set(np.where(adjacency_matrix[to_remove-1] == 1)[0] + 1)
-                        df.drop(df[df['aa_pos'].isin(nbhd)].index, inplace=True)
-                    df.reset_index(drop=True, inplace=True)
+            keep_residues = None
+            entry = conditioning.get(uniprot_id) if conditioning else None
+            if entry:
+                # Masked, not deleted. Every per-residue array in the scan is
+                # positional -- entry i is residue i + 1 -- so dropping rows would
+                # shift every downstream index. See the indexing contract in utils.
+                keep_residues, _, removed = build_conditioning_mask(
+                    pdb_file_pos_guide, pdb_dir, pae_dir, uniprot_id, entry, pae_cutoff)
+                logger.info(f'{uniprot_id}: conditioning removes '
+                            f'{sum(removed.values())} residues {removed}')
 
-            if (sum(df.ac_case) < min_alleles) or (sum(df.ac_control) < min_alleles):
+            # Counted on what conditioning LEFT. The old code dropped the conditioned
+            # rows before this point, so the gate was post-conditioning for free;
+            # masking happens later, inside compute_all_pvals, so the gate has to
+            # apply the mask itself. Without this a gene whose case alleles all sit
+            # inside the masked region clears the floor and is scanned with n_case = 0,
+            # and read_p_values then divides by that count -- the failure --min-alleles
+            # is bounded below 1 to prevent.
+            df_effective = df
+            if keep_residues is not None:
+                kept_pos = np.flatnonzero(np.asarray(keep_residues).ravel()) + 1
+                df_effective = df[df.aa_pos.isin(kept_pos)]
+            if (sum(df_effective.ac_case) < min_alleles
+                    or sum(df_effective.ac_control) < min_alleles):
                 logger.warning(
                     f'{uniprot_id}: There must be at least {min_alleles} case and '
-                    f'{min_alleles} control alleles. Skipping.'
+                    f'{min_alleles} control alleles'
+                    + (' after conditioning' if keep_residues is not None else '')
+                    + f'. Skipping. (has {int(sum(df_effective.ac_case))} case, '
+                    f'{int(sum(df_effective.ac_control))} control)'
                 )
                 continue
             
@@ -333,8 +474,10 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
             scan_test_one_protein(
                 df, pdb_file_pos_guide, pdb_dir, pae_dir, 
                 results_dir, uniprot_id, radius, pae_cutoff, n_sims,
-                pval_file, protein_seed, alternative, out_of_structure, min_alleles
+                pval_file, protein_seed, alternative, out_of_structure, min_alleles,
+                keep_residues, min_retained
             )
+            scanned.add(uniprot_id)
         except FileNotFoundError as e:
             logger.error(f'{uniprot_id}: Required file not found - {e}')
             continue
@@ -351,7 +494,7 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
             logger.error(f'{uniprot_id}: Unexpected error - {e}')
             continue
 
-    return out_of_structure
+    return out_of_structure, scanned
 
 
 def _report_out_of_structure(out_of_structure):
@@ -395,13 +538,23 @@ def scan_test(
     ignore_ac,
     fdr_file,
     pval_file,
-    remove_nbhd,
+    conditioning,
     seed=None,
     alternative='greater',
     min_alleles=DEFAULT_MIN_ALLELES,
+    min_retained=DEFAULT_MIN_RETAINED,
+    requested=None,
 ):
     """
     Perform scan test analysis on protein structure data.
+
+    `conditioning` maps uniprot_id to what should be masked out of that gene before
+    it is re-scanned -- either [(aa_pos, radius), ...] or an explicit residue list.
+    Keyed by gene, because a single --remove-nbhd position applied to every protein
+    in the file is almost never what anyone means.
+
+    `requested` restricts the scan to those genes; the rest of the p-value
+    file is left alone. Returns the set of genes actually written.
     
     Main orchestration function for the structure-informed rare variant association study.
     Processes variants across proteins and computes statistical associations with 3D neighborhoods.
@@ -411,7 +564,7 @@ def scan_test(
     if fdr_only:
         df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file)
         df_results.to_csv(f'{results_dir}/{fdr_file}', sep='\t', index=False)
-        return
+        return set()
 
     logger.info("Starting scan test analysis")
     logger.info(f"Input dataset contains {len(df_rvas)} variants across {df_rvas['uniprot_id'].nunique()} proteins")
@@ -421,13 +574,25 @@ def scan_test(
     
     # Filter proteins by allele count
     uniprot_id_list = _filter_proteins_by_allele_count(df_processed, df_fdr_filter, min_alleles)
+    if requested is not None:
+        uniprot_id_list = [u for u in uniprot_id_list if u in set(requested)]
     
     # Process each protein
-    out_of_structure = _process_proteins_batch(
-        df_processed, uniprot_id_list, reference_dir, 
-        radius, pae_cutoff, results_dir, n_sims, remove_nbhd,
-        pval_file, seed, alternative, min_alleles
+    out_of_structure, scanned = _process_proteins_batch(
+        df_processed, uniprot_id_list, reference_dir,
+        radius, pae_cutoff, results_dir, n_sims, conditioning,
+        pval_file, seed, alternative, min_alleles, min_retained
     )
+
+    skipped = [u for u in uniprot_id_list if u not in scanned]
+    if skipped:
+        logger.warning(
+            f'{len(skipped)} of {len(uniprot_id_list)} genes were not scanned and are '
+            f'excluded from the results: {skipped[:10]}'
+            + (' ...' if len(skipped) > 10 else '')
+            + '. Any p-values they already had in the file are left untouched and are '
+              'NOT reported, since they describe a different analysis.'
+        )
 
     with h5py.File(os.path.join(results_dir, pval_file), 'a') as fid:
         fid.attrs['n_sims'] = n_sims
@@ -441,11 +606,22 @@ def scan_test(
         if not no_fdr:
             # If no explicit filter was given, restrict FDR to the proteins just processed
             # so that proteins from previous runs with different n_sims don't cause errors
-            fdr_filter = df_fdr_filter
-            if fdr_filter is None:
-                fdr_filter = pd.DataFrame({'uniprot_id': uniprot_id_list})
+            # Restricted to the genes actually written, whether or not a filter was
+            # supplied. A skipped gene keeps its PREVIOUS datasets in the p-value
+            # file, and conditioning makes skips common -- the post-mask allele gate,
+            # a mask length mismatch, an out-of-range centre. Reporting on a gene
+            # this run did not write loads those stale, unconditioned values and
+            # presents a conditioned-out hit at full significance, as if the re-scan
+            # had confirmed it. An explicit --df-filter has to be intersected rather
+            # than taken whole, or it reintroduces exactly that.
+            if df_fdr_filter is None:
+                fdr_filter = pd.DataFrame({'uniprot_id': sorted(scanned)})
+            else:
+                fdr_filter = df_fdr_filter[df_fdr_filter.uniprot_id.isin(scanned)]
             df_results = compute_fdr(results_dir, fdr_cutoff, fdr_filter, reference_dir, pval_file)
             df_results.to_csv(f'{results_dir}/{fdr_file}', sep='\t', index=False)
     finally:
         _report_out_of_structure(out_of_structure)
+
+    return scanned
 
