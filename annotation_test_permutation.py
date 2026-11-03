@@ -33,25 +33,24 @@ from cmh import (
 )
 from logger_config import get_logger
 from mutation_rate_test import (
+    _select_genes,
     binomial_pval_lookup,
     mu_vector_for_protein,
     poisson_pval_lookup,
     simulate_multinomial_null,
     simulate_poisson_null,
     sum_per_residue,
-    _select_genes,
 )
 from utils import (
     DEFAULT_MIN_ALLELES,
     DEFAULT_SCREEN_CHI2,
     SCREEN_CHI2_GREATER,
     fisher_greater_pvals,
-    get_adjacency_matrix,
-    get_distance_and_pae_matrices,
-    threshold_adjacency_matrix,
     get_case_control_ac_matrix,
     get_chi2_pvals_case_control,
+    get_distance_and_pae_matrices,
     get_stratified_case_ac_matrix,
+    threshold_adjacency_matrix,
 )
 
 logger = get_logger(__name__)
