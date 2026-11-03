@@ -699,7 +699,7 @@ def summarize_annotation_test(
         per_test = {t: pool(a).drop(columns="test") for t, a in accumulators.items()}
         df_pvals = per_test["poisson"].merge(
             per_test["binomial"].drop(columns=shared),
-            on=keys, suffixes=("_poisson", "_binomial"),
+            on=keys, suffixes=("_poisson", "_binomial"), validate="one_to_one",
         )
         df_pvals = df_pvals.rename(columns={"p_value_poisson": "p_poisson", "p_value_binomial": "p_binomial"})
         for col in ("global_fdr", "global_fwer", "local_fdr", "local_fwer", "bh_fdr"):
