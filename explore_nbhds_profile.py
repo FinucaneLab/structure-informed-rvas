@@ -70,6 +70,15 @@ def select_best_trait_per_protein(fdr_results_file, trait_cluster_file, fdr_cuto
             f"(uniprot_id, cluster, aa_pos, fdr, ...)."
         )
 
+    # A protein can be attributed to multiple gene names, which duplicates
+    # otherwise-identical (uniprot_id, cluster, aa_pos, fdr) rows; collapse
+    # those before picking the best row per protein.
+    n_raw = len(df_fdr)
+    df_fdr = df_fdr.drop_duplicates(subset=['uniprot_id', 'cluster', 'aa_pos', 'fdr'])
+    if len(df_fdr) < n_raw:
+        logger.info(f"Dropped {n_raw - len(df_fdr)} duplicate row(s) "
+                    f"(same uniprot_id/cluster/aa_pos/fdr, different gene_name)")
+
     best_idx = df_fdr.groupby('uniprot_id')['fdr'].idxmin()
     df_best = df_fdr.loc[best_idx].copy()
 
