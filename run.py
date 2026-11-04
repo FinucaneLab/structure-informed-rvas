@@ -832,7 +832,7 @@ if __name__ == '__main__':
             args.fdr_results_file,
             args.trait_cluster_file,
             os.path.join(args.results_dir, args.phenocodes_output_file),
-            None,
+            args.fdr_cutoff,
         )
         did_nothing = False
 
@@ -864,7 +864,7 @@ if __name__ == '__main__':
             args.pae_cutoff,
             output_file,
             clinvar_output_file,
-            None,
+            args.fdr_cutoff,
             args.shrink_k,
         )
         did_nothing = False
