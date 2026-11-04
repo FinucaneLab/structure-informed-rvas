@@ -249,9 +249,28 @@ def _import_matplotlib():
     return plt, PdfPages
 
 
-def _plot_profiles(df_trait, df_clinvar, pdf_path):
+def _apply_nbhd_subset(df, aa_pos_subset):
+    """
+    If aa_pos_subset is given, blank out (set to NaN) mean_betahat/se_betahat
+    for aa_pos rows not in the subset, while keeping every row (and the full
+    aa_pos range) in the frame, so the plotted x-axis still spans the whole
+    protein with gaps where data was excluded.
+    """
+    if not aa_pos_subset:
+        return df
+    df = df.copy()
+    mask = ~df['aa_pos'].isin(aa_pos_subset)
+    for col in ('mean_betahat', 'se_betahat'):
+        if col in df.columns:
+            df.loc[mask, col] = np.nan
+    return df
+
+
+def _plot_profiles(df_trait, df_clinvar, pdf_path, aa_pos_subset=None):
     """One page per (protein, radius): z-scored trait profile vs. z-scored ClinVar ratio."""
     plt, PdfPages = _import_matplotlib()
+    df_trait = _apply_nbhd_subset(df_trait, aa_pos_subset)
+    df_clinvar = _apply_nbhd_subset(df_clinvar, aa_pos_subset)
     with PdfPages(pdf_path) as pdf:
         combos = df_trait[['uniprot_id', 'radius', 'trait']].drop_duplicates()
         for _, combo in combos.iterrows():
@@ -268,11 +287,42 @@ def _plot_profiles(df_trait, df_clinvar, pdf_path):
                 ax.plot(c['aa_pos'], _zscore(c['mean_betahat']), label='ClinVar (case/control ratio)', color='tab:red')
             ax.set_xlabel('aa_pos')
             ax.set_ylabel('z-scored effect')
-            ax.set_title(f'{protein} | radius={radius}')
+            title = f'{protein} | radius={radius}'
+            if aa_pos_subset:
+                title += ' | neighborhood subset applied'
+            ax.set_title(title)
             ax.legend()
             fig.tight_layout()
             pdf.savefig(fig)
             plt.close(fig)
+
+
+def parse_aa_pos_subset(subset_arg):
+    """
+    Parse --nbhd-subset, or None. Accepts either:
+      - a path to a file with one aa_pos integer per line, or
+      - a comma-separated list of aa_pos integers inline.
+    A path is detected by checking if it exists on disk.
+    """
+    if not subset_arg:
+        return None
+    if os.path.exists(subset_arg):
+        with open(subset_arg) as fh:
+            return set(int(line.strip()) for line in fh if line.strip())
+    return set(int(x) for x in subset_arg.split(','))
+
+
+def plot_profiles_from_files(trait_tsv, clinvar_tsv, plot_file, aa_pos_subset=None):
+    """
+    Standalone replotting entry point: read the two tsvs already produced by
+    --explore-nhbds-traits and regenerate the comparison PDF, optionally
+    restricting to a subset of neighborhoods (aa_pos). Positions outside the
+    subset are treated as NA, but the full protein sequence is still plotted.
+    """
+    df_trait = pd.read_csv(trait_tsv, sep='\t')
+    df_clinvar = pd.read_csv(clinvar_tsv, sep='\t')
+    _plot_profiles(df_trait, df_clinvar, plot_file, aa_pos_subset=aa_pos_subset)
+    logger.info(f"Wrote profile comparison plot to {plot_file}")
 
 
 def run_explore_nbhds_profile(
@@ -289,6 +339,7 @@ def run_explore_nbhds_profile(
         clinvar_output_file,
         plot_file,
         fdr_cutoff=None,
+        aa_pos_subset=None,
 ):
     radii = parse_radii(radii_arg)
     df_best = select_best_trait_per_protein(fdr_results_file, trait_cluster_file, fdr_cutoff)
@@ -360,7 +411,30 @@ def run_explore_nbhds_profile(
     logger.info(f"Wrote {len(df_clinvar_out)} rows to {clinvar_output_file}")
 
     if len(df_out) > 0:
-        _plot_profiles(df_out, df_clinvar_out, plot_file)
+        _plot_profiles(df_out, df_clinvar_out, plot_file, aa_pos_subset=aa_pos_subset)
         logger.info(f"Wrote profile comparison plot to {plot_file}")
 
     return df_out, df_clinvar_out
+
+
+def _main():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description='Standalone replot of --explore-nhbds-traits output, optionally '
+                     'restricted to a subset of neighborhoods (aa_pos).'
+    )
+    parser.add_argument('--trait-tsv', required=True, help='trait profile tsv (--profile-output-file)')
+    parser.add_argument('--clinvar-tsv', required=True, help='clinvar profile tsv (the _clinvar.tsv output)')
+    parser.add_argument('--plot-file', required=True, help='output PDF path')
+    parser.add_argument('--nbhd-subset', type=str, default=None,
+                         help='aa_pos positions to keep: either a file with one aa_pos '
+                              'per line, or a comma-separated list (e.g. 10,52,118); '
+                              'all other neighborhoods are set to NA, but the full '
+                              'sequence is still plotted. Default: no filter.')
+    args = parser.parse_args()
+    aa_pos_subset = parse_aa_pos_subset(args.nbhd_subset)
+    plot_profiles_from_files(args.trait_tsv, args.clinvar_tsv, args.plot_file, aa_pos_subset=aa_pos_subset)
+
+
+if __name__ == '__main__':
+    _main()
