@@ -212,9 +212,11 @@ def get_betahats_per_residue(df, n_res, n_sims, colname='betahat'):
 
     # Permutations: (n_sims, n_var)
     # Apply permuations to the betas globally
-    perm_idx = np.array([np.random.permutation(n_var) for _ in range(n_sims)])
+    perm_idx = np.array(
+        [np.random.permutation(n_var) for _ in range(n_sims)], dtype=int
+    ).reshape(n_sims, n_var)
     # null values: (n_sims, n_var) -> transpose for matrix mult
-    null = betas[perm_idx].T 
+    null = betas[perm_idx].T
     null_sq = betas_sq[perm_idx].T
 
     # # If memory becomes an issue, we can compute the nulls in a loop instead of all at once:

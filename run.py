@@ -330,7 +330,11 @@ if __name__ == '__main__':
         '--fdr-cutoff',
         type=float,
         default=0.05,
-        help='fdr cutoff for summarizing results'
+        help='''
+        fdr cutoff for summarizing results. With --explore-nhbds-traits, this
+        filters out proteins whose best neighborhood-trait result has fdr
+        above this cutoff.
+        '''
     )
     parser.add_argument(
         '--remove-nbhd',
@@ -474,7 +478,7 @@ if __name__ == '__main__':
         ''',
     )
     parser.add_argument(
-        '--explore-nhbds-traits',
+        '--explore-nhbds-traits-pymol',
         action='store_true',
         default=False,
         help='''
@@ -483,6 +487,8 @@ if __name__ == '__main__':
         (via --missense-trait-dir) and compute the average betahat in the
         neighborhood for each trait, at a radius controlled by --fixed-radius.
         Requires --triplets-file, --missense-trait-dir, and --input-dir-hmp.
+        Intended as input for the interactive PyMOL exploration in
+        pymol_explore_nbhd.py.
         ''',
     )
     parser.add_argument(
@@ -491,7 +497,7 @@ if __name__ == '__main__':
         default=None,
         help='''
         Tab-delimited file with columns (protein, aa_pos, discovery_trait), one
-        neighborhood of interest per row. Required by --explore-nhbds-traits.
+        neighborhood of interest per row. Required by --explore-nhbds-traits-pymol.
         ''',
     )
     parser.add_argument(
@@ -501,7 +507,7 @@ if __name__ == '__main__':
         help='''
         Directory containing per-trait missense gene-signal lists, named
         ukbb_{trait}_missense_genes_p1e04_p1e02_uniprotid.ids_only. Used by
-        --explore-nhbds-traits to find every trait with a missense signal for
+        --explore-nhbds-traits-pymol to find every trait with a missense signal for
         a given protein.
         ''',
     )
@@ -510,7 +516,7 @@ if __name__ == '__main__':
         action='store_true',
         default=False,
         help='''
-        Used with --explore-nhbds-traits. If set, force every trait to use the
+        Used with --explore-nhbds-traits-pymol. If set, force every trait to use the
         discovery trait's own best radius for each neighborhood, recomputing
         the betahat aggregate from that trait's raw mapped variant data
         (--rvas-data-to-map, as a template with a {trait} placeholder). If not
@@ -522,7 +528,84 @@ if __name__ == '__main__':
         '--explore-output-file',
         type=str,
         default='nbhd_trait_betahat_exploration.tsv',
-        help='file in the results directory to write --explore-nhbds-traits output to',
+        help='file in the results directory to write --explore-nhbds-traits-pymol output to',
+    )
+    parser.add_argument(
+        '--explore-nhbds-traits',
+        action='store_true',
+        default=False,
+        help='''
+        For each protein in --fdr-results-file, take its single best (lowest-fdr)
+        neighborhood, map its cluster to a trait via --trait-cluster-file, and
+        compute a per-residue mean_betahat/se_betahat/n_betahat profile across the
+        whole protein for that trait, at every radius in --radii. Also computes
+        the analogous ClinVar + common-variant case/control-ratio profile
+        (--clinvar-file) for comparison, and writes a line-plot PDF of the two
+        profiles (z-scored) per protein/radius. Requires --fdr-results-file,
+        --trait-cluster-file, --radii, --clinvar-file, --rvas-data-to-map
+        (as a template with a {trait} placeholder), and --reference-dir.
+        ''',
+    )
+    parser.add_argument(
+        '--fdr-results-file',
+        type=str,
+        default=None,
+        help='''
+        Path to an FDR results tsv (e.g. from --run-hmp) with columns
+        uniprot_id, cluster, aa_pos, fdr, .... Used by --explore-nhbds-traits
+        to pick the best (lowest-fdr) neighborhood per protein.
+        ''',
+    )
+    parser.add_argument(
+        '--radii',
+        type=str,
+        default=None,
+        help='''
+        Used with --explore-nhbds-traits. Either 'multiple-small' (radii
+        6,9,12,15,18,21), 'multiple-big' (radii 10,15,20,30,40), or a
+        comma-separated list of radii in Angstroms, e.g. "10,15,30".
+        ''',
+    )
+    parser.add_argument(
+        '--clinvar-file',
+        type=str,
+        default=None,
+        help='''
+        Used with --explore-nhbds-traits. Path to a ClinVar + common-variants
+        tsv(.gz) with columns chr, pos, ref, alt, ac_case, ac_control.
+        ''',
+    )
+    parser.add_argument(
+        '--profile-output-file',
+        type=str,
+        default='nbhd_betahat_profile.tsv',
+        help='''
+        File in the results directory to write --explore-nhbds-traits trait
+        profile output to. The ClinVar profile is written alongside it with a
+        "_clinvar" suffix, and the comparison plot is written with the same
+        basename and a .pdf extension.
+        ''',
+    )
+    parser.add_argument(
+        '--explore-nhbds-traits-dry',
+        action='store_true',
+        default=False,
+        help='''
+        Dry-run companion to --explore-nhbds-traits: resolve the best
+        (lowest-fdr) trait per protein from --fdr-results-file and
+        --trait-cluster-file, and write the distinct list of required
+        trait/phenocode ids to --phenocodes-output-file (one per line), with
+        no RVAS mapping or profile computation. Use this to find out which
+        --rvas-data-to-map files need to be prepared before running the real
+        --explore-nhbds-traits. Requires --fdr-results-file and
+        --trait-cluster-file.
+        ''',
+    )
+    parser.add_argument(
+        '--phenocodes-output-file',
+        type=str,
+        default='required_phenocodes.txt',
+        help='file in the results directory to write --explore-nhbds-traits-dry output to',
     )
     args = parser.parse_args()
 
@@ -587,9 +670,10 @@ if __name__ == '__main__':
                 df_filter = pd.merge(df_filter, _read_fdr_filter(f))
         else:
             df_filter = None
-    elif args.explore_nhbds_traits:
-        # Reads pre-computed per-trait h5 files (and raw rvas-to-map files when
-        # --fixed-radius is set); no upfront RVAS mapping needed here.
+    elif args.explore_nhbds_traits_pymol or args.explore_nhbds_traits or args.explore_nhbds_traits_dry:
+        # All three read pre-computed per-trait h5 files / raw rvas-to-map
+        # files / fdr results directly inside their own dispatch blocks; no
+        # upfront RVAS mapping needed here.
         df_rvas = None
         df_filter = None
         select_nbhds = None
@@ -699,15 +783,15 @@ if __name__ == '__main__':
             df_results.to_csv(f'{args.results_dir}/{args.fdr_file}', sep='\t', index=False)
         did_nothing = False
 
-    elif args.explore_nhbds_traits:
+    elif args.explore_nhbds_traits_pymol:
         if args.triplets_file is None:
-            raise ValueError('--explore-nhbds-traits requires --triplets-file')
+            raise ValueError('--explore-nhbds-traits-pymol requires --triplets-file')
         if args.missense_trait_dir is None:
-            raise ValueError('--explore-nhbds-traits requires --missense-trait-dir')
+            raise ValueError('--explore-nhbds-traits-pymol requires --missense-trait-dir')
         if args.input_dir_hmp is None:
-            raise ValueError('--explore-nhbds-traits requires --input-dir-hmp')
+            raise ValueError('--explore-nhbds-traits-pymol requires --input-dir-hmp')
         if args.fixed_radius and args.rvas_data_to_map is None:
-            raise ValueError("--explore-nhbds-traits --fixed-radius requires --rvas-data-to-map (as a template with a '{trait}' placeholder)")
+            raise ValueError("--explore-nhbds-traits-pymol --fixed-radius requires --rvas-data-to-map (as a template with a '{trait}' placeholder)")
         from explore_nbhds_traits import run_explore_nbhds_traits
         logger.info(f"Starting neighborhood/trait exploration (fixed_radius={args.fixed_radius})")
         run_explore_nbhds_traits(
@@ -723,6 +807,55 @@ if __name__ == '__main__':
             args.genome_build,
             args.fixed_radius,
             os.path.join(args.results_dir, args.explore_output_file),
+        )
+        did_nothing = False
+
+    elif args.explore_nhbds_traits_dry:
+        if args.fdr_results_file is None:
+            raise ValueError('--explore-nhbds-traits-dry requires --fdr-results-file')
+        if args.trait_cluster_file is None:
+            raise ValueError('--explore-nhbds-traits-dry requires --trait-cluster-file')
+        from explore_nbhds_profile import write_required_phenocodes
+        logger.info("Starting dry run: resolving required phenocodes")
+        write_required_phenocodes(
+            args.fdr_results_file,
+            args.trait_cluster_file,
+            os.path.join(args.results_dir, args.phenocodes_output_file),
+            None,
+        )
+        did_nothing = False
+
+    elif args.explore_nhbds_traits:
+        if args.fdr_results_file is None:
+            raise ValueError('--explore-nhbds-traits requires --fdr-results-file')
+        if args.trait_cluster_file is None:
+            raise ValueError('--explore-nhbds-traits requires --trait-cluster-file')
+        if args.radii is None:
+            raise ValueError('--explore-nhbds-traits requires --radii')
+        if args.clinvar_file is None:
+            raise ValueError('--explore-nhbds-traits requires --clinvar-file')
+        if args.rvas_data_to_map is None:
+            raise ValueError("--explore-nhbds-traits requires --rvas-data-to-map (as a template with a '{trait}' placeholder)")
+        from explore_nbhds_profile import run_explore_nbhds_profile
+        logger.info(f"Starting per-residue betahat profile exploration (radii={args.radii})")
+        base, _ = os.path.splitext(args.profile_output_file)
+        output_file = os.path.join(args.results_dir, args.profile_output_file)
+        clinvar_output_file = os.path.join(args.results_dir, f'{base}_clinvar.tsv')
+        plot_file = os.path.join(args.results_dir, f'{base}.pdf')
+        run_explore_nbhds_profile(
+            args.fdr_results_file,
+            args.trait_cluster_file,
+            args.radii,
+            args.clinvar_file,
+            args.rvas_data_to_map,
+            args.beta_col,
+            args.reference_dir,
+            args.genome_build,
+            args.pae_cutoff,
+            output_file,
+            clinvar_output_file,
+            plot_file,
+            None,
         )
         did_nothing = False
 
