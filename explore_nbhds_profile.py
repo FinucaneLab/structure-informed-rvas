@@ -15,10 +15,13 @@ Workflow:
    pos, ref, alt, ac_case, ac_control), using a case/control ratio in place
    of mean_betahat (no standard error equivalent; an approximate delta-method
    SE of the ratio is included as an extra column, but the primary
-   se_betahat column is NA for this file, as requested).
-4. Write two tsvs and a multi-page PDF of per-protein, per-radius line plots
-   comparing the two profiles (z-scored, since the two are on different
-   scales).
+   se_betahat column is NA for this file, as requested). The trait profile
+   also includes mean_betahat_shrunk, a shrinkage-toward-0 estimate
+   analogous to the ClinVar ratio's pseudocount regularization.
+4. Write two tsvs (trait profile and ClinVar profile). Plotting is a
+   separate, manual step: run this file directly (see _main / plot_profiles_from_files)
+   to generate the comparison PDF from the two tsvs, optionally restricting
+   to a subset of neighborhoods and choosing which column to plot.
 """
 
 import os
@@ -150,8 +153,17 @@ def _compute_adjacency_by_radius(pdb_file_pos_guide, pdb_dir, pae_dir, protein, 
     return adj_by_radius
 
 
-def compute_betahat_profile(df_mapped_trait, protein, adj_by_radius):
-    """Per-residue n_betahat/mean_betahat/se_betahat for every radius, for one protein."""
+def compute_betahat_profile(df_mapped_trait, protein, adj_by_radius, shrink_k=5.0):
+    """
+    Per-residue n_betahat/mean_betahat/se_betahat for every radius, for one
+    protein. Also includes mean_betahat_shrunk, a shrinkage estimate that
+    pulls mean_betahat toward 0 in proportion to how few variants (n_betahat)
+    support it: mean_betahat_shrunk = n_betahat * mean_betahat / (n_betahat + shrink_k).
+    This is the betahat analogue of the pseudocount regularization already
+    applied to the ClinVar case/control ratio (see compute_clinvar_profile):
+    shrink_k plays the same role as that pseudocount, and its effect vanishes
+    as n_betahat grows.
+    """
     df_p = df_mapped_trait[df_mapped_trait.uniprot_id == protein]
     if df_p.empty or len(df_p) == 0:
         return []
@@ -172,12 +184,14 @@ def compute_betahat_profile(df_mapped_trait, protein, adj_by_radius):
             mean = np.where(n_in > 0, s / np.maximum(n_in, 1), np.nan)
             var = np.where(n_in > 1, (ssq - n_in * mean ** 2) / np.maximum(n_in - 1, 1), np.nan)
             se = np.where(n_in > 1, np.sqrt(np.maximum(var, 0) / n_in), np.nan)
+            mean_shrunk = n_in * np.nan_to_num(mean, nan=0.0) / (n_in + shrink_k)
 
         for i in range(n_res):
             rows.append({
                 'aa_pos': i + 1,
                 'n_betahat': float(n_in[i]),
                 'mean_betahat': float(mean[i]),
+                'mean_betahat_shrunk': float(mean_shrunk[i]),
                 'se_betahat': float(se[i]),
                 'radius': radius,
             })
@@ -249,10 +263,10 @@ def _import_matplotlib():
     return plt, PdfPages
 
 
-def _apply_nbhd_subset(df, nbhd_subset):
+def _apply_nbhd_subset(df, nbhd_subset, value_col):
     """
     If nbhd_subset is given (a set of (uniprot_id, aa_pos, radius) tuples),
-    blank out (set to NaN) mean_betahat/se_betahat for rows not in the
+    blank out (set to NaN) value_col/se_betahat for rows not in the
     subset, while keeping every row (and the full aa_pos range) in the
     frame, so the plotted x-axis still spans the whole protein with gaps
     where data was excluded.
@@ -262,17 +276,18 @@ def _apply_nbhd_subset(df, nbhd_subset):
     df = df.copy()
     keys = list(zip(df['uniprot_id'], df['aa_pos'].astype(int), df['radius'].astype(float)))
     mask = np.array([k not in nbhd_subset for k in keys])
-    for col in ('mean_betahat', 'se_betahat'):
+    for col in (value_col, 'se_betahat'):
         if col in df.columns:
             df.loc[mask, col] = np.nan
     return df
 
 
-def _plot_profiles(df_trait, df_clinvar, pdf_path, nbhd_subset=None):
+def _plot_profiles(df_trait, df_clinvar, pdf_path, nbhd_subset=None, value_col='mean_betahat'):
     """One page per (protein, radius): z-scored trait profile vs. z-scored ClinVar ratio."""
     plt, PdfPages = _import_matplotlib()
-    df_trait = _apply_nbhd_subset(df_trait, nbhd_subset)
-    df_clinvar = _apply_nbhd_subset(df_clinvar, nbhd_subset)
+    df_trait = _apply_nbhd_subset(df_trait, nbhd_subset, value_col)
+    clinvar_value_col = value_col if value_col in df_clinvar.columns else 'mean_betahat'
+    df_clinvar = _apply_nbhd_subset(df_clinvar, nbhd_subset, clinvar_value_col)
     with PdfPages(pdf_path) as pdf:
         combos = df_trait[['uniprot_id', 'radius', 'trait']].drop_duplicates()
         for _, combo in combos.iterrows():
@@ -284,9 +299,10 @@ def _plot_profiles(df_trait, df_clinvar, pdf_path, nbhd_subset=None):
                 continue
 
             fig, ax = plt.subplots(figsize=(10, 4))
-            ax.plot(t['aa_pos'], _zscore(t['mean_betahat']), label=f'trait {trait} (betahat)', color='tab:blue')
+            ax.plot(t['aa_pos'], _zscore(t[value_col]), label=f'trait {trait} ({value_col})', color='tab:blue')
             if len(c) > 0:
-                ax.plot(c['aa_pos'], _zscore(c['mean_betahat']), label='ClinVar (case/control ratio)', color='tab:red')
+                ax.plot(c['aa_pos'], _zscore(c[clinvar_value_col]),
+                        label=f'ClinVar ({clinvar_value_col})', color='tab:red')
             ax.set_xlabel('aa_pos')
             ax.set_ylabel('z-scored effect')
             title = f'{protein} | radius={radius}'
@@ -316,17 +332,24 @@ def parse_nbhd_subset(subset_arg):
     return set(zip(df['uniprot_id'], df['aa_pos'].astype(int), df['radius'].astype(float)))
 
 
-def plot_profiles_from_files(trait_tsv, clinvar_tsv, plot_file, nbhd_subset=None):
+def plot_profiles_from_files(trait_tsv, clinvar_tsv, plot_file, nbhd_subset=None,
+                              value_col='mean_betahat'):
     """
     Standalone replotting entry point: read the two tsvs already produced by
-    --explore-nhbds-traits and regenerate the comparison PDF, optionally
-    restricting to a subset of neighborhoods (uniprot_id, aa_pos). Positions
-    outside the subset are treated as NA, but the full protein sequence is
-    still plotted.
+    --explore-nhbds-traits and generate the comparison PDF, optionally
+    restricting to a subset of neighborhoods (uniprot_id, aa_pos, radius) and
+    choosing which column to plot (e.g. 'mean_betahat' or
+    'mean_betahat_shrunk'). Positions outside the subset are treated as NA,
+    but the full protein sequence is still plotted. If value_col isn't
+    present in the ClinVar tsv (e.g. a shrunk column that only exists for
+    the trait), the ClinVar series falls back to 'mean_betahat'.
     """
     df_trait = pd.read_csv(trait_tsv, sep='\t')
     df_clinvar = pd.read_csv(clinvar_tsv, sep='\t')
-    _plot_profiles(df_trait, df_clinvar, plot_file, nbhd_subset=nbhd_subset)
+    if value_col not in df_trait.columns:
+        raise ValueError(f"--value-col '{value_col}' not found in {trait_tsv}; "
+                          f"available columns: {list(df_trait.columns)}")
+    _plot_profiles(df_trait, df_clinvar, plot_file, nbhd_subset=nbhd_subset, value_col=value_col)
     logger.info(f"Wrote profile comparison plot to {plot_file}")
 
 
@@ -342,9 +365,8 @@ def run_explore_nbhds_profile(
         pae_cutoff,
         output_file,
         clinvar_output_file,
-        plot_file,
         fdr_cutoff=None,
-        nbhd_subset=None,
+        shrink_k=5.0,
 ):
     radii = parse_radii(radii_arg)
     df_best = select_best_trait_per_protein(fdr_results_file, trait_cluster_file, fdr_cutoff)
@@ -385,7 +407,7 @@ def run_explore_nbhds_profile(
                 logger.warning(f"{protein}: no structure found; skipping.")
                 continue
 
-            for row in compute_betahat_profile(df_mapped_trait, protein, adj_by_radius):
+            for row in compute_betahat_profile(df_mapped_trait, protein, adj_by_radius, shrink_k=shrink_k):
                 row.update({'trait': trait, 'uniprot_id': protein,
                             'cluster': r['cluster'], 'discovery_fdr': r['discovery_fdr'],
                             'discovery_aa_pos': r['discovery_aa_pos']})
@@ -401,8 +423,8 @@ def run_explore_nbhds_profile(
                     row['gene_name'] = r['gene_name']
                 clinvar_rows.append(row)
 
-    col_order = ['trait', 'uniprot_id', 'aa_pos', 'n_betahat', 'mean_betahat', 'se_betahat',
-                 'radius', 'cluster', 'discovery_fdr', 'discovery_aa_pos', 'gene_name']
+    col_order = ['trait', 'uniprot_id', 'aa_pos', 'n_betahat', 'mean_betahat', 'mean_betahat_shrunk',
+                 'se_betahat', 'radius', 'cluster', 'discovery_fdr', 'discovery_aa_pos', 'gene_name']
 
     df_out = pd.DataFrame(trait_rows)
     df_out = df_out[[c for c in col_order if c in df_out.columns]]
@@ -414,10 +436,6 @@ def run_explore_nbhds_profile(
     df_clinvar_out = df_clinvar_out[[c for c in clinvar_col_order if c in df_clinvar_out.columns]]
     df_clinvar_out.to_csv(clinvar_output_file, sep='\t', index=False)
     logger.info(f"Wrote {len(df_clinvar_out)} rows to {clinvar_output_file}")
-
-    if len(df_out) > 0:
-        _plot_profiles(df_out, df_clinvar_out, plot_file, nbhd_subset=nbhd_subset)
-        logger.info(f"Wrote profile comparison plot to {plot_file}")
 
     return df_out, df_clinvar_out
 
@@ -437,9 +455,16 @@ def _main():
                               'row per radius page); all other neighborhoods are set '
                               'to NA, but the full sequence is still plotted. '
                               'Default: no filter.')
+    parser.add_argument('--value-col', type=str, default='mean_betahat',
+                         choices=['mean_betahat', 'mean_betahat_shrunk'],
+                         help='which trait column to plot (and ClinVar, if present); '
+                              'mean_betahat_shrunk is a shrinkage-toward-0 estimate '
+                              'that down-weights low-n_betahat neighborhoods. '
+                              'Default: mean_betahat.')
     args = parser.parse_args()
     nbhd_subset = parse_nbhd_subset(args.nbhd_subset)
-    plot_profiles_from_files(args.trait_tsv, args.clinvar_tsv, args.plot_file, nbhd_subset=nbhd_subset)
+    plot_profiles_from_files(args.trait_tsv, args.clinvar_tsv, args.plot_file,
+                              nbhd_subset=nbhd_subset, value_col=args.value_col)
 
 
 if __name__ == '__main__':

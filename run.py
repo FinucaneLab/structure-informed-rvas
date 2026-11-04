@@ -540,10 +540,11 @@ if __name__ == '__main__':
         compute a per-residue mean_betahat/se_betahat/n_betahat profile across the
         whole protein for that trait, at every radius in --radii. Also computes
         the analogous ClinVar + common-variant case/control-ratio profile
-        (--clinvar-file) for comparison, and writes a line-plot PDF of the two
-        profiles (z-scored) per protein/radius. Requires --fdr-results-file,
-        --trait-cluster-file, --radii, --clinvar-file, --rvas-data-to-map
-        (as a template with a {trait} placeholder), and --reference-dir.
+        (--clinvar-file) for comparison. Writes two tsvs only; plotting is a
+        separate, manual step via `python explore_nbhds_profile.py` (see its
+        --help). Requires --fdr-results-file, --trait-cluster-file, --radii,
+        --clinvar-file, --rvas-data-to-map (as a template with a {trait}
+        placeholder), and --reference-dir.
         ''',
     )
     parser.add_argument(
@@ -582,8 +583,18 @@ if __name__ == '__main__':
         help='''
         File in the results directory to write --explore-nhbds-traits trait
         profile output to. The ClinVar profile is written alongside it with a
-        "_clinvar" suffix, and the comparison plot is written with the same
-        basename and a .pdf extension.
+        "_clinvar" suffix.
+        ''',
+    )
+    parser.add_argument(
+        '--shrink-k',
+        type=float,
+        default=5.0,
+        help='''
+        Used with --explore-nhbds-traits. Shrinkage constant K for
+        mean_betahat_shrunk = n_betahat * mean_betahat / (n_betahat + K), a
+        shrinkage-toward-0 estimate analogous to the pseudocount in the
+        ClinVar case/control ratio. Default: 5.0.
         ''',
     )
     parser.add_argument(
@@ -841,7 +852,6 @@ if __name__ == '__main__':
         base, _ = os.path.splitext(args.profile_output_file)
         output_file = os.path.join(args.results_dir, args.profile_output_file)
         clinvar_output_file = os.path.join(args.results_dir, f'{base}_clinvar.tsv')
-        plot_file = os.path.join(args.results_dir, f'{base}.pdf')
         run_explore_nbhds_profile(
             args.fdr_results_file,
             args.trait_cluster_file,
@@ -854,8 +864,8 @@ if __name__ == '__main__':
             args.pae_cutoff,
             output_file,
             clinvar_output_file,
-            plot_file,
             None,
+            args.shrink_k,
         )
         did_nothing = False
 
