@@ -22,12 +22,10 @@ Workflow:
 """
 
 import os
+import sys
+import subprocess
 import numpy as np
 import pandas as pd
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
 
 from utils import get_distance_matrix_structure, get_pae_matrix_structure
 from q_scan_test import get_betahats_per_residue, get_nbhd_stats, MULTI_RADII_SMALL, MULTI_RADII_BIG
@@ -228,8 +226,23 @@ def _zscore(x):
     return (x - mu) / sd
 
 
+def _import_matplotlib():
+    """Import matplotlib lazily, installing it on the fly if missing."""
+    try:
+        import matplotlib
+    except ImportError:
+        logger.warning("matplotlib not found; installing it now with pip...")
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', 'matplotlib'])
+        import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+    return plt, PdfPages
+
+
 def _plot_profiles(df_trait, df_clinvar, pdf_path):
     """One page per (protein, radius): z-scored trait profile vs. z-scored ClinVar ratio."""
+    plt, PdfPages = _import_matplotlib()
     with PdfPages(pdf_path) as pdf:
         combos = df_trait[['uniprot_id', 'radius', 'trait']].drop_duplicates()
         for _, combo in combos.iterrows():
