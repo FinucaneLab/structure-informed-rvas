@@ -282,7 +282,53 @@ def _apply_nbhd_subset(df, nbhd_subset, value_col):
     return df
 
 
-def _plot_profiles(df_trait, df_clinvar, pdf_path, nbhd_subset=None, value_col='mean_betahat'):
+def _spearman_with_circular_perm(x, y, n_perm=1000, min_n=5, seed=0):
+    """
+    Spearman rank correlation between x and y (same length, aligned by
+    position), using pairwise-complete observations (positions where either
+    is NaN -- e.g. outside a --nbhd-subset, or naturally low-coverage -- are
+    dropped from both before computing rho).
+
+    Because adjacent neighborhoods overlap heavily, positions aren't
+    independent, so the standard parametric p-value is too optimistic. If
+    n_perm > 0, also returns a permutation p-value from circularly shifting
+    the full y series (preserving its own autocorrelation) against x many
+    times and comparing the real |rho| to the null distribution.
+
+    Returns (rho, n_pairs, perm_pvalue). rho and perm_pvalue are NaN if
+    fewer than min_n complete pairs are available.
+    """
+    from scipy.stats import spearmanr
+
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    valid = ~(np.isnan(x) | np.isnan(y))
+    n_pairs = int(valid.sum())
+    if n_pairs < min_n:
+        return np.nan, n_pairs, np.nan
+
+    rho, _ = spearmanr(x[valid], y[valid])
+
+    perm_pvalue = np.nan
+    if n_perm > 0 and len(x) > 1:
+        rng = np.random.default_rng(seed)
+        n = len(x)
+        count = 0
+        for shift in rng.integers(1, n, size=n_perm):
+            y_shift = np.roll(y, shift)
+            valid_shift = ~(np.isnan(x) | np.isnan(y_shift))
+            if valid_shift.sum() < min_n:
+                continue
+            rho_shift, _ = spearmanr(x[valid_shift], y_shift[valid_shift])
+            if np.isfinite(rho_shift) and abs(rho_shift) >= abs(rho):
+                count += 1
+        perm_pvalue = (count + 1) / (n_perm + 1)
+
+    return rho, n_pairs, perm_pvalue
+
+
+def _plot_profiles(df_trait, df_clinvar, pdf_path, nbhd_subset=None, value_col='mean_betahat',
+                    n_perm=1000):
     """One page per (protein, radius): z-scored trait profile vs. z-scored ClinVar ratio."""
     plt, PdfPages = _import_matplotlib()
     df_trait = _apply_nbhd_subset(df_trait, nbhd_subset, value_col)
@@ -300,15 +346,29 @@ def _plot_profiles(df_trait, df_clinvar, pdf_path, nbhd_subset=None, value_col='
 
             fig, ax = plt.subplots(figsize=(10, 4))
             ax.plot(t['aa_pos'], _zscore(t[value_col]), label=f'trait {trait} ({value_col})', color='tab:blue')
+
+            title = f'{protein} | radius={radius}'
             if len(c) > 0:
+                # align on aa_pos so both series share the same positions in order
+                merged = t[['aa_pos', value_col]].merge(
+                    c[['aa_pos', clinvar_value_col]], on='aa_pos', how='outer'
+                ).sort_values('aa_pos')
+                rho, n_pairs, perm_p = _spearman_with_circular_perm(
+                    merged[value_col], merged[clinvar_value_col], n_perm=n_perm
+                )
                 ax.plot(c['aa_pos'], _zscore(c[clinvar_value_col]),
                         label=f'ClinVar ({clinvar_value_col})', color='tab:red')
+                if np.isnan(rho):
+                    title += ' | Spearman rho: NA (too few shared positions)'
+                elif n_perm > 0:
+                    title += f' | Spearman rho={rho:.3f} (n={n_pairs}, perm p={perm_p:.3g})'
+                else:
+                    title += f' | Spearman rho={rho:.3f} (n={n_pairs})'
             ax.set_xlabel('aa_pos')
             ax.set_ylabel('z-scored effect')
-            title = f'{protein} | radius={radius}'
             if nbhd_subset:
                 title += ' | neighborhood subset applied'
-            ax.set_title(title)
+            ax.set_title(title, fontsize=10)
             ax.legend()
             fig.tight_layout()
             pdf.savefig(fig)
@@ -333,7 +393,7 @@ def parse_nbhd_subset(subset_arg):
 
 
 def plot_profiles_from_files(trait_tsv, clinvar_tsv, plot_file, nbhd_subset=None,
-                              value_col='mean_betahat'):
+                              value_col='mean_betahat', n_perm=1000):
     """
     Standalone replotting entry point: read the two tsvs already produced by
     --explore-nhbds-traits and generate the comparison PDF, optionally
@@ -342,14 +402,18 @@ def plot_profiles_from_files(trait_tsv, clinvar_tsv, plot_file, nbhd_subset=None
     'mean_betahat_shrunk'). Positions outside the subset are treated as NA,
     but the full protein sequence is still plotted. If value_col isn't
     present in the ClinVar tsv (e.g. a shrunk column that only exists for
-    the trait), the ClinVar series falls back to 'mean_betahat'.
+    the trait), the ClinVar series falls back to 'mean_betahat'. Each plot
+    title reports the Spearman rank correlation between the two series
+    (pairwise-complete, NAs dropped from both), plus a circular-shift
+    permutation p-value (set n_perm=0 to skip it).
     """
     df_trait = pd.read_csv(trait_tsv, sep='\t')
     df_clinvar = pd.read_csv(clinvar_tsv, sep='\t')
     if value_col not in df_trait.columns:
         raise ValueError(f"--value-col '{value_col}' not found in {trait_tsv}; "
                           f"available columns: {list(df_trait.columns)}")
-    _plot_profiles(df_trait, df_clinvar, plot_file, nbhd_subset=nbhd_subset, value_col=value_col)
+    _plot_profiles(df_trait, df_clinvar, plot_file, nbhd_subset=nbhd_subset,
+                    value_col=value_col, n_perm=n_perm)
     logger.info(f"Wrote profile comparison plot to {plot_file}")
 
 
@@ -461,10 +525,16 @@ def _main():
                               'mean_betahat_shrunk is a shrinkage-toward-0 estimate '
                               'that down-weights low-n_betahat neighborhoods. '
                               'Default: mean_betahat.')
+    parser.add_argument('--n-perm', type=int, default=1000,
+                         help='number of circular-shift permutations for the Spearman '
+                              'correlation p-value shown in each plot title (accounts '
+                              'for spatial autocorrelation from overlapping '
+                              'neighborhoods); set to 0 to skip and show only rho. '
+                              'Default: 1000.')
     args = parser.parse_args()
     nbhd_subset = parse_nbhd_subset(args.nbhd_subset)
     plot_profiles_from_files(args.trait_tsv, args.clinvar_tsv, args.plot_file,
-                              nbhd_subset=nbhd_subset, value_col=args.value_col)
+                              nbhd_subset=nbhd_subset, value_col=args.value_col, n_perm=args.n_perm)
 
 
 if __name__ == '__main__':
