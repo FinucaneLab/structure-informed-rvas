@@ -1328,6 +1328,40 @@ if __name__ == '__main__':
             )
             df_ann['radius'] = args.neighborhood_radius
 
+        mu_kwargs = {}
+        if mutation_rate_mode:
+            if args.stratum_col is not None or args.test_method == 'cmh':
+                raise ValueError(
+                    "--stratum-col/--test-method cmh are not supported with --mu-file/--mu-col in the "
+                    "annotation test: all strata share one rate vector, so stratified results equal unstratified."
+                )
+            if args.alternative == 'two-sided':
+                raise ValueError("--alternative two-sided is not supported with a mutation-rate null; use --test-direction")
+            from mutation_rate_test import (build_mu_lookup, estimate_lambda, load_mu_per_residue,
+                                            simulate_null_input)
+            if args.mu_col is not None:
+                logger.warning(
+                    'Using --mu-col, so mutational opportunity is taken from the input file. Only valid if '
+                    'it lists ALL possible missense variants, including those with no observed de novos.'
+                )
+                df_mu = df_rvas.groupby(['uniprot_id', 'aa_pos'], as_index=False).agg(mu=('mu', 'sum'))
+                df_mu['n_with_mu'] = np.nan
+                df_mu['n_possible'] = np.nan
+            else:
+                df_mu = load_mu_per_residue(args.mu_residue_file)
+            mu_lookup = build_mu_lookup(df_mu)
+            cal_genes = None
+            if args.rate_calibration_genes is not None:
+                cal_genes = pd.read_csv(args.rate_calibration_genes, sep='\t')['uniprot_id'].unique()
+            # lambda_hat BEFORE gene selection (--min-denovo), see estimate_lambda
+            lambda_hat = estimate_lambda(df_rvas, df_mu, args.rate_calibration, cal_genes, args.n_trios)
+            if args.simulate_null_from_mu:
+                df_rvas = simulate_null_input(df_rvas, mu_lookup, lambda_hat, args.seed)
+                lambda_hat = estimate_lambda(df_rvas, df_mu, args.rate_calibration, cal_genes, args.n_trios)
+            logger.info('Annotation test with a mutation-rate null; use a fresh results dir (shards of case/control runs would be reused)')
+            mu_kwargs = dict(mu_lookup=mu_lookup, lambda_hat=lambda_hat,
+                             min_denovo=args.min_denovo, direction=args.test_direction)
+
         run_annotation_test(
             df_rvas,
             df_ann,
@@ -1345,6 +1379,7 @@ if __name__ == '__main__':
             alternative=args.alternative,
             result_fn=args.annotation_result_fn,
             min_alleles=args.min_alleles,
+            **mu_kwargs,
         )
         did_nothing = False
 

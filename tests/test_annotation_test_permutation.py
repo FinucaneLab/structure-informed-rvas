@@ -44,6 +44,7 @@ from annotation_test_permutation import (
 from annotation_test_permutation import (
     test_protein_annotations as run_protein_annotations,
     test_protein_annotations_cmh as run_protein_annotations_cmh,
+    test_protein_annotations_mu as run_protein_annotations_mu,
 )
 from cmh import (
     cmh_expected_variance,
@@ -546,6 +547,76 @@ def test_fisher_greater_matches_scipy():
     for a, b in [(5, 1), (2, 3), (0, 4)]:
         ref = fisher_exact([[a, 10 - a], [b, 12 - b]], alternative="greater")[1]
         assert np.isclose(fisher_greater_pvals(a, b, 10, 12), ref)
+
+
+def _mu_protein(n_res=200, n_ann=100, width=15, seed=0):
+    """Random rate vector, random contiguous annotations; returns (uid-independent) pieces."""
+    rng = np.random.default_rng(seed)
+    m = rng.uniform(0.01, 0.1, n_res)
+    mu_lookup = {"P": (np.arange(1, n_res + 1), m, np.ones(n_res), np.ones(n_res))}
+    labels = np.zeros((n_ann, n_res), dtype=int)
+    for i, start in enumerate(rng.integers(0, n_res - width, n_ann)):
+        labels[i, start:start + width] = 1
+    row_meta = {i: ("A", str(i)) for i in range(n_ann)}
+    return rng, m, mu_lookup, labels, row_meta
+
+
+def _rvas_from_counts(x):
+    pos = np.flatnonzero(x)
+    return pd.DataFrame({"uniprot_id": "P", "aa_pos": pos + 1, "ac_case": x[pos]})
+
+
+def _run_mu(x, mu_lookup, labels, row_meta, lambda_hat, n_perm=200, direction="enrichment"):
+    return run_protein_annotations_mu(
+        "P", _rvas_from_counts(x), labels, row_meta, len(x), n_perm, lambda_hat, mu_lookup,
+        seed=1, direction=direction,
+    )
+
+
+def test_mu_null_is_calibrated():
+    # one-sided discrete p-values are conservative, so allow only an upper tolerance
+    frac = {"poisson": [], "binomial": []}
+    for rep in range(10):
+        rng, m, mu_lookup, labels, row_meta = _mu_protein(seed=rep)
+        res = _run_mu(rng.poisson(5 * m), mu_lookup, labels, row_meta, 5.0, n_perm=50)
+        for test, g in res.groupby("test"):
+            frac[test].append((g["p_value"] < 0.05).mean())
+    assert 0.01 < np.mean(frac["binomial"]) < 0.07, frac["binomial"]
+    assert 0.01 < np.mean(frac["poisson"]) < 0.07, frac["poisson"]
+
+
+def test_mu_power_ranks_injected_annotation_first():
+    rng, m, mu_lookup, labels, row_meta = _mu_protein(seed=3)
+    x = rng.poisson(5 * m)
+    x[labels[0] == 1] += 3
+    res = _run_mu(x, mu_lookup, labels, row_meta, 5.0)
+    both = res.pivot(index="annotation_id", columns="test", values="local_fdr").max(axis=1)
+    assert both.idxmin() == "A|0"
+    assert res[(res.test == "binomial") & (res.annotation_id == "A|0")]["p_value"].iloc[0] < 1e-3
+
+
+def test_mu_regional_constraint_passes_binomial_not_poisson():
+    n_res, lam = 200, 4.0
+    rng, m, mu_lookup, labels, row_meta = _mu_protein(n_res=n_res, n_ann=5, seed=4)
+    m[:] = 0.05
+    mu_lookup["P"] = (np.arange(1, n_res + 1), m, np.ones(n_res), np.ones(n_res))
+    x = rng.poisson(lam * m)
+    x[:n_res // 2] = 0  # first half constrained
+    labels[0] = 0
+    labels[0, n_res // 2:] = 1
+    res = _run_mu(x, mu_lookup, labels, row_meta, lam).set_index(["annotation_id", "test"])
+    assert res.loc[("A|0", "binomial"), "p_value"] < 1e-3
+    assert res.loc[("A|0", "poisson"), "p_value"] > 0.05
+
+
+def test_mu_summary_pivots_and_takes_max():
+    rng, m, mu_lookup, labels, row_meta = _mu_protein(seed=5)
+    res = _run_mu(rng.poisson(5 * m), mu_lookup, labels, row_meta, 5.0, n_perm=20)
+    with tempfile.TemporaryDirectory() as d:
+        out = summarize_annotation_test([res], 20, Path(d), format="parquet")
+    assert len(out) == len(row_meta)
+    assert {"p_poisson", "p_binomial", "global_fdr_poisson", "global_fdr_binomial"} <= set(out.columns)
+    assert (out["global_fdr"] == out[["global_fdr_poisson", "global_fdr_binomial"]].max(axis=1)).all()
 
 
 if __name__ == '__main__':
