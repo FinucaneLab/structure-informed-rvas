@@ -32,6 +32,7 @@ from cmh import (
     summarize_strata,
 )
 from logger_config import get_logger
+from value_tracking import log_counts
 from mutation_rate_test import (
     _select_genes,
     binomial_pval_lookup,
@@ -861,8 +862,13 @@ def process_protein(
     mu_lookup: dict | None = None,
     lambda_hat: float | None = None,
     direction: str = "enrichment",
+    stats: dict | None = None,
 ) -> pd.DataFrame | None:
-    """Build the label matrix, run the permutation test, and write the per-protein parquet."""
+    """Build the label matrix, run the permutation test, and write the per-protein parquet.
+
+    stats: optional dict; proteins whose expansion was skipped for lack of a structure
+    are recorded under "not_expanded" as {uniprot_id: number of annotation rows}.
+    """
     seq_len = seq_len or fallback_seq_len(prot_rvas_df, prot_ann_df)
 
     if ann_format == "long":
@@ -909,6 +915,12 @@ def process_protein(
                 f"{sorted(radius_groups)}",
                 UserWarning,
             )
+            if stats is not None:
+                # Tested as annotated (unexpanded), so the counts do not change, but
+                # what these annotations cover does.
+                stats.setdefault("not_expanded", {})[uniprot_id] = sum(
+                    len(rows) for rows in radius_groups.values()
+                )
         else:
             for radius, rows in radius_groups.items():
                 adjacency_matrix = threshold_adjacency_matrix(
@@ -1031,21 +1043,52 @@ def run_annotation_test(
             "expand_include), which requires reference_dir"
         )
 
-    rvas_df = filter_variants(rvas_df, df_include, mode="include")
-    rvas_df = filter_variants(rvas_df, df_filter, mode="exclude")
+    # In this test "neighborhoods" are the annotations tested, which are only known
+    # once the test has run, so the earlier lines leave them out (nbhd_bound=False).
+    def _track(step, df, **extra):
+        if mu_lookup is not None:
+            ids = set(df["uniprot_id"])
+            extra.update(
+                n_denovo=int(df["ac_case"].sum()),
+                sum_mu=float(sum(mu_lookup[u][1].sum() for u in ids if u in mu_lookup)),
+            )
+        log_counts(step, df, nbhd_bound=False, **extra)
+
+    if df_include is not None:
+        rvas_df = filter_variants(rvas_df, df_include, mode="include")
+        _track("Annotation test: restrict to included variants/proteins", rvas_df)
+    if df_filter is not None:
+        rvas_df = filter_variants(rvas_df, df_filter, mode="exclude")
+        _track("Annotation test: remove excluded variants/proteins", rvas_df)
     if mu_lookup is not None:
         if stratum_col is not None:
             raise ValueError("stratum_col is not supported with a mutation-rate null: all strata share one rate vector")
-        tested_proteins = set(_select_genes(rvas_df, None, min_denovo, mu_lookup))
+        # _select_genes logs each of its own sub-filters.
+        tested_proteins = set(
+            _select_genes(rvas_df, None, min_denovo, mu_lookup, nbhd_bound=False)
+        )
     else:
         if stratum_col is not None:
             summarize_strata(rvas_df, stratum_col)
         tested_proteins = set(filter_proteins_by_allele_count(rvas_df, min_alleles))
+        _track(
+            f"Annotation test: proteins with >= {min_alleles} case and control alleles",
+            rvas_df[rvas_df["uniprot_id"].isin(tested_proteins)],
+        )
     uniprot_ids = sorted(tested_proteins & set(ann_df["uniprot_id"].unique()))
     
     # Filter the dataframes to only include tested proteins.
     rvas_df = rvas_df[rvas_df["uniprot_id"].isin(uniprot_ids)]
     ann_df = ann_df[ann_df["uniprot_id"].isin(uniprot_ids)]
+    _track("Annotation test: proteins with annotations", rvas_df, n_ann_rows=len(ann_df))
+    if ann_include is not None and ann_format == "long":
+        # Applied per protein inside the converter; counted here so the drop shows.
+        ann_kept = ann_df[ann_df[ann_id_columns[0]].isin(ann_include)]
+        _track(
+            "Annotation test: restrict to included annotation types",
+            rvas_df[rvas_df["uniprot_id"].isin(ann_kept["uniprot_id"])],
+            n_ann_rows=len(ann_kept),
+        )
 
     protein_lengths = load_protein_lengths(reference_dir) if reference_dir else {}
 
@@ -1055,6 +1098,9 @@ def run_annotation_test(
     ann_by_protein = dict(tuple(ann_df.groupby("uniprot_id", sort=False)))
 
     shard_dir = results_dir / "per_protein"
+    # Filled by process_protein (threads only add distinct keys). Proteins resumed
+    # from an existing shard are not re-processed, so they are not counted here.
+    ann_stats: dict = {}
 
     def _call(uniprot_id: str) -> pd.DataFrame | None:
         shard = shard_dir / f"{uniprot_id}_annotation_pvals.parquet"
@@ -1082,6 +1128,7 @@ def run_annotation_test(
             mu_lookup=mu_lookup,
             lambda_hat=lambda_hat,
             direction=direction,
+            stats=ann_stats,
         )
 
     n_resumed = sum(
@@ -1099,7 +1146,7 @@ def run_annotation_test(
             )(delayed(_call)(uid) for uid in uniprot_ids),
             total=len(uniprot_ids),
         )
-    return summarize_annotation_test(
+    df_pvals = summarize_annotation_test(
         (r for r in results if r is not None),
         n_perm,
         results_dir,
@@ -1108,6 +1155,39 @@ def run_annotation_test(
         format=format,
         result_fn=result_fn,
     )
+    # One row per (protein, annotation) tested -- in mutation-rate mode the two
+    # tests are already merged onto that row. Annotations covering the exact same
+    # positions were merged into one tested unit by the converters, their ids joined
+    # by "|", so counting the ids back out gives the number before merging.
+    keys = [c for c in ("uniprot_id", "annotation_id") if c in df_pvals.columns]
+    tested = (
+        df_pvals[keys].drop_duplicates()
+        if len(keys) == 2
+        else pd.DataFrame(columns=["uniprot_id", "annotation_id"])
+    )
+    df_tested = rvas_df[rvas_df["uniprot_id"].isin(tested["uniprot_id"])]
+    n_ids = int(tested["annotation_id"].astype(str).str.count(r"\|").sum() + len(tested))
+    _track(
+        "Annotation test: proteins with at least one annotation built",
+        df_tested,
+        n_annotation_ids=n_ids,
+        no_annotations_left=len(set(uniprot_ids) - set(tested["uniprot_id"])),
+    )
+    not_expanded = ann_stats.get("not_expanded", {})
+    _track(
+        "Annotation test: annotations tested, identical footprints merged (FDR/FWER pool)",
+        df_tested,
+        n_nbhds=len(tested),
+        **(
+            {
+                "prots_not_expanded_no_structure": len(not_expanded),
+                "annotations_not_expanded_no_structure": sum(not_expanded.values()),
+            }
+            if not_expanded
+            else {}
+        ),
+    )
+    return df_pvals
 
 
 def read_table(path: Path) -> pd.DataFrame:

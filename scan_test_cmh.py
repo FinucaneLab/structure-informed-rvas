@@ -10,6 +10,8 @@ from scipy.sparse import csr_matrix
 
 from cmh import cmh_expected_variance, screen_and_exact_pvalues
 from empirical_fdr import compute_fdr
+from value_tracking import log_counts, record_skip, skip_reason, stats_fields
+from scan_test import _without_out_of_structure
 from logger_config import get_logger
 from utils import (DEFAULT_MIN_ALLELES, DEFAULT_SCREEN_CHI2, draw_stratified_null_cases,
                    get_adjacency_matrix, write_dataset)
@@ -229,11 +231,19 @@ def _filter_proteins(df_rvas, df_fdr_filter=None, min_alleles=DEFAULT_MIN_ALLELE
         (grouped["ac_case"] >= min_alleles)
         & (grouped["ac_control"] >= min_alleles)
     ].index.to_numpy()
+    log_counts(
+        f"Proteins with >= {min_alleles} case and control alleles",
+        df_rvas[df_rvas["uniprot_id"].isin(keep)],
+    )
 
     if df_fdr_filter is not None:
         keep = np.intersect1d(
             keep,
             df_fdr_filter["uniprot_id"].unique(),
+        )
+        log_counts(
+            "Restrict to --df-filter proteins",
+            df_rvas[df_rvas["uniprot_id"].isin(keep)],
         )
     return keep.tolist()
 
@@ -271,7 +281,10 @@ def scan_test_cmh(
     seed=1,
     alternative="greater",
     min_alleles=DEFAULT_MIN_ALLELES,
+    stats=None,
 ):
+    # `stats`: optional dict filled with why genes were skipped (see value_tracking).
+    stats = {} if stats is None else stats
     if fdr_only:
         df_results = compute_fdr(
             results_dir,
@@ -315,6 +328,10 @@ def scan_test_cmh(
         f"Selected {len(uniprot_ids)} proteins for stratified CMH analysis"
     )
 
+    scanned = []
+    # Residues --remove-nbhd dropped, per gene, as (uniprot_id, None, positions) so the
+    # scan's out-of-structure helper can subtract them from the counts.
+    conditioned_out = []
     for i, uniprot_id in enumerate(uniprot_ids, start=1):
         logger.info(
             f"CMH processing {uniprot_id} (protein {i} out of {len(uniprot_ids)})"
@@ -345,6 +362,7 @@ def scan_test_cmh(
                 # the counts, and this path builds its own per-residue matrices from df
                 # afterwards. The default scan masks instead, because its per-residue
                 # arrays are positional.
+                positions_before = set(df["aa_pos"])
                 df = _remove_neighborhood(
                     df,
                     adjacency_matrix,
@@ -352,6 +370,9 @@ def scan_test_cmh(
                              for c in entry),
                     uniprot_id,
                 )
+                removed = positions_before - set(df["aa_pos"])
+                if removed:
+                    conditioned_out.append((uniprot_id, None, sorted(removed)))
 
             # NOTE: unlike the default scan, this path does not drop variants whose
             # aa_pos falls outside the structure. get_stratified_case_ac_matrix
@@ -365,6 +386,7 @@ def scan_test_cmh(
                     f"{uniprot_id}: There must be at least {min_alleles} case and "
                     f"{min_alleles} control alleles. Skipping."
                 )
+                record_skip(stats, "too_few_alleles_after_conditioning", uniprot_id)
                 continue
 
             df_pvals, _ = compute_all_cmh_pvals(
@@ -387,15 +409,31 @@ def scan_test_cmh(
                 df_pvals,
                 pval_file,
             )
+            scanned.append(uniprot_id)
 
         except FileNotFoundError as exc:
             logger.error(f"{uniprot_id}: Required file not found - {exc}")
+            record_skip(stats, skip_reason(exc), uniprot_id)
         except (KeyError, ValueError, FloatingPointError) as exc:
             logger.error(f"{uniprot_id}: Invalid CMH input - {exc}")
+            record_skip(stats, skip_reason(exc), uniprot_id)
         except MemoryError as exc:
             logger.error(f"{uniprot_id}: Insufficient memory - {exc}")
+            record_skip(stats, skip_reason(exc), uniprot_id)
         except Exception as exc:
             logger.exception(f"{uniprot_id}: Unexpected CMH error - {exc}")
+            record_skip(stats, skip_reason(exc), uniprot_id)
+
+    # Whole residues are dropped by conditioning, so removing those positions from
+    # the full table reproduces exactly what was scanned.
+    df_full = df_rvas[df_rvas["uniprot_id"].isin(scanned)]
+    df_scanned = _without_out_of_structure(
+        df_full, [c for c in conditioned_out if c[0] in set(scanned)])
+    extra = stats_fields(stats, scanned)
+    if len(df_scanned) < len(df_full):
+        extra["variants_conditioned_out"] = len(df_full) - len(df_scanned)
+    log_counts("Scanned (skipped genes and --remove-nbhd variants removed)", df_scanned,
+               **extra)
 
     if not no_fdr:
         fdr_filter = df_fdr_filter
@@ -412,4 +450,9 @@ def scan_test_cmh(
             os.path.join(results_dir, fdr_file),
             sep="\t",
             index=False,
+        )
+        log_counts(
+            "Neighborhoods tested (FDR/FWER pool)",
+            df_scanned[df_scanned["uniprot_id"].isin(df_results["uniprot_id"])],
+            n_nbhds=len(df_results),
         )

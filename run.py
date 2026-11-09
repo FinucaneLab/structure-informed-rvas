@@ -9,6 +9,7 @@ from scan_test import scan_test
 from scan_test_cmh import scan_test_cmh, DEFAULT_SCREEN_CHI2
 from read_data import map_to_protein, filter_by_total_ac
 from logger_config import get_logger
+from value_tracking import log_counts, setup_value_tracking
 from scan_test import DEFAULT_MIN_RETAINED
 from utils import (DEFAULT_CONDITIONING_RADIUS, DEFAULT_MIN_ALLELES,
                    best_radius_for_hit, get_nbhd_info)
@@ -39,6 +40,14 @@ def map_and_filter_rvas(
         mu_file=None,
         delimiter='\t',
 ):
+    mutation_rate_mode = (mu_col is not None) or (mu_file is not None)
+
+    def _track(step, df):
+        # In mutation-rate mode the variant table's ac_case is the de novo count.
+        if df is not None and mutation_rate_mode and 'ac_case' in df.columns:
+            log_counts(step, df, n_denovo=int(df['ac_case'].sum()))
+        else:
+            log_counts(step, df)
 
     if pre_mapped_rvas is not None:
         logger.info(f"Loading pre-mapped RVAS dataframe from {pre_mapped_rvas}")
@@ -60,8 +69,9 @@ def map_and_filter_rvas(
     else:
         df_rvas = None
 
-
-    mutation_rate_mode = (mu_col is not None) or (mu_file is not None)
+    if pre_mapped_rvas is not None:
+        _track('Load pre-mapped RVAS data', df_rvas)
+    # (map_to_protein logs the input and mapping steps itself.)
 
     if df_rvas is not None and pre_mapped_rvas is None:
         # With a mutation-rate null there is no ac_control, so the max-AC filter
@@ -74,6 +84,9 @@ def map_and_filter_rvas(
                 ac_filter,
                 stratum_col=stratum_col,
             )
+        _track(f'Filter by case AC < {ac_filter} (mutation-rate mode)' if mutation_rate_mode
+               else f'Filter by total AC < {ac_filter}', df_rvas)
+
         if not dont_remove_common:
             logger.info("Removing common variants from RVAS data")
             keys = ['uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt']
@@ -86,6 +99,7 @@ def map_and_filter_rvas(
             df_rvas = df_rvas.set_index(keys)
             df_rvas = df_rvas[~df_rvas.index.isin(to_remove)]
             df_rvas = df_rvas.reset_index()
+            _track('Remove common variants', df_rvas)
 
         if not include_lcr:
             lcr_path = f'{reference_dir}/lcr_positions_uniprot.tsv'
@@ -102,6 +116,7 @@ def map_and_filter_rvas(
                 df_rvas = df_rvas.set_index(keys)
                 df_rvas = df_rvas[~df_rvas.index.isin(lcr_index)]
                 df_rvas = df_rvas.reset_index()
+                _track('Remove variants in low complexity regions', df_rvas)
 
     # Load FDR filter if provided
 
@@ -136,7 +151,8 @@ def map_and_filter_rvas(
     if uniprot_list is not None and df_rvas is not None and pre_mapped_rvas is None:
         df_filter_uniprot = pd.DataFrame({'uniprot_id': uniprot_list})
         df_rvas = pd.merge(df_rvas, df_filter_uniprot, on='uniprot_id', how='inner')
-    
+        _track('Restrict to requested proteins (--uniprot-id/--df-filter)', df_rvas)
+
     return df_rvas, df_filter
 
 
@@ -999,6 +1015,9 @@ if __name__ == '__main__':
                     f"--reference-dir {args.reference_dir}"
                 )
 
+    # Counts after every filtering step go to <results_dir>/value_tracking.log.
+    setup_value_tracking(args.results_dir, args.reference_dir, run_info={'seed': args.seed})
+
     df_rvas, df_filter = map_and_filter_rvas(
         args.rvas_data_to_map,
         args.pre_mapped_rvas,
@@ -1044,6 +1063,7 @@ if __name__ == '__main__':
                 permute_uniprot_ids = gene_sets[0].intersection(*gene_sets[1:])
                 df_rvas = df_rvas[df_rvas['uniprot_id'].isin(permute_uniprot_ids)].reset_index(drop=True)
                 logger.info(f"Restricting permutation to {len(permute_uniprot_ids)} genes from --permute-gene-filter")
+                log_counts('Restrict permutation to --permute-gene-filter genes', df_rvas)
             rng = np.random.default_rng()
             for uniprot, idx in df_rvas.groupby('uniprot_id').groups.items():
                 ac_case = df_rvas.loc[idx, 'ac_case'].values.astype(int)
@@ -1062,6 +1082,7 @@ if __name__ == '__main__':
             counts = df_rvas['Variant ID'].value_counts()
             df_rvas = df_rvas[df_rvas['Variant ID'].isin(counts[counts == 1].index)].reset_index(drop=True)
             logger.info(f"After removing multi-gene variants: {len(df_rvas)} variants")
+            log_counts('Remove variants in more than one gene (after permutation)', df_rvas)
         logger.info(f"Saving mapped RVAS dataframe to {args.save_df_rvas}")
         df_rvas.to_csv(args.save_df_rvas, sep='\t', index=False)
         did_nothing = False
@@ -1358,6 +1379,8 @@ if __name__ == '__main__':
             if args.simulate_null_from_mu:
                 df_rvas = simulate_null_input(df_rvas, mu_lookup, lambda_hat, args.seed)
                 lambda_hat = estimate_lambda(df_rvas, df_mu, args.rate_calibration, cal_genes, args.n_trios)
+                log_counts('Replace counts with a simulated null (--simulate-null-from-mu)',
+                           df_rvas, n_denovo=int(df_rvas['ac_case'].sum()))
             logger.info('Annotation test with a mutation-rate null; use a fresh results dir (shards of case/control runs would be reused)')
             mu_kwargs = dict(mu_lookup=mu_lookup, lambda_hat=lambda_hat,
                              min_denovo=args.min_denovo, direction=args.test_direction)
