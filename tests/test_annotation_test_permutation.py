@@ -35,6 +35,7 @@ from annotation_test_permutation import (
     protein_seed,
     read_per_protein_shards,
     read_shard,
+    shard_n_perm,
     run_annotation_test,
     summarize_annotation_test,
     wide_annotation_rows,
@@ -706,3 +707,14 @@ def test_shard_round_trip_and_old_format_still_readable():
             frame.to_parquet(old, index=False)  # pre-write_shard layout: one column per permutation
             pd.testing.assert_frame_equal(read_shard(new), frame)  # exact float round-trip
             pd.testing.assert_frame_equal(read_shard(old), frame)
+
+
+def test_shard_roundtrip_edge_cases(tmp_path):
+    frame = pd.DataFrame({"test": ["a", "b"], "null_pval_1": [0.2, 0.3], "null_pval_0": [0.1, 0.4]})
+    write_shard(frame, tmp_path / "s.parquet")  # reordered null columns are written in index order
+    out = read_shard(tmp_path / "s.parquet")
+    assert shard_n_perm(tmp_path / "s.parquet") == 2
+    assert out["null_pval_0"].tolist() == [0.1, 0.4]
+    write_shard(frame[["test"]], tmp_path / "z.parquet")  # n_perm=0
+    assert shard_n_perm(tmp_path / "z.parquet") == 0
+    assert not list(tmp_path.glob("*.tmp"))

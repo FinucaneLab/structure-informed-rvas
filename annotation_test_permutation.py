@@ -625,6 +625,7 @@ class NullPvalAccumulator:
         self.value_chunks: list[np.ndarray] = []
         self.count_chunks: list[np.ndarray] = []
         self.stored = 0
+        self.compact_at = self.max_chunk_len
         self.min_pvals_per_sim = np.ones(n_perm)
 
     def add(self, pvals_df: pd.DataFrame) -> None:
@@ -633,8 +634,10 @@ class NullPvalAccumulator:
         self.value_chunks.append(values)
         self.count_chunks.append(counts)
         self.stored += len(values)
-        if self.stored > self.max_chunk_len:
+        if self.stored > self.compact_at:
             self.compact()
+            # Relative to the compacted size, so a weakly-tied null doesn't re-compact on every protein.
+            self.compact_at = max(self.max_chunk_len, 2 * self.stored)
         self.min_pvals_per_sim = np.minimum(self.min_pvals_per_sim, null_arr.min(axis=0))
         self.obs_frames.append(pvals_df.drop(columns=self.null_cols))
 
@@ -691,11 +694,25 @@ def compute_global_fwer(df_pvals: pd.DataFrame, min_pvals_per_sim: np.ndarray) -
 def write_shard(df: pd.DataFrame, path: str | Path) -> None:
     """Write a per-protein frame, packing the null_pval_{i} columns into one fixed-size-list
     column (3-4x faster to write/read and half the size of 1000 separate columns)."""
-    null_cols = [c for c in df.columns if c.startswith("null_pval_")]
-    nulls = np.ascontiguousarray(df[null_cols].to_numpy(dtype=float))
+    path = Path(path)
+    # Numeric order: read_shard rebuilds the names as null_pval_0..n-1 by position.
+    null_cols = sorted((c for c in df.columns if c.startswith("null_pval_")), key=lambda c: int(c.rsplit("_", 1)[1]))
     table = pa.Table.from_pandas(df.drop(columns=null_cols), preserve_index=False)
-    packed = pa.FixedSizeListArray.from_arrays(pa.array(nulls.ravel()), len(null_cols))
-    pq.write_table(table.append_column("null_pvals", packed), path)
+    if null_cols:  # n_perm=0: nothing to pack (read_shard handles a shard without null_pvals)
+        nulls = np.ascontiguousarray(df[null_cols].to_numpy(dtype=float))
+        packed = pa.FixedSizeListArray.from_arrays(pa.array(nulls.ravel()), len(null_cols))
+        table = table.append_column("null_pvals", packed)
+    tmp = path.with_name(path.name + ".tmp")  # atomic: a crash never leaves a truncated shard
+    pq.write_table(table, tmp)
+    tmp.replace(path)
+
+
+def shard_n_perm(path: str | Path) -> int:
+    """Number of permutations stored in a shard, from the schema only (no data read)."""
+    schema = pq.read_schema(path)
+    if "null_pvals" in schema.names:
+        return schema.field("null_pvals").type.list_size
+    return sum(n.startswith("null_pval_") for n in schema.names)
 
 
 def read_shard(path: str | Path) -> pd.DataFrame:
@@ -1167,7 +1184,12 @@ def run_annotation_test(
     # an O(n_proteins * len(df)) full-table scan and dominates runtime on large tables.
     # ann_df is never copied (a wide table can be >10 GB): only row positions are kept.
     rvas_by_protein = dict(tuple(rvas_df.groupby("uniprot_id", sort=False)))
-    ann_rows = ann_df.groupby("uniprot_id", sort=False).indices
+    # Only tested proteins' rows are grouped, so untested rows cost nothing here.
+    tested_pos = np.flatnonzero(ann_tested.to_numpy())
+    ann_rows = {
+        uid: tested_pos[idx]
+        for uid, idx in pd.Series(tested_pos).groupby(ann_df["uniprot_id"].to_numpy()[tested_pos], sort=False).indices.items()
+    }
 
     shard_dir = results_dir / "per_protein"
     # Filled by process_protein (threads only add distinct keys). Proteins resumed
@@ -1178,9 +1200,8 @@ def run_annotation_test(
         shard = shard_dir / f"{uniprot_id}_annotation_pvals.parquet"
         # ponytail: only n_perm is checked; a changed seed/radius/annotation set in the same results_dir reuses stale shards - use a fresh results_dir
         if shard.exists():
-            cached = read_shard(shard)
-            if sum(c.startswith("null_pval_") for c in cached.columns) == n_perm:
-                return cached
+            if shard_n_perm(shard) == n_perm:
+                return read_shard(shard)
         return process_protein(
             uniprot_id,
             rvas_by_protein[uniprot_id],
