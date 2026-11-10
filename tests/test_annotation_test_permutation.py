@@ -34,9 +34,11 @@ from annotation_test_permutation import (
     expand_annotations_neighborhood,
     protein_seed,
     read_per_protein_shards,
+    read_shard,
     run_annotation_test,
     summarize_annotation_test,
     wide_annotation_rows,
+    write_shard,
 )
 # Imported under another name: pytest collects any module-level callable whose
 # name begins with test_, and this is a production function, not a unit test.
@@ -398,9 +400,9 @@ def test_resume_reuses_shards_only_when_n_perm_is_unchanged():
 
         # Mark P1's shard, so a reused shard is distinguishable from a fresh one.
         shard = Path(tmpdir) / "per_protein" / "P1_annotation_pvals.parquet"
-        s = pd.read_parquet(shard)
+        s = read_shard(shard)
         s["p_value"] = 0.123
-        s.to_parquet(shard, index=False)
+        write_shard(s, shard)
 
         res = run_annotation_test(rv, an, n_perm=5, **kw)
         assert (res.loc[res.uniprot_id == "P1", "p_value"] == 0.123).all()
@@ -693,3 +695,14 @@ def test_sparse_and_dense_label_matrices_give_equal_frames():
     mu = [run_protein_annotations_mu("P", _rvas_from_counts(x), m, meta, L, 20, 5.0, mu_lookup, seed=1) for m in (dense, sparse)]
     for a, b in (cc, cmh, mu):
         pd.testing.assert_frame_equal(a, b)
+
+
+def test_shard_round_trip_and_old_format_still_readable():
+    frames, _, _ = _protein_frames()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for i, frame in enumerate(frames):
+            new, old = Path(tmpdir) / f"new{i}.parquet", Path(tmpdir) / f"old{i}.parquet"
+            write_shard(frame, new)
+            frame.to_parquet(old, index=False)  # pre-write_shard layout: one column per permutation
+            pd.testing.assert_frame_equal(read_shard(new), frame)  # exact float round-trip
+            pd.testing.assert_frame_equal(read_shard(old), frame)
