@@ -1043,16 +1043,15 @@ def run_annotation_test(
         tested_proteins = set(filter_proteins_by_allele_count(rvas_df, min_alleles))
     uniprot_ids = sorted(tested_proteins & set(ann_df["uniprot_id"].unique()))
     
-    # Filter the dataframes to only include tested proteins.
     rvas_df = rvas_df[rvas_df["uniprot_id"].isin(uniprot_ids)]
-    ann_df = ann_df[ann_df["uniprot_id"].isin(uniprot_ids)]
 
     protein_lengths = load_protein_lengths(reference_dir) if reference_dir else {}
 
     # Group once up front - filtering each df with a `== uniprot_id` mask per protein is
     # an O(n_proteins * len(df)) full-table scan and dominates runtime on large tables.
+    # ann_df is never copied (a wide table can be >10 GB): only row positions are kept.
     rvas_by_protein = dict(tuple(rvas_df.groupby("uniprot_id", sort=False)))
-    ann_by_protein = dict(tuple(ann_df.groupby("uniprot_id", sort=False)))
+    ann_rows = ann_df.groupby("uniprot_id", sort=False).indices
 
     shard_dir = results_dir / "per_protein"
 
@@ -1066,7 +1065,7 @@ def run_annotation_test(
         return process_protein(
             uniprot_id,
             rvas_by_protein[uniprot_id],
-            ann_by_protein[uniprot_id],
+            ann_df.iloc[ann_rows[uniprot_id]],
             protein_lengths.get(uniprot_id),
             ann_format=ann_format,
             ann_include=ann_include,

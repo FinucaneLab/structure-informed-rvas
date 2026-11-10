@@ -630,3 +630,26 @@ if __name__ == '__main__':
     # nothing and the run prints ok and exits 0 having tested nothing.
     assert n_run > 0, 'the test_* scan matched nothing'
     print(f'ok ({n_run} tests)')
+
+
+# ---------------------------------------------------------------------------
+# ann_df is sliced by row position, never copied
+# ---------------------------------------------------------------------------
+
+def test_wide_input_order_and_untested_proteins_do_not_matter():
+    rv = pd.concat([_demo_rvas().assign(uniprot_id=u) for u in ("P1", "P2")])
+    wide = pd.concat(
+        [
+            pd.DataFrame({"uniprot_id": u, "aa_pos": range(1, 9), "cl": [1, 1, 2, 2, 3, 3, 4, 4]})
+            for u in ("P1", "P2", "P3")  # P3 has no rvas -> untested
+        ]
+    )
+    interleaved = wide.iloc[np.argsort(np.tile(np.arange(8), 3), kind="stable")]  # rows of P1,P2,P3 alternate
+    kw = dict(ann_format="wide", ann_id_columns=["*"], expand_include=[], n_perm=5, min_alleles=0, n_workers=1)
+    out = []
+    for ann in (wide, interleaved):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            res = run_annotation_test(rv, ann, results_dir=tmpdir, **kw)
+        out.append(res.sort_values(["uniprot_id", "annotation_id"]).reset_index(drop=True))
+    assert set(out[0].uniprot_id) == {"P1", "P2"}
+    pd.testing.assert_frame_equal(out[0], out[1])
