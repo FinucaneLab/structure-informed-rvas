@@ -13,6 +13,8 @@ from utils import (DEFAULT_MIN_ALLELES, DEFAULT_SCREEN_CHI2, SCREEN_CHI2_GREATER
                    build_conditioning_mask)
 from logger_config import get_logger
 from empirical_fdr import compute_fdr
+from value_tracking import (GeneSkipped, log_counts, record_neutralized, record_skip,
+                            skip_reason, stats_fields)
 
 logger = get_logger(__name__)
 
@@ -179,9 +181,10 @@ def _restrict_and_recheck(df, n_res, uniprot_id, out_of_structure, min_alleles):
         return df
     n_case, n_control = int(sum(df.ac_case)), int(sum(df.ac_control))
     if n_case < min_alleles or n_control < min_alleles:
-        raise ValueError(
+        raise GeneSkipped(
             f'only {n_case} case and {n_control} control alleles fall inside the '
-            f'structure (1..{n_res}), below --min-alleles {min_alleles}'
+            f'structure (1..{n_res}), below --min-alleles {min_alleles}',
+            'too_few_alleles_in_structure',
         )
     return df
 
@@ -218,9 +221,10 @@ def _refuse_if_nothing_testable(adj_by_radius, keep, min_retained, uniprot_id, n
         d = neutralized_positions(adj, keep, min_retained)
         dead = d if dead is None else (dead & d)
     if dead is not None and dead.all():
-        raise ValueError(
+        raise GeneSkipped(
             f'conditioning left no testable neighborhood in {uniprot_id}: all '
-            f'{n_res} centres lost more than their share of residues'
+            f'{n_res} centres lost more than their share of residues',
+            'nothing_testable_after_conditioning',
         )
 
 
@@ -239,6 +243,7 @@ def compute_all_pvals(
         min_alleles = DEFAULT_MIN_ALLELES,
         keep_residues = None,
         min_retained = DEFAULT_MIN_RETAINED,
+        stats = None,
 ):
     if radius in ('multiple-small', 'multiple-big'):
         radii = MULTI_RADII_SMALL if radius == 'multiple-small' else MULTI_RADII_BIG
@@ -330,6 +335,7 @@ def compute_all_pvals(
             f'{uniprot_id}: conditioning masks {int((~keep).sum())} of {n_res} '
             f'residues; {int(dead_all.sum())} centres not re-tested'
         )
+        record_neutralized(stats, uniprot_id, dead_all.sum())
 
     pval_columns = ['p_value'] + [f'null_pval_{i}' for i in range(n_sims)]
     df_pvals = pd.DataFrame(columns = pval_columns, data = pval_matrix)
@@ -355,7 +361,7 @@ def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir,
                           uniprot_id, radius, pae_cutoff, n_sims, pval_file, seed=None,
                           alternative='greater', out_of_structure=None,
                           min_alleles=DEFAULT_MIN_ALLELES, keep_residues=None,
-                          min_retained=DEFAULT_MIN_RETAINED):
+                          min_retained=DEFAULT_MIN_RETAINED, stats=None):
     df_pvals, adj_mat = compute_all_pvals(
         df,
         pdb_file_pos_guide,
@@ -371,6 +377,7 @@ def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir,
         min_alleles,
         keep_residues,
         min_retained,
+        stats,
     )
     write_df_pvals(results_dir, uniprot_id, df_pvals, pval_file)
 
@@ -400,9 +407,13 @@ def _filter_proteins_by_allele_count(df_rvas, df_fdr_filter, min_alleles=DEFAULT
     grouped = df_rvas.groupby('uniprot_id')[['ac_case', 'ac_control']].sum()
     ac_high_enough = grouped[(grouped['ac_case'] >= min_alleles) & (grouped['ac_control'] >= min_alleles)]
     uniprot_id_list = ac_high_enough.index.tolist()
-    
+    log_counts(f'Proteins with >= {min_alleles} case and control alleles',
+               df_rvas[df_rvas.uniprot_id.isin(uniprot_id_list)])
+
     if df_fdr_filter is not None:
         uniprot_id_list = np.intersect1d(uniprot_id_list, np.unique(df_fdr_filter.uniprot_id))
+        log_counts('Restrict to --df-filter proteins',
+                   df_rvas[df_rvas.uniprot_id.isin(uniprot_id_list)])
     
     logger.info(
         f"Selected {len(uniprot_id_list)} proteins for analysis "
@@ -414,11 +425,13 @@ def _filter_proteins_by_allele_count(df_rvas, df_fdr_filter, min_alleles=DEFAULT
 def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
                             results_dir, n_sims, conditioning, pval_file, seed=None,
                             alternative='greater', min_alleles=DEFAULT_MIN_ALLELES,
-                            min_retained=DEFAULT_MIN_RETAINED, seed_salt=None):
+                            min_retained=DEFAULT_MIN_RETAINED, seed_salt=None, stats=None):
     """Process each protein individually with scan test.
 
     Returns the list of (uniprot_id, n_res, dropped_positions) for proteins whose
     variants fell outside their structure, for the caller to report at the end.
+    `stats`, if a dict, collects why genes were skipped and how many centres
+    conditioning neutralized (see value_tracking).
     """
     out_of_structure = []
     # Which genes actually got written. A gene can be skipped here for several
@@ -465,6 +478,7 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
                     + f'. Skipping. (has {int(sum(df_effective.ac_case))} case, '
                     f'{int(sum(df_effective.ac_control))} control)'
                 )
+                record_skip(stats, 'too_few_alleles_after_conditioning', uniprot_id)
                 continue
             
             # Each protein gets its own derived stream. A single shared seed would
@@ -481,26 +495,39 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
                 df, pdb_file_pos_guide, pdb_dir, pae_dir, 
                 results_dir, uniprot_id, radius, pae_cutoff, n_sims,
                 pval_file, protein_seed, alternative, out_of_structure, min_alleles,
-                keep_residues, min_retained
+                keep_residues, min_retained, stats
             )
             scanned.add(uniprot_id)
         except FileNotFoundError as e:
             logger.error(f'{uniprot_id}: Required file not found - {e}')
+            record_skip(stats, skip_reason(e), uniprot_id)
             continue
         except KeyError as e:
             logger.error(f'{uniprot_id}: Missing required column or key - {e}')
+            record_skip(stats, skip_reason(e), uniprot_id)
             continue
         except ValueError as e:
             logger.error(f'{uniprot_id}: Invalid data or parameter - {e}')
+            record_skip(stats, skip_reason(e), uniprot_id)
             continue
         except MemoryError as e:
             logger.error(f'{uniprot_id}: Insufficient memory for processing - {e}')
+            record_skip(stats, skip_reason(e), uniprot_id)
             continue
         except Exception as e:
             logger.error(f'{uniprot_id}: Unexpected error - {e}')
+            record_skip(stats, skip_reason(e), uniprot_id)
             continue
 
     return out_of_structure, scanned
+
+
+def _without_out_of_structure(df, out_of_structure):
+    """df minus the variants restrict_to_structure dropped, for value tracking."""
+    dropped = {(u, int(p)) for u, _, positions in out_of_structure for p in positions}
+    if not dropped:
+        return df
+    return df[[(u, int(p)) not in dropped for u, p in zip(df.uniprot_id, df.aa_pos)]]
 
 
 def _report_out_of_structure(out_of_structure):
@@ -551,9 +578,14 @@ def scan_test(
     min_retained=DEFAULT_MIN_RETAINED,
     requested=None,
     seed_salt=None,
+    stats=None,
 ):
     """
     Perform scan test analysis on protein structure data.
+
+    `stats`: optional dict the scan fills with why genes were skipped and how many
+    centres conditioning neutralized -- for a caller (the conditional rounds) that
+    needs those after the scan's own count lines have been muted.
 
     `conditioning` maps uniprot_id to what should be masked out of that gene before
     it is re-scanned -- either [(aa_pos, radius), ...] or an explicit residue list.
@@ -567,6 +599,8 @@ def scan_test(
     Processes variants across proteins and computes statistical associations with 3D neighborhoods.
     """
     
+    stats = {} if stats is None else stats
+
     # Handle FDR-only mode
     if fdr_only:
         df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file)
@@ -578,18 +612,30 @@ def scan_test(
 
     # Preprocess data
     df_processed = _preprocess_scan_data(df_rvas, ignore_ac)
-    
+    if ignore_ac:
+        log_counts('Remove variants with more than one allele (--ignore-ac)', df_processed)
+
     # Filter proteins by allele count
     uniprot_id_list = _filter_proteins_by_allele_count(df_processed, df_fdr_filter, min_alleles)
     if requested is not None:
         uniprot_id_list = [u for u in uniprot_id_list if u in set(requested)]
-    
+        log_counts('Restrict to requested genes',
+                   df_processed[df_processed.uniprot_id.isin(uniprot_id_list)])
+
     # Process each protein
     out_of_structure, scanned = _process_proteins_batch(
         df_processed, uniprot_id_list, reference_dir,
         radius, pae_cutoff, results_dir, n_sims, conditioning,
-        pval_file, seed, alternative, min_alleles, min_retained, seed_salt
+        pval_file, seed, alternative, min_alleles, min_retained, seed_salt,
+        stats=stats,
     )
+
+    # Variants outside their structure were dropped from the scan, so they are not
+    # counted as scanned either.
+    df_scanned = _without_out_of_structure(
+        df_processed[df_processed.uniprot_id.isin(scanned)], out_of_structure)
+    log_counts('Scanned (skipped genes and out-of-structure variants removed)', df_scanned,
+               **stats_fields(stats, scanned))
 
     skipped = [u for u in uniprot_id_list if u not in scanned]
     if skipped:
@@ -627,6 +673,9 @@ def scan_test(
                 fdr_filter = df_fdr_filter[df_fdr_filter.uniprot_id.isin(scanned)]
             df_results = compute_fdr(results_dir, fdr_cutoff, fdr_filter, reference_dir, pval_file)
             df_results.to_csv(f'{results_dir}/{fdr_file}', sep='\t', index=False)
+            log_counts('Neighborhoods tested (FDR/FWER pool)',
+                       df_scanned[df_scanned.uniprot_id.isin(df_results.uniprot_id)],
+                       n_nbhds=len(df_results))
     finally:
         _report_out_of_structure(out_of_structure)
 

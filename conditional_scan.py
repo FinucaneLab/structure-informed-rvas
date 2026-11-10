@@ -58,6 +58,7 @@ from collections import namedtuple
 import pandas as pd
 
 from logger_config import get_logger
+from value_tracking import log_counts, paused, stats_fields
 from utils import parse_pymol_positions, positions_to_pymol_notation
 from components import components_for_genes, top_component
 from empirical_fdr import compute_fdr
@@ -172,6 +173,13 @@ def _drop_failed_rescans(active, scanned, round_filter, round_idx):
     if not kept:
         logger.info(f'Round {round_idx}: no gene was successfully re-scanned; stopping')
     return kept, round_filter[~round_filter['uniprot_id'].isin(failed)]
+
+
+def _track_round(round_idx, what, genes, **extra):
+    """Value-tracking line for the conditional funnel: genes only, since variant and
+    neighborhood counts do not change between rounds -- residues are masked instead."""
+    log_counts(f'Conditional round {round_idx}: {what}', uniprot_ids=genes,
+               nbhd_bound=False, round=round_idx, **extra)
 
 
 def _genes_passing_gate(df_results, active_genes, gate_col, gate_cutoff):
@@ -361,6 +369,7 @@ def conditional_scan(
     gated = _genes_passing_gate(df_results, analysis_genes, gate_col, gate_cutoff)
     logger.info(f'Round 0: {len(gated)} genes pass the gene gate '
                 f'({gate_col} < {gate_cutoff})')
+    _track_round(0, f'genes passing the gene gate ({gate_col} < {gate_cutoff})', gated)
     comps = _components(df_results, gated, 0)
 
     # radius_cols[0] is the column this mode's results carry the chosen radius in
@@ -406,6 +415,7 @@ def conditional_scan(
     # had a first one. Rounds >= 1 have always filtered to `kept` this way; round 0 did
     # not, which left the guard stopping the report but not the masking it names.
     # An empty frame has no uniprot_id column to filter on, so it passes through.
+    _track_round(0, 'genes with an accepted signal', accepted)
     hits = comps[comps.uniprot_id.isin(accepted)] if len(comps) else comps
     component_tables.append(hits)
     active = sorted(set(hits['uniprot_id'])) if len(hits) else []
@@ -460,6 +470,9 @@ def conditional_scan(
             # that carried signal). That was judged the lesser evil against correcting
             # against values drawn under the wrong mask. See the module docstring.
             round_filter = round_filter[~round_filter['uniprot_id'].isin(drop)]
+        if exhausted:
+            _track_round(round_idx, 'genes left after dropping those with too few '
+                         'de novos/alleles left', active, dropped=len(exhausted))
         if not active:
             logger.info(f'No genes left with testable signal; stopping after round '
                         f'{round_idx - 1}')
@@ -489,17 +502,30 @@ def conditional_scan(
         logger.info(f'Conditional analysis, round {round_idx}: re-scanning '
                     f'{len(active)} genes, masking '
                     f'{sum(len(conditioning[g]) for g in active)} residues in total')
+        _track_round(round_idx, 'genes re-scanned', active,
+                     masked_residues=sum(len(conditioning[g]) for g in active))
+        n_rescanned = len(active)
+        # Filled by the re-scan with skip reasons and neutralized centres: its own
+        # count lines are muted, so this is how they reach the round lines.
+        round_stats = {}
 
+        # The re-scans re-run gene selection on the full input; their count lines
+        # would repeat the input funnel every round, so only the round lines are kept.
         if mutation_rate_mode:
-            round_totals = mutation_rate_scan_test(
-                df_rvas, reference_dir, radius, pae_cutoff, results_dir, n_sims,
-                True, False, fdr_cutoff, df_filter, round_fdr_file, current_pval_file,
-                conditioning=conditioning, min_retained=min_retained,
-                seed_salt=round_idx, requested=active, **mu_kwargs
-            )
+            with paused():
+                round_totals = mutation_rate_scan_test(
+                    df_rvas, reference_dir, radius, pae_cutoff, results_dir, n_sims,
+                    True, False, fdr_cutoff, df_filter, round_fdr_file, current_pval_file,
+                    conditioning=conditioning, min_retained=min_retained,
+                    seed_salt=round_idx, requested=active, stats=round_stats,
+                    **mu_kwargs
+                )
             # gene_totals is keyed by the genes actually re-scanned.
             active, round_filter = _drop_failed_rescans(
                 active, set(round_totals or {}), round_filter, round_idx)
+            _track_round(round_idx, 'genes re-scanned successfully', active,
+                         failed=n_rescanned - len(active),
+                         **stats_fields(round_stats, active))
             if not active:
                 break
             df_results = _compute_both_fdrs(results_dir, fdr_cutoff, round_filter,
@@ -516,15 +542,20 @@ def conditional_scan(
                 known_totals = df_results[['uniprot_id'] + list(TOTAL_COLUMNS)] \
                     .drop_duplicates(subset='uniprot_id')
         else:
-            scanned = scan_test(
-                df_rvas, reference_dir, radius, pae_cutoff, results_dir, n_sims,
-                True, False, fdr_cutoff, df_filter, ignore_ac, round_fdr_file,
-                current_pval_file, conditioning=conditioning, seed=seed,
-                alternative=alternative, min_retained=min_retained,
-                seed_salt=round_idx, requested=active, min_alleles=min_alleles,
-            )
+            with paused():
+                scanned = scan_test(
+                    df_rvas, reference_dir, radius, pae_cutoff, results_dir, n_sims,
+                    True, False, fdr_cutoff, df_filter, ignore_ac, round_fdr_file,
+                    current_pval_file, conditioning=conditioning, seed=seed,
+                    alternative=alternative, min_retained=min_retained,
+                    seed_salt=round_idx, requested=active, min_alleles=min_alleles,
+                    stats=round_stats,
+                )
             active, round_filter = _drop_failed_rescans(
                 active, scanned, round_filter, round_idx)
+            _track_round(round_idx, 'genes re-scanned successfully', active,
+                         failed=n_rescanned - len(active),
+                         **stats_fields(round_stats, active))
             if not active:
                 break
             df_results = compute_fdr(results_dir, fdr_cutoff, round_filter,
@@ -535,6 +566,8 @@ def conditional_scan(
         # Re-apply the gene gate each round: a gene continues only on fresh
         # FWER-strength evidence, not on an FDR-level remnant of what was masked.
         gated = _genes_passing_gate(df_results, active, gate_col, gate_cutoff)
+        _track_round(round_idx, f'genes passing the gene gate ({gate_col} < {gate_cutoff})',
+                     gated)
         comps = _components(df_results, gated, round_idx)
 
         # A gene whose re-scan failed keeps the previous round's datasets in the copied
@@ -578,6 +611,7 @@ def conditional_scan(
         hits = comps[comps.uniprot_id.isin(kept)] if len(comps) else comps
         logger.info(f'Round {round_idx}: {len(kept)} genes with a further independent '
                     f'component at {gate_col} < {gate_cutoff}')
+        _track_round(round_idx, 'genes with a further independent signal', kept)
         active = kept
     else:
         if active:

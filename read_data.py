@@ -3,6 +3,7 @@ import numpy as np
 import h5py
 import hdf5plugin
 from logger_config import get_logger
+from value_tracking import log_counts
 
 logger = get_logger(__name__)
 
@@ -12,7 +13,7 @@ def load_ref_for_chrom(path, chrom, pos_filter):
             chrom_names = list(f.keys())
             chrom_names = set(chrom.split('_')[0] for chrom in chrom_names)
             chrom_names = ', '.join(sorted(chrom_names))
-            logger.error(f'Chromosome {chrom} not found in reference. Chromosomes in reference: {chrom_names}.')
+            logger.warning(f'Chromosome {chrom} not found in reference.')
             return None
             
         ref_alt = f[f'{chrom}_ref_alt'][:]
@@ -183,6 +184,16 @@ def map_to_protein(
     if not mutation_rate_mode and 'ac_control' not in rvas_data:
         rvas_data.rename( {identify_column('control'): 'ac_control'}, axis=1, inplace=True)
 
+    def _track(step, df):
+        # Rows can be variant x stratum on input and variant x protein after the
+        # join, so the distinct variant count is logged alongside.
+        extra = {'n_variant_ids': int(df['Variant ID'].nunique())}
+        if mutation_rate_mode and 'ac_case' in df.columns:
+            extra['n_denovo'] = int(df['ac_case'].sum())
+        log_counts(step, df, **extra)
+
+    _track('Input RVAS data', rvas_data)
+
     if mu_col is not None:
         if 'mu' not in rvas_data:
             raise Exception(f'Mutation rate column "{mu_col}" not found in {rvas_path}.')
@@ -191,8 +202,12 @@ def map_to_protein(
         if n_bad:
             logger.warning(f'Dropping {n_bad} variants with a non-numeric mutation rate.')
             rvas_data = rvas_data[rvas_data['mu'].notna()]
+            _track('Remove variants with a non-numeric mutation rate (--mu-col)', rvas_data)
     # join to reference variants and identify relevant proteins
     result = []
+    # With --mu-file, mapped rows are dropped again for lacking a rate; the
+    # pre-drop rows are kept (key columns only) so the two steps log separately.
+    mapped_before_mu = []
     n_mapped_total = 0
     n_mu_missing_total = 0
     ref_path = f'{reference_directory}/all_missense_variants_gr38.h5'
@@ -203,6 +218,7 @@ def map_to_protein(
         joined = rvas_data_by_chr.join(ref, on='Variant ID', how='inner', rsuffix='_ref')
 
         if mu_file is not None:
+            mapped_before_mu.append(joined[['Variant ID', 'uniprot_id', 'aa_pos', 'ac_case']])
             df_mu = load_mu_for_chrom(mu_file, chrom, rvas_data_by_chr['pos'])
             if df_mu is None:
                 continue
@@ -210,10 +226,6 @@ def map_to_protein(
             joined = joined.join(df_mu, on='Variant ID', how='left')
             n_missing = int(joined['mu'].isna().sum())
             if n_missing:
-                logger.info(
-                    f'{chrom}: {n_missing} of {n_before} mapped variants '
-                    f'({100 * n_missing / max(n_before, 1):.1f}%) have no mutation rate; dropping.'
-                )
                 joined = joined[joined['mu'].notna()]
             n_mapped_total += n_before
             n_mu_missing_total += n_missing
@@ -231,12 +243,6 @@ def map_to_protein(
         joined = joined[cols]
         result.append(joined)
 
-    if mu_file is not None and n_mapped_total > 0:
-        logger.info(
-            f'Mutation rate join: {n_mapped_total - n_mu_missing_total} of {n_mapped_total} '
-            f'mapped variants ({100 * (1 - n_mu_missing_total / n_mapped_total):.1f}%) '
-            f'have a rate.'
-        )
 
     if len(result) > 0 and result[0].shape[0] == 0:
         logger.warning('Could not identify proteins.')
@@ -244,6 +250,12 @@ def map_to_protein(
             logger.warning(f'Does variant id have the same format? Rvas_data: {rvas_data["Variant ID"].iloc[0]}, reference data: {rvas_data_by_chr.index[0]}')
 
     result = pd.concat(result)
+    if mu_file is not None:
+        if mapped_before_mu:
+            _track('Join to missense reference',pd.concat(mapped_before_mu))
+        _track('Remove mapped variants with no mutation rate', result)
+    else:
+        _track('Join to missense reference', result)
     return result
 
 
