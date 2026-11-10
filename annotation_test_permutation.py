@@ -243,37 +243,51 @@ def convert_wide_annotations_to_binary_matrix(
     radii = ann_df["radius"].to_numpy() if "radius" in ann_df.columns else np.full(len(ann_df), np.nan)
     positions = ann_df["aa_pos"].to_numpy(dtype=np.int64) - 1
 
-    label_binary_matrix, row_meta, row_radii = [], {}, {}
+    row_positions, row_meta, row_radii = [], {}, {}
     signature_to_row_idx = {}
     for col in ann_id_columns:
         not_na = ann_df[col].notna().to_numpy()
         col_values = ann_df[col].to_numpy()[not_na]
         col_positions = positions[not_na]
-        col_radii = radii[not_na]
+        if len(col_values) == 0:
+            continue
         # Group by both annotation value and radius; this supports radius changes along
         # a wide-format annotation column without merging distinct expansion definitions.
-        grouping = pd.DataFrame({"value": col_values, "position": col_positions, "radius": col_radii})
-        for (value, radius_value), grp in grouping.groupby(["value", "radius"], sort=False, dropna=False):
-            signature = tuple(np.unique(grp["position"].to_numpy(dtype=np.int64)).tolist())
-            if not signature:
-                continue
-            radius = None if pd.isna(radius_value) else float(radius_value)
+        codes, uniques = pd.factorize(col_values)
+        radius_codes, radius_uniques = pd.factorize(radii[not_na])  # NaN -> -1, its own group
+        n_radius = len(radius_uniques) + 1
+        key = codes.astype(np.int64) * n_radius + radius_codes + 1
+        # sorted unique positions per group, vectorised over all groups of this column
+        order = np.lexsort((col_positions, key))
+        sorted_key, sorted_pos = key[order], col_positions[order]
+        keep = np.ones(len(order), dtype=bool)
+        keep[1:] = (sorted_key[1:] != sorted_key[:-1]) | (sorted_pos[1:] != sorted_pos[:-1])
+        sorted_key, sorted_pos = sorted_key[keep], sorted_pos[keep]
+        starts = np.flatnonzero(np.r_[True, sorted_key[1:] != sorted_key[:-1]])
+        group_positions = np.split(sorted_pos, starts[1:])
+        group_keys = sorted_key[starts]
+        _, first_seen = np.unique(key, return_index=True)  # same (sorted-key) order as group_keys
+        for g in np.argsort(first_seen):  # first-appearance order, like groupby(sort=False)
+            group_code, radius_code = divmod(int(group_keys[g]), n_radius)
+            radius = None if radius_code == 0 else float(radius_uniques[radius_code - 1])
+            value = uniques[group_code]
             ann_id = str(value) if single_column else f"{col}_{value}"
-            key = (signature, radius)
-            existing_idx = signature_to_row_idx.get(key)
+            signature = group_positions[g]
+            sig_key = (signature.tobytes(), radius)
+            existing_idx = signature_to_row_idx.get(sig_key)
             if existing_idx is None:
-                row = np.zeros(seq_len, dtype=np.uint8)
-                valid_positions = [p for p in signature if 0 <= p < seq_len]
-                row[valid_positions] = 1
-                row_idx = len(label_binary_matrix)
-                label_binary_matrix.append(row)
+                row_idx = len(row_positions)
+                row_positions.append(signature[(signature >= 0) & (signature < seq_len)])
                 row_meta[row_idx] = [ann_id]
                 row_radii[row_idx] = radius
-                signature_to_row_idx[key] = row_idx
+                signature_to_row_idx[sig_key] = row_idx
             else:
                 row_meta[existing_idx].append(ann_id)
 
-    result = (np.array(label_binary_matrix, dtype=np.uint8), row_meta, row_radii)
+    label_binary_matrix = np.zeros((len(row_positions), seq_len), dtype=np.uint8)
+    for i, row_pos in enumerate(row_positions):
+        label_binary_matrix[i, row_pos] = 1
+    result = (label_binary_matrix, row_meta, row_radii)
     return result if return_radii else result[:2]
 
 
