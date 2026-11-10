@@ -13,7 +13,7 @@ def load_ref_for_chrom(path, chrom, pos_filter):
             chrom_names = list(f.keys())
             chrom_names = set(chrom.split('_')[0] for chrom in chrom_names)
             chrom_names = ', '.join(sorted(chrom_names))
-            logger.error(f'Chromosome {chrom} not found in reference. Chromosomes in reference: {chrom_names}.')
+            logger.warning(f'Chromosome {chrom} not found in reference.')
             return None
             
         ref_alt = f[f'{chrom}_ref_alt'][:]
@@ -202,7 +202,7 @@ def map_to_protein(
         if n_bad:
             logger.warning(f'Dropping {n_bad} variants with a non-numeric mutation rate.')
             rvas_data = rvas_data[rvas_data['mu'].notna()]
-            _track('Drop variants with a non-numeric mutation rate (--mu-col)', rvas_data)
+            _track('Remove variants with a non-numeric mutation rate (--mu-col)', rvas_data)
     # join to reference variants and identify relevant proteins
     result = []
     # With --mu-file, mapped rows are dropped again for lacking a rate; the
@@ -226,10 +226,6 @@ def map_to_protein(
             joined = joined.join(df_mu, on='Variant ID', how='left')
             n_missing = int(joined['mu'].isna().sum())
             if n_missing:
-                logger.info(
-                    f'{chrom}: {n_missing} of {n_before} mapped variants '
-                    f'({100 * n_missing / max(n_before, 1):.1f}%) have no mutation rate; dropping.'
-                )
                 joined = joined[joined['mu'].notna()]
             n_mapped_total += n_before
             n_mu_missing_total += n_missing
@@ -247,12 +243,6 @@ def map_to_protein(
         joined = joined[cols]
         result.append(joined)
 
-    if mu_file is not None and n_mapped_total > 0:
-        logger.info(
-            f'Mutation rate join: {n_mapped_total - n_mu_missing_total} of {n_mapped_total} '
-            f'mapped variants ({100 * (1 - n_mu_missing_total / n_mapped_total):.1f}%) '
-            f'have a rate.'
-        )
 
     if len(result) > 0 and result[0].shape[0] == 0:
         logger.warning('Could not identify proteins.')
@@ -262,11 +252,10 @@ def map_to_protein(
     result = pd.concat(result)
     if mu_file is not None:
         if mapped_before_mu:
-            _track('Join to missense reference (rows are variant x protein)',
-                   pd.concat(mapped_before_mu))
-        _track('Drop mapped variants with no mutation rate (--mu-file)', result)
+            _track('Join to missense reference',pd.concat(mapped_before_mu))
+        _track('Remove mapped variants with no mutation rate', result)
     else:
-        _track('Join to missense reference (rows are variant x protein)', result)
+        _track('Join to missense reference', result)
     return result
 
 

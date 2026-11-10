@@ -77,13 +77,6 @@ def setup_value_tracking(results_dir, reference_dir=None, run_info=None):
         else:
             logger.warning(f'{guide} not found; nbhds<= upper bounds will be omitted')
 
-    logger.info('=' * 60)
-    header = f'[run] {datetime.now().isoformat(timespec="seconds")} {" ".join(sys.argv)}'
-    if run_info:
-        header += ' | ' + ' '.join(f'{k}={v}' for k, v in run_info.items())
-    logger.info(header)
-
-
 @contextmanager
 def paused():
     """Suppress count lines inside the block -- e.g. the conditional re-scans, whose
@@ -124,17 +117,13 @@ def log_counts(step, df=None, uniprot_ids=None, n_nbhds=None, nbhd_bound=True, *
             uniprot_ids = df['uniprot_id'].unique()
     if uniprot_ids is not None:
         uniprot_ids = set(uniprot_ids)
-    if n_nbhds is not None:
-        counts['nbhds'] = int(n_nbhds)
-    elif nbhd_bound and uniprot_ids is not None and _seq_len:
-        counts['nbhds_max'] = int(sum(_seq_len.get(u, 0) for u in uniprot_ids))
     if uniprot_ids is not None:
         counts['prots'] = len(uniprot_ids)
     counts.update(extra)
     if not counts:
         return
     body = ' '.join(
-        f'{"nbhds<" if k == "nbhds_max" else k}={_fmt(v)}' for k, v in counts.items()
+        f'{k}={_fmt(v)}' for k, v in counts.items()
     )
     logger.info(f'[counts] {step} | {body}', extra={'counts': counts, 'step': step})
 

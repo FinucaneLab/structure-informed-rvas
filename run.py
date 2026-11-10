@@ -84,11 +84,10 @@ def map_and_filter_rvas(
                 ac_filter,
                 stratum_col=stratum_col,
             )
-        _track(f'Filter by case AC < {ac_filter} (mutation-rate mode)' if mutation_rate_mode
-               else f'Filter by total AC < {ac_filter}', df_rvas)
+        _track(f'Remove variants with AC >= {ac_filter} in input' if mutation_rate_mode
+               else f'Remove variants with AC >= {ac_filter} in input', df_rvas)
 
         if not dont_remove_common:
-            logger.info("Removing common variants from RVAS data")
             keys = ['uniprot_id', 'aa_pos', 'aa_ref', 'aa_alt']
             df_common_var = pd.read_csv(
                 f'{reference_dir}/common_variants_uniprot.tsv',
@@ -99,7 +98,7 @@ def map_and_filter_rvas(
             df_rvas = df_rvas.set_index(keys)
             df_rvas = df_rvas[~df_rvas.index.isin(to_remove)]
             df_rvas = df_rvas.reset_index()
-            _track('Remove common variants', df_rvas)
+            _track('Remove variants common in gnomAD', df_rvas)
 
         if not include_lcr:
             lcr_path = f'{reference_dir}/lcr_positions_uniprot.tsv'
@@ -109,7 +108,6 @@ def map_and_filter_rvas(
                     "Skipping LCR filter. To suppress this warning, pass --include-lcr."
                 )
             else:
-                logger.info("Removing variants in low complexity regions")
                 keys = ['uniprot_id', 'aa_pos']
                 df_lcr = pd.read_csv(lcr_path, sep='\t', usecols=keys)
                 lcr_index = df_lcr.set_index(keys).index
@@ -1226,7 +1224,6 @@ if __name__ == '__main__':
 
     elif args.run_3dnt and mutation_rate_mode:
         wrote_results = True
-        logger.info("Starting scan test analysis with a mutation-rate null")
         from mutation_rate_test import mutation_rate_scan_test
         mutation_rate_scan_test(
             df_rvas,

@@ -64,8 +64,6 @@ def load_mu_per_residue(path):
             f'  python precompute_mu_per_residue.py --reference-dir <REFERENCE_DIR>'
         )
     df_mu = pd.read_parquet(path)
-    logger.info(f'Loaded per-residue mutation rates: {len(df_mu)} residues across '
-                f'{df_mu.uniprot_id.nunique()} genes from {os.path.basename(path)}')
     return df_mu
 
 
@@ -146,11 +144,7 @@ def estimate_lambda(df_rvas, df_mu, rate_calibration, calibration_genes=None, n_
         raise ValueError('Total mutation rate over the calibration set is zero; cannot estimate lambda_hat.')
 
     lambda_hat = sum_x / sum_mu
-    logger.info(
-        f'lambda_hat = {lambda_hat:.6g}  '
-        f'(sum_x = {sum_x:.0f} de novos, sum_mu = {sum_mu:.6g} over all possible '
-        f'missense variants in {len(genes)} genes)'
-    )
+
     if n_trios is not None and n_trios > 0:
         # lambda_hat itself is not interpretable when the rate model is relative (as
         # Roulette's is), so check the quantity that is: de novo missense per trio.
@@ -509,27 +503,8 @@ def _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage
     """
     grouped = df_rvas.groupby('uniprot_id')['ac_case'].sum()
     uniprot_id_list = grouped[grouped >= min_denovo].index.tolist()
-    _track_genes(f'Genes with >= {min_denovo} de novos', df_rvas, uniprot_id_list,
+    _track_genes(f'Remove genes with < {min_denovo} de novos', df_rvas, uniprot_id_list,
                  mu_lookup, nbhd_bound)
-
-    # A gene is only testable if it carries a nonzero total mutation rate. Genes with
-    # rows in the table but zero total rate are those the rate model does not cover at
-    # all -- the Roulette file is autosomes only, so every chrX gene lands here.
-    missing = [u for u in uniprot_id_list if u not in mu_lookup]
-    zero_rate = [u for u in uniprot_id_list
-                 if u in mu_lookup and mu_lookup[u][1].sum() <= 0]
-    if missing:
-        logger.warning(f'{len(missing)} genes are absent from the rate table and are skipped')
-    if zero_rate:
-        logger.warning(
-            f'{len(zero_rate)} genes have zero total mutation rate and are skipped. The '
-            'Roulette rate file covers autosomes only, so chrX genes cannot be tested '
-            'with it; supply a rate file with chrX to include them.'
-        )
-    skip = set(missing) | set(zero_rate)
-    uniprot_id_list = [u for u in uniprot_id_list if u not in skip]
-    _track_genes('Drop genes missing from the rate table or with zero total rate',
-                 df_rvas, uniprot_id_list, mu_lookup, nbhd_bound)
 
     # Rate-table coverage costs power rather than biasing the tests -- a variant's de novo
     # count and its rate are dropped together, so x_j and m_j stay on the same variant set
@@ -547,7 +522,7 @@ def _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage
         if low:
             logger.info(f'{len(low)} genes have mu_coverage < {min_mu_coverage} and are skipped')
             uniprot_id_list = [u for u in uniprot_id_list if u not in set(low)]
-        _track_genes(f'Drop genes with mu_coverage < {min_mu_coverage}',
+        _track_genes(f'Remove genes with mu_coverage < {min_mu_coverage}',
                      df_rvas, uniprot_id_list, mu_lookup, nbhd_bound)
 
     if df_fdr_filter is not None:
@@ -555,10 +530,6 @@ def _select_genes(df_rvas, df_fdr_filter, min_denovo, mu_lookup, min_mu_coverage
         _track_genes('Restrict to --df-filter genes', df_rvas, uniprot_id_list,
                      mu_lookup, nbhd_bound)
 
-    logger.info(
-        f'Selected {len(uniprot_id_list)} of {len(grouped)} genes for analysis '
-        f'(at least {min_denovo} de novos each)'
-    )
     return uniprot_id_list
 
 
@@ -592,13 +563,8 @@ def _process_proteins_batch_mu(df_rvas, uniprot_id_list, reference_dir, radius, 
     if max_residues is not None:
         too_big = [u for u in uniprot_id_list if struct_len.get(u, 0) > max_residues]
         if too_big:
-            logger.warning(
-                f'{len(too_big)} proteins exceed --max-residues {max_residues} and are '
-                f'skipped (the distance matrix scales as n_res^2): '
-                f'{", ".join(sorted(too_big)[:10])}'
-            )
             uniprot_id_list = [u for u in uniprot_id_list if u not in set(too_big)]
-        _track_genes(f'Drop proteins longer than --max-residues {max_residues}',
+        _track_genes(f'Remove proteins longer than --max-residues {max_residues}',
                      df_rvas, uniprot_id_list, mu_lookup)
 
     if out_of_structure is None:
@@ -783,8 +749,6 @@ def mutation_rate_scan_test(
         # caller can iterate the result of every exit path.
         return {}
 
-    logger.info(f'Input dataset contains {len(df_rvas)} variants across '
-                f'{df_rvas["uniprot_id"].nunique()} proteins')
     if direction == 'depletion':
         logger.info('Testing DEPLETION: lower-tail p-values, i.e. fewer variants in the '
                     'neighborhood than the mutation rate predicts.')

@@ -613,7 +613,7 @@ def scan_test(
     # Preprocess data
     df_processed = _preprocess_scan_data(df_rvas, ignore_ac)
     if ignore_ac:
-        log_counts('Drop variants with more than one allele (--ignore-ac)', df_processed)
+        log_counts('Remove variants with more than one allele (--ignore-ac)', df_processed)
 
     # Filter proteins by allele count
     uniprot_id_list = _filter_proteins_by_allele_count(df_processed, df_fdr_filter, min_alleles)
