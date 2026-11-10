@@ -378,17 +378,17 @@ def test_protein_annotations(
     case_ac_matrix, ctrl_ac_matrix = get_case_control_ac_matrix(
         prot_rvas_df, n_res=seq_len, n_sim=n_perm, seed=protein_seed(uniprot_id, seed)
     )
-    case_ac_matrix = case_ac_matrix.astype(int)
-    ctrl_ac_matrix = ctrl_ac_matrix.astype(int)
 
-    # only residues with alleles matter; sparse int8 labels avoid numpy's slow integer matmul
+    # only residues with alleles matter; cast after trimming so the int64 copy is only of those rows
     cols = np.flatnonzero(case_ac_matrix.sum(1) + ctrl_ac_matrix.sum(1))
-    labels = csr_matrix(label_matrix[:, cols].astype(np.int8))
-    ac_in_case = np.asarray(labels @ case_ac_matrix[cols])  # (n_annotations, 1 + n_perm)
-    ac_in_ctrl = np.asarray(labels @ ctrl_ac_matrix[cols])
+    case_ac = case_ac_matrix[cols].astype(int)
+    ctrl_ac = ctrl_ac_matrix[cols].astype(int)
+    labels = csr_matrix(label_matrix[:, cols].astype(np.int8))  # sparse int8 avoids numpy's slow integer matmul
+    ac_in_case = np.asarray(labels @ case_ac)  # (n_annotations, 1 + n_perm)
+    ac_in_ctrl = np.asarray(labels @ ctrl_ac)
 
-    total_ac_case = int(case_ac_matrix[:, 0].sum())
-    total_ac_ctrl = int(ctrl_ac_matrix[:, 0].sum())
+    total_ac_case = int(case_ac[:, 0].sum())
+    total_ac_ctrl = int(ctrl_ac[:, 0].sum())
 
     pvals_table, potential_significant_table = get_chi2_pvals_case_control(
         ac_in_case, ac_in_ctrl, total_ac_case, total_ac_ctrl, alternative
