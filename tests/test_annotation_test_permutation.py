@@ -36,6 +36,7 @@ from annotation_test_permutation import (
     read_per_protein_shards,
     run_annotation_test,
     summarize_annotation_test,
+    wide_annotation_rows,
 )
 # Imported under another name: pytest collects any module-level callable whose
 # name begins with test_, and this is a production function, not a unit test.
@@ -674,3 +675,21 @@ def test_compressed_null_matches_sorted_array_when_heavily_tied():
     p = df_pvals["p_value"].to_numpy()
     expected = np.where(p <= 0.05, np.searchsorted(sorted_null, p, side="right") / n_perm, float(len(p)))
     assert (compute_global_fdr(df_pvals, pooled_null, n_perm) == expected).all()
+
+
+def test_sparse_and_dense_label_matrices_give_equal_frames():
+    rng = np.random.default_rng(5)
+    L = 40
+    rv = pd.DataFrame({"uniprot_id": "P", "aa_pos": rng.integers(1, L + 1, 60), "ac_case": rng.poisson(1.0, 60) + 1,
+                       "ac_control": rng.poisson(1.5, 60) + 1, "stratum": rng.choice(["a", "b"], 60)})
+    ann = pd.DataFrame({"uniprot_id": "P", "aa_pos": range(1, L + 1), "cl": np.repeat(np.arange(8), 5)})
+    sparse, meta, _ = wide_annotation_rows(ann, L, ["*"])
+    dense = sparse.toarray()
+    assert np.array_equal(dense, convert_wide_annotations_to_binary_matrix(ann, L, ["*"])[0])
+    cc = [run_protein_annotations("P", rv, m, meta, L, 20) for m in (dense, sparse)]
+    cmh = [run_protein_annotations_cmh("P", rv, m, meta, 20, "stratum") for m in (dense, sparse)]
+    _, mu_m, mu_lookup, _, _ = _mu_protein(n_res=L, n_ann=1)
+    x = rng.poisson(5 * mu_m)
+    mu = [run_protein_annotations_mu("P", _rvas_from_counts(x), m, meta, L, 20, 5.0, mu_lookup, seed=1) for m in (dense, sparse)]
+    for a, b in (cc, cmh, mu):
+        pd.testing.assert_frame_equal(a, b)

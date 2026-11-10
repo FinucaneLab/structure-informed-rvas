@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, issparse
 from scipy.stats import chi2, fisher_exact, norm
 from statsmodels.stats.multitest import fdrcorrection
 from tqdm.auto import tqdm
@@ -203,6 +203,17 @@ def convert_wide_annotations_to_binary_matrix(
     *,
     return_radii: bool = False,
 ):
+    """Dense version of wide_annotation_rows: (label_binary_matrix, row_meta[, row_radii])."""
+    matrix, row_meta, row_radii = wide_annotation_rows(ann_df, seq_len, ann_id_columns)
+    result = (matrix.toarray(), row_meta, row_radii)
+    return result if return_radii else result[:2]
+
+
+def wide_annotation_rows(
+    ann_df: pd.DataFrame,
+    seq_len: int | None = None,
+    ann_id_columns: list[str] | None = None,
+) -> tuple[csr_matrix, dict, dict]:
     """Binary matrix from wide-format residue annotations, single protein.
 
     One row per residue (aa_pos); each of `ann_id_columns` is a key whose value becomes
@@ -220,17 +231,16 @@ def convert_wide_annotations_to_binary_matrix(
     at that residue. Rows are grouped by annotation ID and radius, so equal residue sets
     at different radii are preserved as distinct tests.
 
-    Returns: result array containing the following:
-        label_binary_matrix: shape (n_annotations, seq_len), 1 at annotated positions.
+    Returns (label_binary_matrix, row_meta, row_radii):
+        label_binary_matrix: uint8 CSR, shape (n_annotations, seq_len), 1 at annotated positions.
         row_meta: dict mapping row index -> [id, ...] (annotations that share the exact
             same set of positions are merged into one row).
-        ``return_radii=True`` additionally returns a dict mapping matrix row indices to their radius (or None)
+        row_radii: dict mapping matrix row indices to their radius (or None).
     """
 
     ann_df = validate_radius(ann_df)
     if ann_df.empty:
-        empty = (np.zeros((0, seq_len or 0), dtype=np.uint8), {}, {})
-        return empty if return_radii else empty[:2]
+        return csr_matrix((0, seq_len or 0), dtype=np.uint8), {}, {}
     if seq_len is None:
         seq_len = int(ann_df["aa_pos"].max())
 
@@ -284,11 +294,12 @@ def convert_wide_annotations_to_binary_matrix(
             else:
                 row_meta[existing_idx].append(ann_id)
 
-    label_binary_matrix = np.zeros((len(row_positions), seq_len), dtype=np.uint8)
-    for i, row_pos in enumerate(row_positions):
-        label_binary_matrix[i, row_pos] = 1
-    result = (label_binary_matrix, row_meta, row_radii)
-    return result if return_radii else result[:2]
+    indptr = np.cumsum([0] + [len(r) for r in row_positions])
+    indices = np.concatenate(row_positions) if row_positions else np.zeros(0, dtype=np.int64)
+    label_binary_matrix = csr_matrix(
+        (np.ones(len(indices), dtype=np.uint8), indices, indptr), shape=(len(row_positions), seq_len)
+    )
+    return label_binary_matrix, row_meta, row_radii
 
 
 def get_protein_distance_pae_matrices(
@@ -912,12 +923,9 @@ def process_protein(
             return_radii=True,
         )
     else:
-        label_matrix, row_meta, row_radii = convert_wide_annotations_to_binary_matrix(
-            prot_ann_df,
-            seq_len=seq_len,
-            ann_id_columns=ann_id_columns,
-            return_radii=True,
-        )
+        label_matrix, row_meta, row_radii = wide_annotation_rows(
+            prot_ann_df, seq_len=seq_len, ann_id_columns=ann_id_columns
+        )  # sparse; densified below only if some row is expanded
     if label_matrix.shape[0] == 0:
         return None
 
@@ -934,6 +942,8 @@ def process_protein(
         if radius is not None and pd.notna(radius) and radius > 0:
             radius_groups.setdefault(float(radius), []).append(i)
     if radius_groups:
+        if issparse(label_matrix):
+            label_matrix = label_matrix.toarray()
         # Distance/PAE matrices don't depend on radius - build them once per protein and
         # threshold separately for each of this protein's distinct expansion radii, rather
         # than re-parsing the pdb/pae files (and rebuilding these O(n_residues^2) matrices)
