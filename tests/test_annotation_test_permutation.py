@@ -305,7 +305,7 @@ def test_accumulator_matches_the_full_memory_computation():
     accumulator = NullPvalAccumulator(n_perm)
     for frame in protein_frames:
         accumulator.add(frame)
-    df_pvals, pooled_null_pvals, min_pvals_per_sim = accumulator.finalize()
+    df_pvals, pooled_null, min_pvals_per_sim = accumulator.finalize()
 
     null_pvals_dict = {
         frame["uniprot_id"].iloc[0]: frame[null_cols].to_numpy(dtype=float)
@@ -329,7 +329,7 @@ def test_accumulator_matches_the_full_memory_computation():
         n_sims=n_perm,
     )
     assert np.allclose(
-        compute_global_fdr(df_pvals, pooled_null_pvals, n_perm), expected_false_discoveries
+        compute_global_fdr(df_pvals, pooled_null, n_perm), expected_false_discoveries
     )
     assert np.allclose(compute_global_fwer(df_pvals, min_pvals_per_sim), expected_fwer)
 
@@ -653,3 +653,24 @@ def test_wide_input_order_and_untested_proteins_do_not_matter():
         out.append(res.sort_values(["uniprot_id", "annotation_id"]).reset_index(drop=True))
     assert set(out[0].uniprot_id) == {"P1", "P2"}
     pd.testing.assert_frame_equal(out[0], out[1])
+
+
+def test_compressed_null_matches_sorted_array_when_heavily_tied():
+    n_perm = 20
+    rng = np.random.default_rng(1)
+    grid = np.array([0.0, 0.001, 0.01, 0.02, 0.05, 0.3])  # few distinct values -> many ties
+    accumulator = NullPvalAccumulator(n_perm)
+    accumulator.max_chunk_len = 5  # force several compactions
+    raw = []
+    for u in ("P1", "P2", "P3"):
+        frame = pd.DataFrame({"uniprot_id": u, "annotation_id": ["a", "b", "c", "d"],
+                              "p_value": rng.choice(grid, 4)})
+        frame[[f"null_pval_{i}" for i in range(n_perm)]] = rng.choice(grid, (4, n_perm))
+        accumulator.add(frame)
+        raw.append(frame[[f"null_pval_{i}" for i in range(n_perm)]].to_numpy().ravel())
+    df_pvals, pooled_null, _ = accumulator.finalize()
+    sorted_null = np.sort(np.concatenate(raw))
+    sorted_null = sorted_null[sorted_null < 0.05]
+    p = df_pvals["p_value"].to_numpy()
+    expected = np.where(p <= 0.05, np.searchsorted(sorted_null, p, side="right") / n_perm, float(len(p)))
+    assert (compute_global_fdr(df_pvals, pooled_null, n_perm) == expected).all()

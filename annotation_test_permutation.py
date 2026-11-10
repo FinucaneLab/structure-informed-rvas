@@ -584,48 +584,72 @@ def test_protein_annotations_cmh(
 class NullPvalAccumulator:
     """Pools per-protein permutation nulls for global_fdr/global_fwer one protein at a
     time, so the full (n_proteins, n_annotations, n_perm) null matrix is never in memory
-    at once - only a running reduction (sub-threshold null p-values, per-sim min)."""
+    at once - only a running reduction (sub-threshold null p-values as (value, count)
+    pairs, since they are heavily tied; per-sim min)."""
+
+    max_chunk_len = 10_000_000  # total stored (value, count) pairs before compacting
 
     def __init__(self, n_perm: int, large_p_threshold: float = 0.05):
         self.n_perm = n_perm
         self.large_p_threshold = large_p_threshold
         self.null_cols = [f"null_pval_{i}" for i in range(n_perm)]
         self.obs_frames: list[pd.DataFrame] = []
-        self.pooled_null_chunks: list[np.ndarray] = []
+        self.value_chunks: list[np.ndarray] = []
+        self.count_chunks: list[np.ndarray] = []
+        self.stored = 0
         self.min_pvals_per_sim = np.ones(n_perm)
 
     def add(self, pvals_df: pd.DataFrame) -> None:
         null_arr = pvals_df[self.null_cols].to_numpy(dtype=float)
-        self.pooled_null_chunks.append(null_arr[null_arr < self.large_p_threshold])
+        values, counts = np.unique(null_arr[null_arr < self.large_p_threshold], return_counts=True)
+        self.value_chunks.append(values)
+        self.count_chunks.append(counts)
+        self.stored += len(values)
+        if self.stored > self.max_chunk_len:
+            self.compact()
         self.min_pvals_per_sim = np.minimum(self.min_pvals_per_sim, null_arr.min(axis=0))
         self.obs_frames.append(pvals_df.drop(columns=self.null_cols))
 
-    def finalize(self) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
-        # global_fdr (computed downstream) is a step-down estimate and only valid computed
-        # in ascending p_value order (rank i+1 divides the pooled-null count exceeded by
-        # observed p-values up to that rank).
+    def compact(self) -> None:
+        """Merge all stored chunks into one sorted (values, counts) pair."""
+        values = np.concatenate(self.value_chunks)
+        counts = np.concatenate(self.count_chunks)
+        values, inverse = np.unique(values, return_inverse=True)
+        counts = np.bincount(inverse.ravel(), weights=counts).astype(np.int64)  # exact: counts < 2**53
+        self.value_chunks, self.count_chunks, self.stored = [values], [counts], len(values)
+
+    def finalize(self) -> tuple[pd.DataFrame, tuple[np.ndarray, np.ndarray], np.ndarray]:
+        """(observed frame sorted by p_value, (values, cumcounts), per-sim min p).
+
+        global_fdr (computed downstream) is a step-down estimate and only valid computed
+        in ascending p_value order (rank i+1 divides the pooled-null count exceeded by
+        observed p-values up to that rank). values are the distinct sub-threshold null
+        p-values ascending; cumcounts[i] = number of pooled null p-values <= values[i].
+        """
         df_pvals = pd.concat(self.obs_frames, ignore_index=True).sort_values(
             "p_value", ascending=True, ignore_index=True
         )
-        pooled_null_pvals = np.sort(np.concatenate(self.pooled_null_chunks))
-        return df_pvals, pooled_null_pvals, self.min_pvals_per_sim
+        self.compact()
+        return df_pvals, (self.value_chunks[0], np.cumsum(self.count_chunks[0])), self.min_pvals_per_sim
 
 
 def compute_global_fdr(
     df_pvals: pd.DataFrame,
-    pooled_null_pvals: np.ndarray,
+    pooled_null: tuple[np.ndarray, np.ndarray],
     n_perm: int,
     large_p_threshold: float = 0.05,
 ) -> np.ndarray:
-    """Same math as empirical_fdr._compute_false_discoveries, but takes the pooled+sorted
-    sub-threshold null p-values directly instead of a per-protein null_pvals_dict."""
+    """Same math as empirical_fdr._compute_false_discoveries, but takes the pooled
+    sub-threshold null as (sorted distinct values, cumulative counts), see
+    NullPvalAccumulator.finalize, instead of a per-protein null_pvals_dict."""
+    values, cumcounts = pooled_null
     p_value = df_pvals["p_value"].to_numpy()
     mask = p_value <= large_p_threshold
     false_discoveries = np.full(len(df_pvals), float(len(df_pvals)))
     if mask.any():
-        false_discoveries[mask] = (
-            np.searchsorted(pooled_null_pvals, p_value[mask], side="right") / n_perm
-        )
+        idx = np.searchsorted(values, p_value[mask], side="right")
+        n_le = np.concatenate([[0], cumcounts])[idx]  # null p-values <= each observed p
+        false_discoveries[mask] = n_le / n_perm
     return false_discoveries
 
 
@@ -678,8 +702,8 @@ def summarize_annotation_test(
             accumulators.setdefault(test, NullPvalAccumulator(n_perm)).add(df)
 
     def pool(accumulator: NullPvalAccumulator) -> pd.DataFrame:
-        df_pvals, pooled_null_pvals, min_pvals_per_sim = accumulator.finalize()
-        false_discoveries = compute_global_fdr(df_pvals, pooled_null_pvals, n_perm)
+        df_pvals, pooled_null, min_pvals_per_sim = accumulator.finalize()
+        false_discoveries = compute_global_fdr(df_pvals, pooled_null, n_perm)
         df_pvals["false_discoveries_avg"] = false_discoveries
         df_pvals["global_fdr"] = [x / (i + 1) for i, x in enumerate(false_discoveries)]
         df_pvals["global_fdr"] = df_pvals["global_fdr"][::-1].cummin()[::-1]
