@@ -413,7 +413,7 @@ def local_fwer_fdr(observed_pvals: np.ndarray, null_pvals: np.ndarray) -> tuple[
 def test_protein_annotations(
     uniprot_id: str,
     prot_rvas_df: pd.DataFrame,
-    label_matrix: np.ndarray,
+    label_matrix: np.ndarray | csr_matrix,
     row_meta: dict,
     seq_len: int,
     n_perm: int,
@@ -493,7 +493,7 @@ def test_protein_annotations(
 def test_protein_annotations_mu(
     uniprot_id: str,
     prot_rvas_df: pd.DataFrame,
-    label_matrix: np.ndarray,
+    label_matrix: np.ndarray | csr_matrix,
     row_meta: dict,
     seq_len: int,
     n_perm: int,
@@ -562,7 +562,7 @@ def test_protein_annotations_mu(
 def test_protein_annotations_cmh(
     uniprot_id: str,
     prot_rvas_df: pd.DataFrame,
-    label_matrix: np.ndarray,
+    label_matrix: np.ndarray | csr_matrix,
     row_meta: dict,
     n_perm: int,
     stratum_col: str,
@@ -841,7 +841,7 @@ def summarize_annotation_test(
 
     if cleanup_per_protein:
         per_protein_dir = results_dir / "per_protein"
-        for shard in per_protein_dir.glob("*_annotation_pvals.parquet"):
+        for shard in per_protein_dir.glob("*_annotation_pvals.parquet*"):
             shard.unlink()
         per_protein_dir.rmdir()
 

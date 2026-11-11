@@ -665,7 +665,7 @@ def test_compressed_null_matches_sorted_array_when_heavily_tied():
     rng = np.random.default_rng(1)
     grid = np.array([0.0, 0.001, 0.01, 0.02, 0.05, 0.3])  # few distinct values -> many ties
     accumulator = NullPvalAccumulator(n_perm)
-    accumulator.max_chunk_len = 5  # force several compactions
+    accumulator.max_chunk_len = accumulator.compact_at = 5  # force several compactions
     raw = []
     for u in ("P1", "P2", "P3"):
         frame = pd.DataFrame({"uniprot_id": u, "annotation_id": ["a", "b", "c", "d"],
@@ -764,3 +764,32 @@ def test_long_annotation_rows_match_reference_loop():
         matrix, meta, radii = long_annotation_rows(df, seq_len, include, ids)
         ref_matrix, ref_meta, ref_radii = reference_long_rows(df, seq_len, ids, include)
         assert (matrix.toarray() == ref_matrix).all() and meta == ref_meta and radii == ref_radii
+
+
+def test_cleanup_removes_stale_tmp_shards():
+    protein_frames, n_perm, _ = _protein_frames()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        results_dir = Path(tmpdir)
+        per_protein_dir = results_dir / "per_protein"
+        per_protein_dir.mkdir()
+        (per_protein_dir / "P9_annotation_pvals.parquet.tmp").write_bytes(b"partial")
+        summarize_annotation_test(protein_frames, n_perm, results_dir, cleanup_per_protein=True)
+        assert not per_protein_dir.exists()
+
+
+def test_category_id_columns_give_same_results_as_object():
+    rng = np.random.default_rng(7)
+    L = 30
+    rv = pd.DataFrame({"uniprot_id": np.repeat(["P1", "P2"], 25), "aa_pos": rng.integers(1, L + 1, 50),
+                       "ac_case": rng.poisson(1.0, 50) + 1, "ac_control": rng.poisson(1.5, 50) + 1})
+    ann = pd.DataFrame({"uniprot_id": ["P1", "P1", "P2", "P2", "P3"], "concept": ["a", "b", "a", "b", "a"],
+                        "start": [1, 10, 5, 15, 1], "end": [8, 20, 12, 25, 5]})
+    kw = dict(ann_format="long", ann_id_columns=("concept",), expand_include=[], n_perm=5, min_alleles=0, n_workers=1)
+    out = []
+    for dtype in ("object", "category"):
+        a = ann.astype({"uniprot_id": dtype, "concept": dtype})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            res = run_annotation_test(rv, a, results_dir=tmpdir, **kw)
+        out.append(res.sort_values(["uniprot_id", "annotation_id"]).reset_index(drop=True))
+    assert len(out[0]) > 0
+    pd.testing.assert_frame_equal(out[0], out[1], check_dtype=False)
