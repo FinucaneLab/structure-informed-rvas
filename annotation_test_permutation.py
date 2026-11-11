@@ -145,58 +145,84 @@ def convert_long_annotations_to_binary_matrix(
         ``return_radii=True`` additionally returns a dict mapping matrix row indices to their radius (or None)
     """
 
+    matrix, row_meta, row_radii = long_annotation_rows(ann_df, seq_len, ann_include, ann_id_columns)
+    result = (matrix.toarray(), row_meta, row_radii)
+    return result if return_radii else result[:2]
+
+
+def long_annotation_rows(
+    ann_df: pd.DataFrame,
+    seq_len: int | None = None,
+    ann_include: list[str] | None = None,
+    ann_id_columns: tuple[str, ...] = ("concept_type", "concept_value"),
+) -> tuple[csr_matrix, dict, dict]:
+    """Sparse (uint8 CSR) version of convert_long_annotations_to_binary_matrix, vectorised
+    over intervals: returns (label_binary_matrix, row_meta, row_radii), rows in order of
+    first appearance of their (ann_id_columns, radius) group."""
     if "start" not in ann_df.columns and "aa_pos" in ann_df.columns:
         ann_df = ann_df.assign(start=ann_df["aa_pos"], end=ann_df["aa_pos"])
     ann_df = ann_df.dropna(subset=["start", "end"])
     if ann_include is not None:
         ann_df = ann_df[ann_df[ann_id_columns[0]].isin(ann_include)]
-    if "geometry" not in ann_df.columns:
-        ann_df = ann_df.assign(geometry="range")
     if "radius" not in ann_df.columns:
         ann_df = ann_df.assign(radius=np.nan)  # same fallback as the wide converter
     ann_df = validate_radius(ann_df)  # before the empty return, so bad radii always fail
 
     if ann_df.empty:
-        empty = (np.zeros((0, seq_len or 0), dtype=np.uint8), {}, {})
-        return empty if return_radii else empty[:2]
+        return csr_matrix((0, seq_len or 0), dtype=np.uint8), {}, {}
     if seq_len is None:
         seq_len = int(ann_df["end"].max())
 
-    label_binary_matrix, row_meta, row_radii = [], {}, {}
-    signature_to_row_idx = {}
     # Radius is part of the grouping key: one annotation ID can have separate
     # instances at different radii, and equal footprints at different radii must not merge.
-    group_columns = list(ann_id_columns) + ["radius"]
-    for group_key, grp in ann_df.groupby(group_columns, sort=False, dropna=False):
-        *ann_id_parts, radius_value = group_key
-        ann_id = "_".join(str(x) for x in ann_id_parts)
-        radius = None if pd.isna(radius_value) else float(radius_value)
-        row = np.zeros(seq_len, dtype=np.uint8)
-        for start, end, geometry in zip(grp["start"], grp["end"], grp["geometry"]):
-            start, end = int(start), int(end)
-            if geometry == "pair":
-                endpoints = [p - 1 for p in (start, end) if 1 <= p <= seq_len]
-                row[endpoints] = 1
-            else:
-                start0 = max(start - 1, 0)
-                end0 = min(end, seq_len)
-                if start0 < end0:
-                    row[start0:end0] = 1
+    # Codes are assigned in first-appearance order (= groupby(sort=False)); NaN is its own group.
+    group = np.zeros(len(ann_df), dtype=np.int64)
+    for col in [*ann_id_columns, "radius"]:
+        codes, uniques = pd.factorize(ann_df[col].to_numpy(), use_na_sentinel=False)
+        group = pd.factorize(group * len(uniques) + codes)[0]
+    n_groups = int(group.max()) + 1
+    first_row = np.unique(group, return_index=True)[1]  # first row of each group
 
-        signature = tuple(np.flatnonzero(row).tolist())
-        key = (signature, radius)
+    start = ann_df["start"].to_numpy().astype(np.int64)  # truncates like int()
+    end = ann_df["end"].to_numpy().astype(np.int64)
+    is_pair = (ann_df["geometry"].to_numpy() == "pair") if "geometry" in ann_df.columns else np.zeros(len(ann_df), bool)
+    # "pair" marks only its two endpoints; anything else fills [start, end].
+    start0 = np.maximum(start - 1, 0)
+    length = np.where(is_pair, 0, np.maximum(np.minimum(end, seq_len) - start0, 0))
+    offsets = np.cumsum(length) - length
+    range_group = np.repeat(group, length)
+    range_pos = np.arange(length.sum()) - np.repeat(offsets, length) + np.repeat(start0, length)
+    pair_group, pair_pos = [], []
+    for p in (start, end):
+        ok = is_pair & (p >= 1) & (p <= seq_len)
+        pair_group.append(group[ok])
+        pair_pos.append(p[ok] - 1)
+    flat = np.unique(np.concatenate([range_group, *pair_group]) * seq_len + np.concatenate([range_pos, *pair_pos]))
+    flat_group, flat_pos = flat // seq_len, flat % seq_len  # sorted by group, then position
+    counts = np.bincount(flat_group, minlength=n_groups)
+    bounds = np.r_[0, np.cumsum(counts)]
+
+    id_values = [ann_df[c].to_numpy()[first_row] for c in ann_id_columns]
+    radius_values = ann_df["radius"].to_numpy()[first_row]
+    row_meta, row_radii, signature_to_row_idx, keep_group = {}, {}, {}, np.zeros(n_groups, dtype=bool)
+    for g in range(n_groups):
+        ann_id = "_".join("nan" if pd.isna(v[g]) else str(v[g]) for v in id_values)
+        radius = None if pd.isna(radius_values[g]) else float(radius_values[g])
+        key = (flat_pos[bounds[g]:bounds[g + 1]].tobytes(), radius)
         existing_idx = signature_to_row_idx.get(key)
         if existing_idx is None:
-            row_idx = len(label_binary_matrix)
-            row_meta[row_idx] = [ann_id]
-            row_radii[row_idx] = radius
-            signature_to_row_idx[key] = row_idx
-            label_binary_matrix.append(row)
+            row_idx = len(row_meta)
+            row_meta[row_idx], row_radii[row_idx], signature_to_row_idx[key], keep_group[g] = [ann_id], radius, row_idx, True
         else:
             row_meta[existing_idx].append(ann_id)
 
-    result = (np.array(label_binary_matrix, dtype=np.uint8), row_meta, row_radii)
-    return result if return_radii else result[:2]
+    kept_counts = counts[keep_group]
+    indices = flat_pos[keep_group[flat_group]]
+    label_binary_matrix = csr_matrix(
+        (np.ones(len(indices), dtype=np.uint8), indices, np.r_[0, np.cumsum(kept_counts)]),
+        shape=(len(kept_counts), seq_len),
+    )
+    return label_binary_matrix, row_meta, row_radii
 
 
 def convert_wide_annotations_to_binary_matrix(
@@ -963,17 +989,13 @@ def process_protein(
     seq_len = seq_len or fallback_seq_len(prot_rvas_df, prot_ann_df)
 
     if ann_format == "long":
-        label_matrix, row_meta, row_radii = convert_long_annotations_to_binary_matrix(
-            prot_ann_df,
-            seq_len=seq_len,
-            ann_include=ann_include,
-            ann_id_columns=ann_id_columns,
-            return_radii=True,
+        label_matrix, row_meta, row_radii = long_annotation_rows(
+            prot_ann_df, seq_len=seq_len, ann_include=ann_include, ann_id_columns=ann_id_columns
         )
     else:
         label_matrix, row_meta, row_radii = wide_annotation_rows(
             prot_ann_df, seq_len=seq_len, ann_id_columns=ann_id_columns
-        )  # sparse; densified below only if some row is expanded
+        )  # sparse (both formats); densified below only if some row is expanded
     if label_matrix.shape[0] == 0:
         return None
 

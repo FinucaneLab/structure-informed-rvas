@@ -34,6 +34,7 @@ from annotation_test_permutation import (
     expand_annotations_neighborhood,
     protein_seed,
     read_per_protein_shards,
+    long_annotation_rows,
     read_shard,
     shard_n_perm,
     run_annotation_test,
@@ -718,3 +719,48 @@ def test_shard_roundtrip_edge_cases(tmp_path):
     write_shard(frame[["test"]], tmp_path / "z.parquet")  # n_perm=0
     assert shard_n_perm(tmp_path / "z.parquet") == 0
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def reference_long_rows(df, seq_len, id_cols, include=None):
+    """Original per-annotation loop, kept as the oracle for long_annotation_rows."""
+    df = df.dropna(subset=["start", "end"])
+    if include is not None:
+        df = df[df[id_cols[0]].isin(include)]
+    df = df.assign(geometry=df.get("geometry", "range"), radius=df.get("radius", np.nan))
+    rows, meta, radii, seen = [], {}, {}, {}
+    for key, grp in df.groupby([*id_cols, "radius"], sort=False, dropna=False):
+        *parts, rad = key
+        rad = None if pd.isna(rad) else float(rad)
+        row = np.zeros(seq_len, dtype=np.uint8)
+        for s, e, g in zip(grp["start"], grp["end"], grp["geometry"]):
+            s, e = int(s), int(e)
+            if g == "pair":
+                row[[p - 1 for p in (s, e) if 1 <= p <= seq_len]] = 1
+            elif max(s - 1, 0) < min(e, seq_len):
+                row[max(s - 1, 0):min(e, seq_len)] = 1
+        sig = (tuple(np.flatnonzero(row)), rad)
+        if sig in seen:
+            meta[seen[sig]].append("_".join(map(str, parts)))
+        else:
+            seen[sig], meta[len(rows)], radii[len(rows)] = len(rows), ["_".join(map(str, parts))], rad
+            rows.append(row)
+    return np.array(rows, dtype=np.uint8).reshape(len(rows), seq_len), meta, radii
+
+
+def test_long_annotation_rows_match_reference_loop():
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        n, seq_len = int(rng.integers(1, 40)), int(rng.integers(3, 30))
+        start = rng.integers(-3, seq_len + 5, n).astype(float)
+        df = pd.DataFrame({
+            "concept_type": rng.choice(["A", "B"], n), "concept_value": rng.choice(["x", "y", "z"], n),
+            "start": start, "end": start + rng.integers(-2, 8, n),
+            "geometry": rng.choice(["pair", "range", "single"], n),
+            "radius": rng.choice([np.nan, 0.0, 5.0], n),
+        })
+        df.loc[rng.random(n) < 0.1, "start"] = np.nan
+        include = ["A"] if rng.random() < 0.3 else None
+        ids = ("concept_type", "concept_value")
+        matrix, meta, radii = long_annotation_rows(df, seq_len, include, ids)
+        ref_matrix, ref_meta, ref_radii = reference_long_rows(df, seq_len, ids, include)
+        assert (matrix.toarray() == ref_matrix).all() and meta == ref_meta and radii == ref_radii
