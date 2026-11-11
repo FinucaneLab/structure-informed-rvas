@@ -919,7 +919,7 @@ def _expansion_requested(
     prefixes = tuple(expand_include)
     if ann_format == "long":
         cols = list(ann_id_columns)
-        ids = positive[cols].astype(str).agg("_".join, axis=1)
+        ids = positive[cols].drop_duplicates().astype(str).agg("_".join, axis=1)  # unique combos only
         return bool(ids.str.startswith(prefixes).any())
     if ann_id_columns is None or list(ann_id_columns) == ["*"]:
         skip = {"uniprot_id", "aa_pos", "seq_len", "length", "end", "radius"}
@@ -1305,12 +1305,13 @@ def run_annotation_test(
     return df_pvals
 
 
-def read_table(path: Path) -> pd.DataFrame:
-    return (
-        pd.read_parquet(path)
-        if path.suffix == ".parquet"
-        else pd.read_csv(path, sep="\t")
-    )
+def read_table(path: Path, categorical: Iterable[str] = ()) -> pd.DataFrame:
+    """Read a .parquet or .tsv; `categorical` columns (if present) are stored as category -
+    for long tables where the same few strings repeat millions of times (~2.5x less memory)."""
+    if path.suffix == ".parquet":
+        df = pd.read_parquet(path)
+        return df.astype({c: "category" for c in categorical if c in df.columns})
+    return pd.read_csv(path, sep="\t", dtype={c: "category" for c in categorical})
 
 
 def _parse_args() -> argparse.Namespace:
@@ -1447,7 +1448,10 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    ann_df = read_table(args.ann_path)
+    ann_id_columns = tuple(args.ann_id_columns.split(","))
+    ann_df = read_table(
+        args.ann_path, ["uniprot_id", *(ann_id_columns if args.ann_format == "long" else ())]
+    )
     if args.expand_radius is not None and "radius" not in ann_df.columns:
         ann_df["radius"] = args.expand_radius
     run_annotation_test(
@@ -1455,7 +1459,7 @@ def main() -> None:
         ann_df,
         ann_format=args.ann_format,
         ann_include=args.ann_include.split(",") if args.ann_include else None,
-        ann_id_columns=tuple(args.ann_id_columns.split(",")),
+        ann_id_columns=ann_id_columns,
         expand_include=args.expand_include.split(",") if args.expand_include else None,
         pae_cutoff=args.pae_cutoff,
         reference_dir=args.reference_dir,
