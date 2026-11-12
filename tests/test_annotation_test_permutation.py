@@ -34,8 +34,13 @@ from annotation_test_permutation import (
     expand_annotations_neighborhood,
     protein_seed,
     read_per_protein_shards,
+    long_annotation_rows,
+    read_shard,
+    shard_n_perm,
     run_annotation_test,
     summarize_annotation_test,
+    wide_annotation_rows,
+    write_shard,
 )
 # Imported under another name: pytest collects any module-level callable whose
 # name begins with test_, and this is a production function, not a unit test.
@@ -305,7 +310,7 @@ def test_accumulator_matches_the_full_memory_computation():
     accumulator = NullPvalAccumulator(n_perm)
     for frame in protein_frames:
         accumulator.add(frame)
-    df_pvals, pooled_null_pvals, min_pvals_per_sim = accumulator.finalize()
+    df_pvals, pooled_null, min_pvals_per_sim = accumulator.finalize()
 
     null_pvals_dict = {
         frame["uniprot_id"].iloc[0]: frame[null_cols].to_numpy(dtype=float)
@@ -329,7 +334,7 @@ def test_accumulator_matches_the_full_memory_computation():
         n_sims=n_perm,
     )
     assert np.allclose(
-        compute_global_fdr(df_pvals, pooled_null_pvals, n_perm), expected_false_discoveries
+        compute_global_fdr(df_pvals, pooled_null, n_perm), expected_false_discoveries
     )
     assert np.allclose(compute_global_fwer(df_pvals, min_pvals_per_sim), expected_fwer)
 
@@ -397,9 +402,9 @@ def test_resume_reuses_shards_only_when_n_perm_is_unchanged():
 
         # Mark P1's shard, so a reused shard is distinguishable from a fresh one.
         shard = Path(tmpdir) / "per_protein" / "P1_annotation_pvals.parquet"
-        s = pd.read_parquet(shard)
+        s = read_shard(shard)
         s["p_value"] = 0.123
-        s.to_parquet(shard, index=False)
+        write_shard(s, shard)
 
         res = run_annotation_test(rv, an, n_perm=5, **kw)
         assert (res.loc[res.uniprot_id == "P1", "p_value"] == 0.123).all()
@@ -630,3 +635,161 @@ if __name__ == '__main__':
     # nothing and the run prints ok and exits 0 having tested nothing.
     assert n_run > 0, 'the test_* scan matched nothing'
     print(f'ok ({n_run} tests)')
+
+
+# ---------------------------------------------------------------------------
+# ann_df is sliced by row position, never copied
+# ---------------------------------------------------------------------------
+
+def test_wide_input_order_and_untested_proteins_do_not_matter():
+    rv = pd.concat([_demo_rvas().assign(uniprot_id=u) for u in ("P1", "P2")])
+    wide = pd.concat(
+        [
+            pd.DataFrame({"uniprot_id": u, "aa_pos": range(1, 9), "cl": [1, 1, 2, 2, 3, 3, 4, 4]})
+            for u in ("P1", "P2", "P3")  # P3 has no rvas -> untested
+        ]
+    )
+    interleaved = wide.iloc[np.argsort(np.tile(np.arange(8), 3), kind="stable")]  # rows of P1,P2,P3 alternate
+    kw = dict(ann_format="wide", ann_id_columns=["*"], expand_include=[], n_perm=5, min_alleles=0, n_workers=1)
+    out = []
+    for ann in (wide, interleaved):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            res = run_annotation_test(rv, ann, results_dir=tmpdir, **kw)
+        out.append(res.sort_values(["uniprot_id", "annotation_id"]).reset_index(drop=True))
+    assert set(out[0].uniprot_id) == {"P1", "P2"}
+    pd.testing.assert_frame_equal(out[0], out[1])
+
+
+def test_compressed_null_matches_sorted_array_when_heavily_tied():
+    n_perm = 20
+    rng = np.random.default_rng(1)
+    grid = np.array([0.0, 0.001, 0.01, 0.02, 0.05, 0.3])  # few distinct values -> many ties
+    accumulator = NullPvalAccumulator(n_perm)
+    accumulator.max_chunk_len = accumulator.compact_at = 5  # force several compactions
+    raw = []
+    for u in ("P1", "P2", "P3"):
+        frame = pd.DataFrame({"uniprot_id": u, "annotation_id": ["a", "b", "c", "d"],
+                              "p_value": rng.choice(grid, 4)})
+        frame[[f"null_pval_{i}" for i in range(n_perm)]] = rng.choice(grid, (4, n_perm))
+        accumulator.add(frame)
+        raw.append(frame[[f"null_pval_{i}" for i in range(n_perm)]].to_numpy().ravel())
+    df_pvals, pooled_null, _ = accumulator.finalize()
+    sorted_null = np.sort(np.concatenate(raw))
+    sorted_null = sorted_null[sorted_null < 0.05]
+    p = df_pvals["p_value"].to_numpy()
+    expected = np.where(p <= 0.05, np.searchsorted(sorted_null, p, side="right") / n_perm, float(len(p)))
+    assert (compute_global_fdr(df_pvals, pooled_null, n_perm) == expected).all()
+
+
+def test_sparse_and_dense_label_matrices_give_equal_frames():
+    rng = np.random.default_rng(5)
+    L = 40
+    rv = pd.DataFrame({"uniprot_id": "P", "aa_pos": rng.integers(1, L + 1, 60), "ac_case": rng.poisson(1.0, 60) + 1,
+                       "ac_control": rng.poisson(1.5, 60) + 1, "stratum": rng.choice(["a", "b"], 60)})
+    ann = pd.DataFrame({"uniprot_id": "P", "aa_pos": range(1, L + 1), "cl": np.repeat(np.arange(8), 5)})
+    sparse, meta, _ = wide_annotation_rows(ann, L, ["*"])
+    dense = sparse.toarray()
+    assert np.array_equal(dense, convert_wide_annotations_to_binary_matrix(ann, L, ["*"])[0])
+    cc = [run_protein_annotations("P", rv, m, meta, L, 20) for m in (dense, sparse)]
+    cmh = [run_protein_annotations_cmh("P", rv, m, meta, 20, "stratum") for m in (dense, sparse)]
+    _, mu_m, mu_lookup, _, _ = _mu_protein(n_res=L, n_ann=1)
+    x = rng.poisson(5 * mu_m)
+    mu = [run_protein_annotations_mu("P", _rvas_from_counts(x), m, meta, L, 20, 5.0, mu_lookup, seed=1) for m in (dense, sparse)]
+    for a, b in (cc, cmh, mu):
+        pd.testing.assert_frame_equal(a, b)
+
+
+def test_shard_round_trip_and_old_format_still_readable():
+    frames, _, _ = _protein_frames()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for i, frame in enumerate(frames):
+            new, old = Path(tmpdir) / f"new{i}.parquet", Path(tmpdir) / f"old{i}.parquet"
+            write_shard(frame, new)
+            frame.to_parquet(old, index=False)  # pre-write_shard layout: one column per permutation
+            pd.testing.assert_frame_equal(read_shard(new), frame)  # exact float round-trip
+            pd.testing.assert_frame_equal(read_shard(old), frame)
+
+
+def test_shard_roundtrip_edge_cases(tmp_path):
+    frame = pd.DataFrame({"test": ["a", "b"], "null_pval_1": [0.2, 0.3], "null_pval_0": [0.1, 0.4]})
+    write_shard(frame, tmp_path / "s.parquet")  # reordered null columns are written in index order
+    out = read_shard(tmp_path / "s.parquet")
+    assert shard_n_perm(tmp_path / "s.parquet") == 2
+    assert out["null_pval_0"].tolist() == [0.1, 0.4]
+    write_shard(frame[["test"]], tmp_path / "z.parquet")  # n_perm=0
+    assert shard_n_perm(tmp_path / "z.parquet") == 0
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def reference_long_rows(df, seq_len, id_cols, include=None):
+    """Original per-annotation loop, kept as the oracle for long_annotation_rows."""
+    df = df.dropna(subset=["start", "end"])
+    if include is not None:
+        df = df[df[id_cols[0]].isin(include)]
+    df = df.assign(geometry=df.get("geometry", "range"), radius=df.get("radius", np.nan))
+    rows, meta, radii, seen = [], {}, {}, {}
+    for key, grp in df.groupby([*id_cols, "radius"], sort=False, dropna=False):
+        *parts, rad = key
+        rad = None if pd.isna(rad) else float(rad)
+        row = np.zeros(seq_len, dtype=np.uint8)
+        for s, e, g in zip(grp["start"], grp["end"], grp["geometry"]):
+            s, e = int(s), int(e)
+            if g == "pair":
+                row[[p - 1 for p in (s, e) if 1 <= p <= seq_len]] = 1
+            elif max(s - 1, 0) < min(e, seq_len):
+                row[max(s - 1, 0):min(e, seq_len)] = 1
+        sig = (tuple(np.flatnonzero(row)), rad)
+        if sig in seen:
+            meta[seen[sig]].append("_".join(map(str, parts)))
+        else:
+            seen[sig], meta[len(rows)], radii[len(rows)] = len(rows), ["_".join(map(str, parts))], rad
+            rows.append(row)
+    return np.array(rows, dtype=np.uint8).reshape(len(rows), seq_len), meta, radii
+
+
+def test_long_annotation_rows_match_reference_loop():
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        n, seq_len = int(rng.integers(1, 40)), int(rng.integers(3, 30))
+        start = rng.integers(-3, seq_len + 5, n).astype(float)
+        df = pd.DataFrame({
+            "concept_type": rng.choice(["A", "B"], n), "concept_value": rng.choice(["x", "y", "z"], n),
+            "start": start, "end": start + rng.integers(-2, 8, n),
+            "geometry": rng.choice(["pair", "range", "single"], n),
+            "radius": rng.choice([np.nan, 0.0, 5.0], n),
+        })
+        df.loc[rng.random(n) < 0.1, "start"] = np.nan
+        include = ["A"] if rng.random() < 0.3 else None
+        ids = ("concept_type", "concept_value")
+        matrix, meta, radii = long_annotation_rows(df, seq_len, include, ids)
+        ref_matrix, ref_meta, ref_radii = reference_long_rows(df, seq_len, ids, include)
+        assert (matrix.toarray() == ref_matrix).all() and meta == ref_meta and radii == ref_radii
+
+
+def test_cleanup_removes_stale_tmp_shards():
+    protein_frames, n_perm, _ = _protein_frames()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        results_dir = Path(tmpdir)
+        per_protein_dir = results_dir / "per_protein"
+        per_protein_dir.mkdir()
+        (per_protein_dir / "P9_annotation_pvals.parquet.tmp").write_bytes(b"partial")
+        summarize_annotation_test(protein_frames, n_perm, results_dir, cleanup_per_protein=True)
+        assert not per_protein_dir.exists()
+
+
+def test_category_id_columns_give_same_results_as_object():
+    rng = np.random.default_rng(7)
+    L = 30
+    rv = pd.DataFrame({"uniprot_id": np.repeat(["P1", "P2"], 25), "aa_pos": rng.integers(1, L + 1, 50),
+                       "ac_case": rng.poisson(1.0, 50) + 1, "ac_control": rng.poisson(1.5, 50) + 1})
+    ann = pd.DataFrame({"uniprot_id": ["P1", "P1", "P2", "P2", "P3"], "concept": ["a", "b", "a", "b", "a"],
+                        "start": [1, 10, 5, 15, 1], "end": [8, 20, 12, 25, 5]})
+    kw = dict(ann_format="long", ann_id_columns=("concept",), expand_include=[], n_perm=5, min_alleles=0, n_workers=1)
+    out = []
+    for dtype in ("object", "category"):
+        a = ann.astype({"uniprot_id": dtype, "concept": dtype})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            res = run_annotation_test(rv, a, results_dir=tmpdir, **kw)
+        out.append(res.sort_values(["uniprot_id", "annotation_id"]).reset_index(drop=True))
+    assert len(out[0]) > 0
+    pd.testing.assert_frame_equal(out[0], out[1], check_dtype=False)

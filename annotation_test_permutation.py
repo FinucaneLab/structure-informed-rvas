@@ -19,8 +19,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from joblib import Parallel, delayed
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, issparse
 from scipy.stats import chi2, fisher_exact, norm
 from statsmodels.stats.multitest import fdrcorrection
 from tqdm.auto import tqdm
@@ -143,58 +145,84 @@ def convert_long_annotations_to_binary_matrix(
         ``return_radii=True`` additionally returns a dict mapping matrix row indices to their radius (or None)
     """
 
+    matrix, row_meta, row_radii = long_annotation_rows(ann_df, seq_len, ann_include, ann_id_columns)
+    result = (matrix.toarray(), row_meta, row_radii)
+    return result if return_radii else result[:2]
+
+
+def long_annotation_rows(
+    ann_df: pd.DataFrame,
+    seq_len: int | None = None,
+    ann_include: list[str] | None = None,
+    ann_id_columns: tuple[str, ...] = ("concept_type", "concept_value"),
+) -> tuple[csr_matrix, dict, dict]:
+    """Sparse (uint8 CSR) version of convert_long_annotations_to_binary_matrix, vectorised
+    over intervals: returns (label_binary_matrix, row_meta, row_radii), rows in order of
+    first appearance of their (ann_id_columns, radius) group."""
     if "start" not in ann_df.columns and "aa_pos" in ann_df.columns:
         ann_df = ann_df.assign(start=ann_df["aa_pos"], end=ann_df["aa_pos"])
     ann_df = ann_df.dropna(subset=["start", "end"])
     if ann_include is not None:
         ann_df = ann_df[ann_df[ann_id_columns[0]].isin(ann_include)]
-    if "geometry" not in ann_df.columns:
-        ann_df = ann_df.assign(geometry="range")
     if "radius" not in ann_df.columns:
         ann_df = ann_df.assign(radius=np.nan)  # same fallback as the wide converter
     ann_df = validate_radius(ann_df)  # before the empty return, so bad radii always fail
 
     if ann_df.empty:
-        empty = (np.zeros((0, seq_len or 0), dtype=np.uint8), {}, {})
-        return empty if return_radii else empty[:2]
+        return csr_matrix((0, seq_len or 0), dtype=np.uint8), {}, {}
     if seq_len is None:
         seq_len = int(ann_df["end"].max())
 
-    label_binary_matrix, row_meta, row_radii = [], {}, {}
-    signature_to_row_idx = {}
     # Radius is part of the grouping key: one annotation ID can have separate
     # instances at different radii, and equal footprints at different radii must not merge.
-    group_columns = list(ann_id_columns) + ["radius"]
-    for group_key, grp in ann_df.groupby(group_columns, sort=False, dropna=False):
-        *ann_id_parts, radius_value = group_key
-        ann_id = "_".join(str(x) for x in ann_id_parts)
-        radius = None if pd.isna(radius_value) else float(radius_value)
-        row = np.zeros(seq_len, dtype=np.uint8)
-        for start, end, geometry in zip(grp["start"], grp["end"], grp["geometry"]):
-            start, end = int(start), int(end)
-            if geometry == "pair":
-                endpoints = [p - 1 for p in (start, end) if 1 <= p <= seq_len]
-                row[endpoints] = 1
-            else:
-                start0 = max(start - 1, 0)
-                end0 = min(end, seq_len)
-                if start0 < end0:
-                    row[start0:end0] = 1
+    # Codes are assigned in first-appearance order (= groupby(sort=False)); NaN is its own group.
+    group = np.zeros(len(ann_df), dtype=np.int64)
+    for col in [*ann_id_columns, "radius"]:
+        codes, uniques = pd.factorize(ann_df[col].to_numpy(), use_na_sentinel=False)
+        group = pd.factorize(group * len(uniques) + codes)[0]
+    n_groups = int(group.max()) + 1
+    first_row = np.unique(group, return_index=True)[1]  # first row of each group
 
-        signature = tuple(np.flatnonzero(row).tolist())
-        key = (signature, radius)
+    start = ann_df["start"].to_numpy().astype(np.int64)  # truncates like int()
+    end = ann_df["end"].to_numpy().astype(np.int64)
+    is_pair = (ann_df["geometry"].to_numpy() == "pair") if "geometry" in ann_df.columns else np.zeros(len(ann_df), bool)
+    # "pair" marks only its two endpoints; anything else fills [start, end].
+    start0 = np.maximum(start - 1, 0)
+    length = np.where(is_pair, 0, np.maximum(np.minimum(end, seq_len) - start0, 0))
+    offsets = np.cumsum(length) - length
+    range_group = np.repeat(group, length)
+    range_pos = np.arange(length.sum()) - np.repeat(offsets, length) + np.repeat(start0, length)
+    pair_group, pair_pos = [], []
+    for p in (start, end):
+        ok = is_pair & (p >= 1) & (p <= seq_len)
+        pair_group.append(group[ok])
+        pair_pos.append(p[ok] - 1)
+    flat = np.unique(np.concatenate([range_group, *pair_group]) * seq_len + np.concatenate([range_pos, *pair_pos]))
+    flat_group, flat_pos = flat // seq_len, flat % seq_len  # sorted by group, then position
+    counts = np.bincount(flat_group, minlength=n_groups)
+    bounds = np.r_[0, np.cumsum(counts)]
+
+    id_values = [ann_df[c].to_numpy()[first_row] for c in ann_id_columns]
+    radius_values = ann_df["radius"].to_numpy()[first_row]
+    row_meta, row_radii, signature_to_row_idx, keep_group = {}, {}, {}, np.zeros(n_groups, dtype=bool)
+    for g in range(n_groups):
+        ann_id = "_".join("nan" if pd.isna(v[g]) else str(v[g]) for v in id_values)
+        radius = None if pd.isna(radius_values[g]) else float(radius_values[g])
+        key = (flat_pos[bounds[g]:bounds[g + 1]].tobytes(), radius)
         existing_idx = signature_to_row_idx.get(key)
         if existing_idx is None:
-            row_idx = len(label_binary_matrix)
-            row_meta[row_idx] = [ann_id]
-            row_radii[row_idx] = radius
-            signature_to_row_idx[key] = row_idx
-            label_binary_matrix.append(row)
+            row_idx = len(row_meta)
+            row_meta[row_idx], row_radii[row_idx], signature_to_row_idx[key], keep_group[g] = [ann_id], radius, row_idx, True
         else:
             row_meta[existing_idx].append(ann_id)
 
-    result = (np.array(label_binary_matrix, dtype=np.uint8), row_meta, row_radii)
-    return result if return_radii else result[:2]
+    kept_counts = counts[keep_group]
+    indices = flat_pos[keep_group[flat_group]]
+    label_binary_matrix = csr_matrix(
+        (np.ones(len(indices), dtype=np.uint8), indices, np.r_[0, np.cumsum(kept_counts)]),
+        shape=(len(kept_counts), seq_len),
+    )
+    return label_binary_matrix, row_meta, row_radii
 
 
 def convert_wide_annotations_to_binary_matrix(
@@ -204,6 +232,17 @@ def convert_wide_annotations_to_binary_matrix(
     *,
     return_radii: bool = False,
 ):
+    """Dense version of wide_annotation_rows: (label_binary_matrix, row_meta[, row_radii])."""
+    matrix, row_meta, row_radii = wide_annotation_rows(ann_df, seq_len, ann_id_columns)
+    result = (matrix.toarray(), row_meta, row_radii)
+    return result if return_radii else result[:2]
+
+
+def wide_annotation_rows(
+    ann_df: pd.DataFrame,
+    seq_len: int | None = None,
+    ann_id_columns: list[str] | None = None,
+) -> tuple[csr_matrix, dict, dict]:
     """Binary matrix from wide-format residue annotations, single protein.
 
     One row per residue (aa_pos); each of `ann_id_columns` is a key whose value becomes
@@ -221,17 +260,16 @@ def convert_wide_annotations_to_binary_matrix(
     at that residue. Rows are grouped by annotation ID and radius, so equal residue sets
     at different radii are preserved as distinct tests.
 
-    Returns: result array containing the following:
-        label_binary_matrix: shape (n_annotations, seq_len), 1 at annotated positions.
+    Returns (label_binary_matrix, row_meta, row_radii):
+        label_binary_matrix: uint8 CSR, shape (n_annotations, seq_len), 1 at annotated positions.
         row_meta: dict mapping row index -> [id, ...] (annotations that share the exact
             same set of positions are merged into one row).
-        ``return_radii=True`` additionally returns a dict mapping matrix row indices to their radius (or None)
+        row_radii: dict mapping matrix row indices to their radius (or None).
     """
 
     ann_df = validate_radius(ann_df)
     if ann_df.empty:
-        empty = (np.zeros((0, seq_len or 0), dtype=np.uint8), {}, {})
-        return empty if return_radii else empty[:2]
+        return csr_matrix((0, seq_len or 0), dtype=np.uint8), {}, {}
     if seq_len is None:
         seq_len = int(ann_df["aa_pos"].max())
 
@@ -244,38 +282,53 @@ def convert_wide_annotations_to_binary_matrix(
     radii = ann_df["radius"].to_numpy() if "radius" in ann_df.columns else np.full(len(ann_df), np.nan)
     positions = ann_df["aa_pos"].to_numpy(dtype=np.int64) - 1
 
-    label_binary_matrix, row_meta, row_radii = [], {}, {}
+    row_positions, row_meta, row_radii = [], {}, {}
     signature_to_row_idx = {}
     for col in ann_id_columns:
         not_na = ann_df[col].notna().to_numpy()
         col_values = ann_df[col].to_numpy()[not_na]
         col_positions = positions[not_na]
-        col_radii = radii[not_na]
+        if len(col_values) == 0:
+            continue
         # Group by both annotation value and radius; this supports radius changes along
         # a wide-format annotation column without merging distinct expansion definitions.
-        grouping = pd.DataFrame({"value": col_values, "position": col_positions, "radius": col_radii})
-        for (value, radius_value), grp in grouping.groupby(["value", "radius"], sort=False, dropna=False):
-            signature = tuple(np.unique(grp["position"].to_numpy(dtype=np.int64)).tolist())
-            if not signature:
-                continue
-            radius = None if pd.isna(radius_value) else float(radius_value)
+        codes, uniques = pd.factorize(col_values)
+        radius_codes, radius_uniques = pd.factorize(radii[not_na])  # NaN -> -1, its own group
+        n_radius = len(radius_uniques) + 1
+        key = codes.astype(np.int64) * n_radius + radius_codes + 1
+        # sorted unique positions per group, vectorised over all groups of this column
+        order = np.lexsort((col_positions, key))
+        sorted_key, sorted_pos = key[order], col_positions[order]
+        keep = np.ones(len(order), dtype=bool)
+        keep[1:] = (sorted_key[1:] != sorted_key[:-1]) | (sorted_pos[1:] != sorted_pos[:-1])
+        sorted_key, sorted_pos = sorted_key[keep], sorted_pos[keep]
+        starts = np.flatnonzero(np.r_[True, sorted_key[1:] != sorted_key[:-1]])
+        group_positions = np.split(sorted_pos, starts[1:])
+        group_keys = sorted_key[starts]
+        _, first_seen = np.unique(key, return_index=True)  # same (sorted-key) order as group_keys
+        for g in np.argsort(first_seen):  # first-appearance order, like groupby(sort=False)
+            group_code, radius_code = divmod(int(group_keys[g]), n_radius)
+            radius = None if radius_code == 0 else float(radius_uniques[radius_code - 1])
+            value = uniques[group_code]
             ann_id = str(value) if single_column else f"{col}_{value}"
-            key = (signature, radius)
-            existing_idx = signature_to_row_idx.get(key)
+            signature = group_positions[g]
+            sig_key = (signature.tobytes(), radius)
+            existing_idx = signature_to_row_idx.get(sig_key)
             if existing_idx is None:
-                row = np.zeros(seq_len, dtype=np.uint8)
-                valid_positions = [p for p in signature if 0 <= p < seq_len]
-                row[valid_positions] = 1
-                row_idx = len(label_binary_matrix)
-                label_binary_matrix.append(row)
+                row_idx = len(row_positions)
+                row_positions.append(signature[(signature >= 0) & (signature < seq_len)])
                 row_meta[row_idx] = [ann_id]
                 row_radii[row_idx] = radius
-                signature_to_row_idx[key] = row_idx
+                signature_to_row_idx[sig_key] = row_idx
             else:
                 row_meta[existing_idx].append(ann_id)
 
-    result = (np.array(label_binary_matrix, dtype=np.uint8), row_meta, row_radii)
-    return result if return_radii else result[:2]
+    indptr = np.cumsum([0] + [len(r) for r in row_positions])
+    indices = np.concatenate(row_positions) if row_positions else np.zeros(0, dtype=np.int64)
+    label_binary_matrix = csr_matrix(
+        (np.ones(len(indices), dtype=np.uint8), indices, indptr), shape=(len(row_positions), seq_len)
+    )
+    return label_binary_matrix, row_meta, row_radii
 
 
 def get_protein_distance_pae_matrices(
@@ -360,7 +413,7 @@ def local_fwer_fdr(observed_pvals: np.ndarray, null_pvals: np.ndarray) -> tuple[
 def test_protein_annotations(
     uniprot_id: str,
     prot_rvas_df: pd.DataFrame,
-    label_matrix: np.ndarray,
+    label_matrix: np.ndarray | csr_matrix,
     row_meta: dict,
     seq_len: int,
     n_perm: int,
@@ -379,17 +432,17 @@ def test_protein_annotations(
     case_ac_matrix, ctrl_ac_matrix = get_case_control_ac_matrix(
         prot_rvas_df, n_res=seq_len, n_sim=n_perm, seed=protein_seed(uniprot_id, seed)
     )
-    case_ac_matrix = case_ac_matrix.astype(int)
-    ctrl_ac_matrix = ctrl_ac_matrix.astype(int)
 
-    # only residues with alleles matter; sparse int8 labels avoid numpy's slow integer matmul
+    # only residues with alleles matter; cast after trimming so the int64 copy is only of those rows
     cols = np.flatnonzero(case_ac_matrix.sum(1) + ctrl_ac_matrix.sum(1))
-    labels = csr_matrix(label_matrix[:, cols].astype(np.int8))
-    ac_in_case = np.asarray(labels @ case_ac_matrix[cols])  # (n_annotations, 1 + n_perm)
-    ac_in_ctrl = np.asarray(labels @ ctrl_ac_matrix[cols])
+    case_ac = case_ac_matrix[cols].astype(int)
+    ctrl_ac = ctrl_ac_matrix[cols].astype(int)
+    labels = csr_matrix(label_matrix[:, cols].astype(np.int8))  # sparse int8 avoids numpy's slow integer matmul
+    ac_in_case = np.asarray(labels @ case_ac)  # (n_annotations, 1 + n_perm)
+    ac_in_ctrl = np.asarray(labels @ ctrl_ac)
 
-    total_ac_case = int(case_ac_matrix[:, 0].sum())
-    total_ac_ctrl = int(ctrl_ac_matrix[:, 0].sum())
+    total_ac_case = int(case_ac[:, 0].sum())
+    total_ac_ctrl = int(ctrl_ac[:, 0].sum())
 
     pvals_table, potential_significant_table = get_chi2_pvals_case_control(
         ac_in_case, ac_in_ctrl, total_ac_case, total_ac_ctrl, alternative
@@ -440,7 +493,7 @@ def test_protein_annotations(
 def test_protein_annotations_mu(
     uniprot_id: str,
     prot_rvas_df: pd.DataFrame,
-    label_matrix: np.ndarray,
+    label_matrix: np.ndarray | csr_matrix,
     row_meta: dict,
     seq_len: int,
     n_perm: int,
@@ -509,7 +562,7 @@ def test_protein_annotations_mu(
 def test_protein_annotations_cmh(
     uniprot_id: str,
     prot_rvas_df: pd.DataFrame,
-    label_matrix: np.ndarray,
+    label_matrix: np.ndarray | csr_matrix,
     row_meta: dict,
     n_perm: int,
     stratum_col: str,
@@ -585,48 +638,75 @@ def test_protein_annotations_cmh(
 class NullPvalAccumulator:
     """Pools per-protein permutation nulls for global_fdr/global_fwer one protein at a
     time, so the full (n_proteins, n_annotations, n_perm) null matrix is never in memory
-    at once - only a running reduction (sub-threshold null p-values, per-sim min)."""
+    at once - only a running reduction (sub-threshold null p-values as (value, count)
+    pairs, since they are heavily tied; per-sim min)."""
+
+    max_chunk_len = 10_000_000  # total stored (value, count) pairs before compacting
 
     def __init__(self, n_perm: int, large_p_threshold: float = 0.05):
         self.n_perm = n_perm
         self.large_p_threshold = large_p_threshold
         self.null_cols = [f"null_pval_{i}" for i in range(n_perm)]
         self.obs_frames: list[pd.DataFrame] = []
-        self.pooled_null_chunks: list[np.ndarray] = []
+        self.value_chunks: list[np.ndarray] = []
+        self.count_chunks: list[np.ndarray] = []
+        self.stored = 0
+        self.compact_at = self.max_chunk_len
         self.min_pvals_per_sim = np.ones(n_perm)
 
     def add(self, pvals_df: pd.DataFrame) -> None:
         null_arr = pvals_df[self.null_cols].to_numpy(dtype=float)
-        self.pooled_null_chunks.append(null_arr[null_arr < self.large_p_threshold])
+        values, counts = np.unique(null_arr[null_arr < self.large_p_threshold], return_counts=True)
+        self.value_chunks.append(values)
+        self.count_chunks.append(counts)
+        self.stored += len(values)
+        if self.stored > self.compact_at:
+            self.compact()
+            # Relative to the compacted size, so a weakly-tied null doesn't re-compact on every protein.
+            self.compact_at = max(self.max_chunk_len, 2 * self.stored)
         self.min_pvals_per_sim = np.minimum(self.min_pvals_per_sim, null_arr.min(axis=0))
         self.obs_frames.append(pvals_df.drop(columns=self.null_cols))
 
-    def finalize(self) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
-        # global_fdr (computed downstream) is a step-down estimate and only valid computed
-        # in ascending p_value order (rank i+1 divides the pooled-null count exceeded by
-        # observed p-values up to that rank).
+    def compact(self) -> None:
+        """Merge all stored chunks into one sorted (values, counts) pair."""
+        values = np.concatenate(self.value_chunks)
+        counts = np.concatenate(self.count_chunks)
+        values, inverse = np.unique(values, return_inverse=True)
+        counts = np.bincount(inverse.ravel(), weights=counts).astype(np.int64)  # exact: counts < 2**53
+        self.value_chunks, self.count_chunks, self.stored = [values], [counts], len(values)
+
+    def finalize(self) -> tuple[pd.DataFrame, tuple[np.ndarray, np.ndarray], np.ndarray]:
+        """(observed frame sorted by p_value, (values, cumcounts), per-sim min p).
+
+        global_fdr (computed downstream) is a step-down estimate and only valid computed
+        in ascending p_value order (rank i+1 divides the pooled-null count exceeded by
+        observed p-values up to that rank). values are the distinct sub-threshold null
+        p-values ascending; cumcounts[i] = number of pooled null p-values <= values[i].
+        """
         df_pvals = pd.concat(self.obs_frames, ignore_index=True).sort_values(
             "p_value", ascending=True, ignore_index=True
         )
-        pooled_null_pvals = np.sort(np.concatenate(self.pooled_null_chunks))
-        return df_pvals, pooled_null_pvals, self.min_pvals_per_sim
+        self.compact()
+        return df_pvals, (self.value_chunks[0], np.cumsum(self.count_chunks[0])), self.min_pvals_per_sim
 
 
 def compute_global_fdr(
     df_pvals: pd.DataFrame,
-    pooled_null_pvals: np.ndarray,
+    pooled_null: tuple[np.ndarray, np.ndarray],
     n_perm: int,
     large_p_threshold: float = 0.05,
 ) -> np.ndarray:
-    """Same math as empirical_fdr._compute_false_discoveries, but takes the pooled+sorted
-    sub-threshold null p-values directly instead of a per-protein null_pvals_dict."""
+    """Same math as empirical_fdr._compute_false_discoveries, but takes the pooled
+    sub-threshold null as (sorted distinct values, cumulative counts), see
+    NullPvalAccumulator.finalize, instead of a per-protein null_pvals_dict."""
+    values, cumcounts = pooled_null
     p_value = df_pvals["p_value"].to_numpy()
     mask = p_value <= large_p_threshold
     false_discoveries = np.full(len(df_pvals), float(len(df_pvals)))
     if mask.any():
-        false_discoveries[mask] = (
-            np.searchsorted(pooled_null_pvals, p_value[mask], side="right") / n_perm
-        )
+        idx = np.searchsorted(values, p_value[mask], side="right")
+        n_le = np.concatenate([[0], cumcounts])[idx]  # null p-values <= each observed p
+        false_discoveries[mask] = n_le / n_perm
     return false_discoveries
 
 
@@ -637,13 +717,50 @@ def compute_global_fwer(df_pvals: pd.DataFrame, min_pvals_per_sim: np.ndarray) -
     return np.mean(min_pvals_per_sim.reshape(1, -1) <= p_obs, axis=1)
 
 
+def write_shard(df: pd.DataFrame, path: str | Path) -> None:
+    """Write a per-protein frame, packing the null_pval_{i} columns into one fixed-size-list
+    column (3-4x faster to write/read and half the size of 1000 separate columns)."""
+    path = Path(path)
+    # Numeric order: read_shard rebuilds the names as null_pval_0..n-1 by position.
+    null_cols = sorted((c for c in df.columns if c.startswith("null_pval_")), key=lambda c: int(c.rsplit("_", 1)[1]))
+    table = pa.Table.from_pandas(df.drop(columns=null_cols), preserve_index=False)
+    if null_cols:  # n_perm=0: nothing to pack (read_shard handles a shard without null_pvals)
+        nulls = np.ascontiguousarray(df[null_cols].to_numpy(dtype=float))
+        packed = pa.FixedSizeListArray.from_arrays(pa.array(nulls.ravel()), len(null_cols))
+        table = table.append_column("null_pvals", packed)
+    tmp = path.with_name(path.name + ".tmp")  # atomic: a crash never leaves a truncated shard
+    pq.write_table(table, tmp)
+    tmp.replace(path)
+
+
+def shard_n_perm(path: str | Path) -> int:
+    """Number of permutations stored in a shard, from the schema only (no data read)."""
+    schema = pq.read_schema(path)
+    if "null_pvals" in schema.names:
+        return schema.field("null_pvals").type.list_size
+    return sum(n.startswith("null_pval_") for n in schema.names)
+
+
+def read_shard(path: str | Path) -> pd.DataFrame:
+    """Read a shard from write_shard back into a frame with null_pval_{i} columns.
+    Shards in the older one-column-per-permutation layout are returned unchanged."""
+    table = pq.read_table(path)
+    if "null_pvals" not in table.column_names:
+        return table.to_pandas()
+    packed = table["null_pvals"].combine_chunks()
+    n_perm = packed.type.list_size
+    nulls = packed.values.to_numpy().reshape(len(packed), n_perm)
+    null_df = pd.DataFrame(nulls, columns=[f"null_pval_{i}" for i in range(n_perm)])
+    return pd.concat([table.drop_columns("null_pvals").to_pandas(), null_df], axis=1)
+
+
 def read_per_protein_shards(results_dir: str | Path) -> Iterator[pd.DataFrame]:
     """Lazily read back the per-protein parquet shards written by process_protein, one at a
     time - lets summarize_annotation_test rebuild results.* from a completed/crashed run
     without re-running any permutation tests."""
     per_protein_dir = Path(results_dir) / "per_protein"
     for shard in sorted(per_protein_dir.glob("*_annotation_pvals.parquet")):
-        yield pd.read_parquet(shard)
+        yield read_shard(shard)
 
 
 def summarize_annotation_test(
@@ -679,8 +796,8 @@ def summarize_annotation_test(
             accumulators.setdefault(test, NullPvalAccumulator(n_perm)).add(df)
 
     def pool(accumulator: NullPvalAccumulator) -> pd.DataFrame:
-        df_pvals, pooled_null_pvals, min_pvals_per_sim = accumulator.finalize()
-        false_discoveries = compute_global_fdr(df_pvals, pooled_null_pvals, n_perm)
+        df_pvals, pooled_null, min_pvals_per_sim = accumulator.finalize()
+        false_discoveries = compute_global_fdr(df_pvals, pooled_null, n_perm)
         df_pvals["false_discoveries_avg"] = false_discoveries
         df_pvals["global_fdr"] = [x / (i + 1) for i, x in enumerate(false_discoveries)]
         df_pvals["global_fdr"] = df_pvals["global_fdr"][::-1].cummin()[::-1]
@@ -724,7 +841,7 @@ def summarize_annotation_test(
 
     if cleanup_per_protein:
         per_protein_dir = results_dir / "per_protein"
-        for shard in per_protein_dir.glob("*_annotation_pvals.parquet"):
+        for shard in per_protein_dir.glob("*_annotation_pvals.parquet*"):
             shard.unlink()
         per_protein_dir.rmdir()
 
@@ -802,7 +919,7 @@ def _expansion_requested(
     prefixes = tuple(expand_include)
     if ann_format == "long":
         cols = list(ann_id_columns)
-        ids = positive[cols].astype(str).agg("_".join, axis=1)
+        ids = positive[cols].drop_duplicates().astype(str).agg("_".join, axis=1)  # unique combos only
         return bool(ids.str.startswith(prefixes).any())
     if ann_id_columns is None or list(ann_id_columns) == ["*"]:
         skip = {"uniprot_id", "aa_pos", "seq_len", "length", "end", "radius"}
@@ -872,20 +989,13 @@ def process_protein(
     seq_len = seq_len or fallback_seq_len(prot_rvas_df, prot_ann_df)
 
     if ann_format == "long":
-        label_matrix, row_meta, row_radii = convert_long_annotations_to_binary_matrix(
-            prot_ann_df,
-            seq_len=seq_len,
-            ann_include=ann_include,
-            ann_id_columns=ann_id_columns,
-            return_radii=True,
+        label_matrix, row_meta, row_radii = long_annotation_rows(
+            prot_ann_df, seq_len=seq_len, ann_include=ann_include, ann_id_columns=ann_id_columns
         )
     else:
-        label_matrix, row_meta, row_radii = convert_wide_annotations_to_binary_matrix(
-            prot_ann_df,
-            seq_len=seq_len,
-            ann_id_columns=ann_id_columns,
-            return_radii=True,
-        )
+        label_matrix, row_meta, row_radii = wide_annotation_rows(
+            prot_ann_df, seq_len=seq_len, ann_id_columns=ann_id_columns
+        )  # sparse (both formats); densified below only if some row is expanded
     if label_matrix.shape[0] == 0:
         return None
 
@@ -902,6 +1012,8 @@ def process_protein(
         if radius is not None and pd.notna(radius) and radius > 0:
             radius_groups.setdefault(float(radius), []).append(i)
     if radius_groups:
+        if issparse(label_matrix):
+            label_matrix = label_matrix.toarray()
         # Distance/PAE matrices don't depend on radius - build them once per protein and
         # threshold separately for each of this protein's distinct expansion radii, rather
         # than re-parsing the pdb/pae files (and rebuilding these O(n_residues^2) matrices)
@@ -945,9 +1057,7 @@ def process_protein(
         )
     per_protein_dir = results_dir / "per_protein"
     per_protein_dir.mkdir(exist_ok=True)
-    pvals_df.to_parquet(
-        per_protein_dir / f"{uniprot_id}_annotation_pvals.parquet", index=False
-    )
+    write_shard(pvals_df, per_protein_dir / f"{uniprot_id}_annotation_pvals.parquet")
     return pvals_df
 
 
@@ -1077,25 +1187,31 @@ def run_annotation_test(
         )
     uniprot_ids = sorted(tested_proteins & set(ann_df["uniprot_id"].unique()))
     
-    # Filter the dataframes to only include tested proteins.
     rvas_df = rvas_df[rvas_df["uniprot_id"].isin(uniprot_ids)]
-    ann_df = ann_df[ann_df["uniprot_id"].isin(uniprot_ids)]
-    _track("Annotation test: proteins with annotations", rvas_df, n_ann_rows=len(ann_df))
+    # Counted with masks: ann_df itself is never copied (a wide table can be >10 GB).
+    ann_tested = ann_df["uniprot_id"].isin(uniprot_ids)
+    _track("Annotation test: proteins with annotations", rvas_df, n_ann_rows=int(ann_tested.sum()))
     if ann_include is not None and ann_format == "long":
         # Applied per protein inside the converter; counted here so the drop shows.
-        ann_kept = ann_df[ann_df[ann_id_columns[0]].isin(ann_include)]
+        kept = ann_df.loc[ann_tested & ann_df[ann_id_columns[0]].isin(ann_include), "uniprot_id"]
         _track(
             "Annotation test: restrict to included annotation types",
-            rvas_df[rvas_df["uniprot_id"].isin(ann_kept["uniprot_id"])],
-            n_ann_rows=len(ann_kept),
+            rvas_df[rvas_df["uniprot_id"].isin(kept)],
+            n_ann_rows=len(kept),
         )
 
     protein_lengths = load_protein_lengths(reference_dir) if reference_dir else {}
 
     # Group once up front - filtering each df with a `== uniprot_id` mask per protein is
     # an O(n_proteins * len(df)) full-table scan and dominates runtime on large tables.
+    # ann_df is never copied (a wide table can be >10 GB): only row positions are kept.
     rvas_by_protein = dict(tuple(rvas_df.groupby("uniprot_id", sort=False)))
-    ann_by_protein = dict(tuple(ann_df.groupby("uniprot_id", sort=False)))
+    # Only tested proteins' rows are grouped, so untested rows cost nothing here.
+    tested_pos = np.flatnonzero(ann_tested.to_numpy())
+    ann_rows = {
+        uid: tested_pos[idx]
+        for uid, idx in pd.Series(tested_pos).groupby(ann_df["uniprot_id"].to_numpy()[tested_pos], sort=False).indices.items()
+    }
 
     shard_dir = results_dir / "per_protein"
     # Filled by process_protein (threads only add distinct keys). Proteins resumed
@@ -1106,13 +1222,12 @@ def run_annotation_test(
         shard = shard_dir / f"{uniprot_id}_annotation_pvals.parquet"
         # ponytail: only n_perm is checked; a changed seed/radius/annotation set in the same results_dir reuses stale shards - use a fresh results_dir
         if shard.exists():
-            cached = pd.read_parquet(shard)
-            if sum(c.startswith("null_pval_") for c in cached.columns) == n_perm:
-                return cached
+            if shard_n_perm(shard) == n_perm:
+                return read_shard(shard)
         return process_protein(
             uniprot_id,
             rvas_by_protein[uniprot_id],
-            ann_by_protein[uniprot_id],
+            ann_df.iloc[ann_rows[uniprot_id]],
             protein_lengths.get(uniprot_id),
             ann_format=ann_format,
             ann_include=ann_include,
@@ -1190,12 +1305,13 @@ def run_annotation_test(
     return df_pvals
 
 
-def read_table(path: Path) -> pd.DataFrame:
-    return (
-        pd.read_parquet(path)
-        if path.suffix == ".parquet"
-        else pd.read_csv(path, sep="\t")
-    )
+def read_table(path: Path, categorical: Iterable[str] = ()) -> pd.DataFrame:
+    """Read a .parquet or .tsv; `categorical` columns (if present) are stored as category -
+    for long tables where the same few strings repeat millions of times (~2.5x less memory)."""
+    if path.suffix == ".parquet":
+        df = pd.read_parquet(path)
+        return df.astype({c: "category" for c in categorical if c in df.columns})
+    return pd.read_csv(path, sep="\t", dtype={c: "category" for c in categorical})
 
 
 def _parse_args() -> argparse.Namespace:
@@ -1332,7 +1448,10 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    ann_df = read_table(args.ann_path)
+    ann_id_columns = tuple(args.ann_id_columns.split(","))
+    ann_df = read_table(
+        args.ann_path, ["uniprot_id", *(ann_id_columns if args.ann_format == "long" else ())]
+    )
     if args.expand_radius is not None and "radius" not in ann_df.columns:
         ann_df["radius"] = args.expand_radius
     run_annotation_test(
@@ -1340,7 +1459,7 @@ def main() -> None:
         ann_df,
         ann_format=args.ann_format,
         ann_include=args.ann_include.split(",") if args.ann_include else None,
-        ann_id_columns=tuple(args.ann_id_columns.split(",")),
+        ann_id_columns=ann_id_columns,
         expand_include=args.expand_include.split(",") if args.expand_include else None,
         pae_cutoff=args.pae_cutoff,
         reference_dir=args.reference_dir,
