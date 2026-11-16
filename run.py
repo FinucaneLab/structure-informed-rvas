@@ -587,6 +587,18 @@ if __name__ == '__main__':
         ''',
     )
     parser.add_argument(
+        '--clinvar-fdr-file',
+        type=str,
+        default=None,
+        help='''
+        Used with --explore-nhbds-traits. Optional path to an FDR results tsv
+        for the ClinVar + common-variants scan (columns uniprot_id, aa_pos,
+        fdr, ...), used to mark ClinVar-significant neighborhoods (fdr <=
+        --fdr-cutoff) in the output tsv/plot. If not given, no ClinVar
+        significance markers are added.
+        ''',
+    )
+    parser.add_argument(
         '--shrink-k',
         type=float,
         default=5.0,
@@ -866,6 +878,7 @@ if __name__ == '__main__':
             clinvar_output_file,
             args.fdr_cutoff,
             args.shrink_k,
+            args.clinvar_fdr_file,
         )
         did_nothing = False
 

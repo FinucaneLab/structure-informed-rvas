@@ -18,10 +18,21 @@ Workflow:
    se_betahat column is NA for this file, as requested). The trait profile
    also includes mean_betahat_shrunk, a shrinkage-toward-0 estimate
    analogous to the ClinVar ratio's pseudocount regularization.
-4. Write two tsvs (trait profile and ClinVar profile). Plotting is a
+4. Both tsvs also carry significance marker columns (is_significant_discovery,
+   is_significant_other_trait on the trait tsv; is_significant_clinvar on the
+   ClinVar tsv), computed from --fdr-results-file (all traits, not just the
+   discovery one) and --clinvar-fdr-file at --fdr-cutoff, so the plotting
+   step can mark significant neighborhoods without needing the fdr files
+   again.
+5. Write two tsvs (trait profile and ClinVar profile). Plotting is a
    separate, manual step: run this file directly (see _main / plot_profiles_from_files)
    to generate the comparison PDF from the two tsvs, optionally restricting
-   to a subset of neighborhoods and choosing which column to plot.
+   to a subset of neighborhoods and choosing which column to plot. Each plot
+   marks significant neighborhoods: a dot on the blue (trait) line for the
+   discovery neighborhood or any neighborhood significant for the discovery
+   trait; a diamond on the blue line for neighborhoods significant in some
+   other trait; a dot on the red (ClinVar) line for ClinVar-significant
+   neighborhoods.
 """
 
 import os
@@ -116,6 +127,46 @@ def select_best_trait_per_protein(fdr_results_file, trait_cluster_file, fdr_cuto
     if 'gene_name' in df_best.columns:
         keep_cols.append('gene_name')
     return df_best[keep_cols].rename(columns={'aa_pos': 'discovery_aa_pos', 'fdr': 'discovery_fdr'})
+
+
+def load_significant_neighborhoods(fdr_results_file, fdr_cutoff, df_best):
+    """
+    For plot-marker purposes: find every (protein, aa_pos) significant
+    (fdr <= fdr_cutoff) in fdr_results_file, for ANY cluster/trait -- not
+    just the single best trait per protein kept by
+    select_best_trait_per_protein. Split into two sets per protein:
+      - discovery-significant: cluster matches the protein's discovery
+        cluster (df_best, from select_best_trait_per_protein)
+      - other-significant: cluster differs from the discovery cluster
+        (and not already counted as discovery-significant)
+
+    Returns {uniprot_id: (set_of_discovery_sig_aa_pos, set_of_other_sig_aa_pos)}.
+    """
+    df_fdr = pd.read_csv(fdr_results_file, sep='\t', dtype={'cluster': str})
+    df_fdr = df_fdr.drop_duplicates(subset=['uniprot_id', 'cluster', 'aa_pos', 'fdr'])
+    df_sig = df_fdr[df_fdr['fdr'] <= fdr_cutoff]
+
+    disc_cluster_map = df_best.set_index('uniprot_id')['cluster'].to_dict()
+
+    out = {}
+    for uid, grp in df_sig.groupby('uniprot_id'):
+        disc_cluster = disc_cluster_map.get(uid)
+        disc_aa = set(grp.loc[grp['cluster'] == disc_cluster, 'aa_pos'].astype(int)) if disc_cluster is not None else set()
+        other_aa = set(grp.loc[grp['cluster'] != disc_cluster, 'aa_pos'].astype(int)) - disc_aa
+        out[uid] = (disc_aa, other_aa)
+    return out
+
+
+def load_significant_clinvar_neighborhoods(clinvar_fdr_file, fdr_cutoff):
+    """
+    For plot-marker purposes: find every (protein, aa_pos) significant
+    (fdr <= fdr_cutoff) in a ClinVar-significance fdr file (columns
+    uniprot_id, aa_pos, fdr, ..., e.g. produced by a q3dnt/scan-test FDR run
+    on the ClinVar + common-variants data). Returns {uniprot_id: set(aa_pos)}.
+    """
+    df = pd.read_csv(clinvar_fdr_file, sep='\t')
+    df_sig = df[df['fdr'] <= fdr_cutoff]
+    return {uid: set(grp['aa_pos'].astype(int)) for uid, grp in df_sig.groupby('uniprot_id')}
 
 
 def write_required_phenocodes(fdr_results_file, trait_cluster_file, output_file, fdr_cutoff=None):
@@ -263,6 +314,67 @@ def _import_matplotlib():
     return plt, PdfPages
 
 
+def _import_requests():
+    """Import requests lazily, installing it on the fly if missing."""
+    try:
+        import requests
+    except ImportError:
+        logger.warning("requests not found; installing it now with pip...")
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', 'requests'])
+        import requests
+    return requests
+
+
+# UniProt feature types that are structural/boilerplate rather than
+# functionally informative, skipped from the annotation track (see
+# plot_add_annotations.py, which this is adapted from).
+ANNOTATION_SKIP_TYPES = {"Chain", "Helix", "Beta strand", "Turn", "Initiator methionine"}
+
+
+def fetch_uniprot_features(acc, skip_types=ANNOTATION_SKIP_TYPES):
+    """
+    Fetch UniProt feature annotations (domains, sites, motifs, etc.) for one
+    accession via the UniProt REST API. Returns (feats, seq_len), where feats
+    is a list of (feature_type, description, start, end), 1-based inclusive.
+    Returns (None, None) on any network/parsing failure, so callers can skip
+    annotation for that protein without failing the whole plot.
+    """
+    requests = _import_requests()
+    try:
+        resp = requests.get(f"https://rest.uniprot.org/uniprotkb/{acc}.json", timeout=30)
+        resp.raise_for_status()
+        j = resp.json()
+        feats = [
+            (f["type"], f.get("description", ""), f["location"]["start"]["value"], f["location"]["end"]["value"])
+            for f in j["features"]
+            if f["type"] not in skip_types
+            and None not in (f["location"]["start"]["value"], f["location"]["end"]["value"])
+        ]
+        return feats, j["sequence"]["length"]
+    except Exception as e:
+        logger.warning(f"{acc}: failed to fetch UniProt annotations ({e}); skipping annotation track.")
+        return None, None
+
+
+def _draw_annotation_track(axt, feats, seq_len):
+    """Draw one horizontal bar row per feature type, as in plot_add_annotations.py."""
+    import matplotlib.pyplot as plt
+    types = list(dict.fromkeys(f[0] for f in feats))
+    cmap = plt.get_cmap("tab20")
+    for t, d, s, e in feats:
+        r = types.index(t)
+        axt.barh(r, e - s + 1, left=s - 0.5, height=0.7, color=cmap(r % 20), alpha=0.85)
+        if seq_len and (e - s + 1) / seq_len > 0.03 and d:
+            axt.text((s + e) / 2, r, d[:20], ha="center", va="center", fontsize=6)
+    axt.set_yticks(range(len(types)))
+    axt.set_yticklabels(types, fontsize=8)
+    axt.invert_yaxis()
+    if seq_len:
+        axt.set_xlim(0.5, seq_len + 0.5)
+    axt.set_xlabel('aa_pos')
+    axt.spines[['top', 'right']].set_visible(False)
+
+
 def _apply_nbhd_subset(df, nbhd_subset, value_col):
     """
     If nbhd_subset is given (a set of (uniprot_id, aa_pos, radius) tuples),
@@ -328,12 +440,21 @@ def _spearman_with_circular_perm(x, y, n_perm=1000, min_n=5, seed=0):
 
 
 def _plot_profiles(df_trait, df_clinvar, pdf_path, nbhd_subset=None, value_col='mean_betahat',
-                    n_perm=1000):
-    """One page per (protein, radius): z-scored trait profile vs. z-scored ClinVar ratio."""
+                    n_perm=1000, annotate=True):
+    """
+    One page per (protein, radius): z-scored trait profile vs. z-scored
+    ClinVar ratio. If annotate is True, a UniProt feature annotation track
+    (domains, sites, motifs, etc.) is drawn below each line plot, sharing
+    the aa_pos x-axis, so functionally known regions of the protein are
+    visible alongside the signal. Annotations are fetched once per protein
+    (not per radius) and skipped silently (with a logged warning) if the
+    UniProt API call fails, e.g. no network access.
+    """
     plt, PdfPages = _import_matplotlib()
     df_trait = _apply_nbhd_subset(df_trait, nbhd_subset, value_col)
     clinvar_value_col = value_col if value_col in df_clinvar.columns else 'mean_betahat'
     df_clinvar = _apply_nbhd_subset(df_clinvar, nbhd_subset, clinvar_value_col)
+    annotation_cache = {}
     with PdfPages(pdf_path) as pdf:
         combos = df_trait[['uniprot_id', 'radius', 'trait']].drop_duplicates()
         for _, combo in combos.iterrows():
@@ -344,32 +465,75 @@ def _plot_profiles(df_trait, df_clinvar, pdf_path, nbhd_subset=None, value_col='
             if len(t) == 0:
                 continue
 
-            fig, ax = plt.subplots(figsize=(10, 4))
-            ax.plot(t['aa_pos'], _zscore(t[value_col]), label=f'trait {trait} ({value_col})', color='tab:blue')
+            feats, seq_len = (None, None)
+            if annotate:
+                if protein not in annotation_cache:
+                    annotation_cache[protein] = fetch_uniprot_features(protein)
+                feats, seq_len = annotation_cache[protein]
+
+            if feats:
+                types = list(dict.fromkeys(f[0] for f in feats))
+                fig, (ax, axt) = plt.subplots(
+                    2, 1, sharex=True, figsize=(10, 4 + 0.35 * len(types)),
+                    height_ratios=[4, max(1, 0.35 * len(types))],
+                )
+            else:
+                fig, ax = plt.subplots(figsize=(10, 4))
+                axt = None
+
+            z_t = _zscore(t[value_col])
+            ax.plot(t['aa_pos'], z_t, label=f'trait {trait} ({value_col})', color='tab:blue')
+
+            if 'is_significant_discovery' in t.columns:
+                disc_mask = t['is_significant_discovery'].fillna(False).to_numpy()
+                other_mask = (t['is_significant_other_trait'].fillna(False).to_numpy()
+                              if 'is_significant_other_trait' in t.columns
+                              else np.zeros_like(disc_mask)) & ~disc_mask
+                x_t = t['aa_pos'].to_numpy()
+                if disc_mask.any():
+                    ax.scatter(x_t[disc_mask], z_t[disc_mask], color='tab:blue', marker='o',
+                               s=50, zorder=5, edgecolor='black', linewidth=0.6,
+                               label='significant (discovery trait)')
+                if other_mask.any():
+                    ax.scatter(x_t[other_mask], z_t[other_mask], color='tab:blue', marker='D',
+                               s=45, zorder=5, edgecolor='black', linewidth=0.6,
+                               label='significant (other trait)')
 
             title = f'{protein} | radius={radius}'
             if len(c) > 0:
                 # align on aa_pos so both series share the same positions in order
-                merged = t[['aa_pos', value_col]].merge(
-                    c[['aa_pos', clinvar_value_col]], on='aa_pos', how='outer'
-                ).sort_values('aa_pos')
+                t_vals = t[['aa_pos', value_col]].rename(columns={value_col: '_trait_val'})
+                c_vals = c[['aa_pos', clinvar_value_col]].rename(columns={clinvar_value_col: '_clinvar_val'})
+                merged = t_vals.merge(c_vals, on='aa_pos', how='outer').sort_values('aa_pos')
                 rho, n_pairs, perm_p = _spearman_with_circular_perm(
-                    merged[value_col], merged[clinvar_value_col], n_perm=n_perm
+                    merged['_trait_val'], merged['_clinvar_val'], n_perm=n_perm
                 )
-                ax.plot(c['aa_pos'], _zscore(c[clinvar_value_col]),
-                        label=f'ClinVar ({clinvar_value_col})', color='tab:red')
+                z_c = _zscore(c[clinvar_value_col])
+                ax.plot(c['aa_pos'], z_c, label=f'ClinVar ({clinvar_value_col})', color='tab:red')
+                if 'is_significant_clinvar' in c.columns:
+                    cv_mask = c['is_significant_clinvar'].fillna(False).to_numpy()
+                    if cv_mask.any():
+                        x_c = c['aa_pos'].to_numpy()
+                        ax.scatter(x_c[cv_mask], z_c[cv_mask], color='tab:red', marker='o',
+                                   s=50, zorder=5, edgecolor='black', linewidth=0.6,
+                                   label='significant (ClinVar)')
                 if np.isnan(rho):
                     title += ' | Spearman rho: NA (too few shared positions)'
                 elif n_perm > 0:
                     title += f' | Spearman rho={rho:.3f} (n={n_pairs}, perm p={perm_p:.3g})'
                 else:
                     title += f' | Spearman rho={rho:.3f} (n={n_pairs})'
-            ax.set_xlabel('aa_pos')
             ax.set_ylabel('z-scored effect')
             if nbhd_subset:
                 title += ' | neighborhood subset applied'
             ax.set_title(title, fontsize=10)
             ax.legend()
+
+            if axt is not None:
+                _draw_annotation_track(axt, feats, seq_len)
+            else:
+                ax.set_xlabel('aa_pos')
+
             fig.tight_layout()
             pdf.savefig(fig)
             plt.close(fig)
@@ -393,7 +557,7 @@ def parse_nbhd_subset(subset_arg):
 
 
 def plot_profiles_from_files(trait_tsv, clinvar_tsv, plot_file, nbhd_subset=None,
-                              value_col='mean_betahat', n_perm=1000):
+                              value_col='mean_betahat', n_perm=1000, annotate=True):
     """
     Standalone replotting entry point: read the two tsvs already produced by
     --explore-nhbds-traits and generate the comparison PDF, optionally
@@ -405,7 +569,9 @@ def plot_profiles_from_files(trait_tsv, clinvar_tsv, plot_file, nbhd_subset=None
     the trait), the ClinVar series falls back to 'mean_betahat'. Each plot
     title reports the Spearman rank correlation between the two series
     (pairwise-complete, NAs dropped from both), plus a circular-shift
-    permutation p-value (set n_perm=0 to skip it).
+    permutation p-value (set n_perm=0 to skip it). If annotate is True
+    (default), a UniProt feature annotation track is drawn below each plot
+    (requires network access; set annotate=False to skip).
     """
     df_trait = pd.read_csv(trait_tsv, sep='\t')
     df_clinvar = pd.read_csv(clinvar_tsv, sep='\t')
@@ -413,7 +579,7 @@ def plot_profiles_from_files(trait_tsv, clinvar_tsv, plot_file, nbhd_subset=None
         raise ValueError(f"--value-col '{value_col}' not found in {trait_tsv}; "
                           f"available columns: {list(df_trait.columns)}")
     _plot_profiles(df_trait, df_clinvar, plot_file, nbhd_subset=nbhd_subset,
-                    value_col=value_col, n_perm=n_perm)
+                    value_col=value_col, n_perm=n_perm, annotate=annotate)
     logger.info(f"Wrote profile comparison plot to {plot_file}")
 
 
@@ -431,6 +597,7 @@ def run_explore_nbhds_profile(
         clinvar_output_file,
         fdr_cutoff=None,
         shrink_k=5.0,
+        clinvar_fdr_file=None,
 ):
     radii = parse_radii(radii_arg)
     df_best = select_best_trait_per_protein(fdr_results_file, trait_cluster_file, fdr_cutoff)
@@ -487,16 +654,52 @@ def run_explore_nbhds_profile(
                     row['gene_name'] = r['gene_name']
                 clinvar_rows.append(row)
 
+    df_out = pd.DataFrame(trait_rows)
+    df_clinvar_out = pd.DataFrame(clinvar_rows)
+
+    # Significance markers for plotting: is_significant_discovery/
+    # is_significant_other_trait on the trait tsv, is_significant_clinvar on
+    # the ClinVar tsv. Computed here (not at plot time) so the tsvs are
+    # self-contained and the plotting script needs no fdr-file access.
+    if fdr_cutoff is not None:
+        sig_by_protein = load_significant_neighborhoods(fdr_results_file, fdr_cutoff, df_best)
+        disc_rows = [(uid, pos) for uid, (dset, _) in sig_by_protein.items() for pos in dset]
+        other_rows = [(uid, pos) for uid, (_, oset) in sig_by_protein.items() for pos in oset]
+        df_disc_sig = pd.DataFrame(disc_rows, columns=['uniprot_id', 'aa_pos'])
+        df_disc_sig['is_significant_discovery'] = True
+        df_other_sig = pd.DataFrame(other_rows, columns=['uniprot_id', 'aa_pos'])
+        df_other_sig['is_significant_other_trait'] = True
+        df_out = df_out.merge(df_disc_sig, on=['uniprot_id', 'aa_pos'], how='left')
+        df_out = df_out.merge(df_other_sig, on=['uniprot_id', 'aa_pos'], how='left')
+        df_out['is_significant_discovery'] = df_out['is_significant_discovery'].fillna(False)
+        df_out['is_significant_other_trait'] = df_out['is_significant_other_trait'].fillna(False)
+    else:
+        logger.warning("fdr_cutoff is None; 'significant' is undefined without a cutoff, "
+                        "skipping is_significant_discovery/is_significant_other_trait markers.")
+        df_out['is_significant_discovery'] = False
+        df_out['is_significant_other_trait'] = False
+
+    if clinvar_fdr_file is not None and fdr_cutoff is not None:
+        sig_clinvar_by_protein = load_significant_clinvar_neighborhoods(clinvar_fdr_file, fdr_cutoff)
+        cv_rows = [(uid, pos) for uid, posset in sig_clinvar_by_protein.items() for pos in posset]
+        df_cv_sig = pd.DataFrame(cv_rows, columns=['uniprot_id', 'aa_pos'])
+        df_cv_sig['is_significant_clinvar'] = True
+        df_clinvar_out = df_clinvar_out.merge(df_cv_sig, on=['uniprot_id', 'aa_pos'], how='left')
+        df_clinvar_out['is_significant_clinvar'] = df_clinvar_out['is_significant_clinvar'].fillna(False)
+    else:
+        if clinvar_fdr_file is None:
+            logger.info("--clinvar-fdr-file not given; skipping is_significant_clinvar marker.")
+        df_clinvar_out['is_significant_clinvar'] = False
+
     col_order = ['trait', 'uniprot_id', 'aa_pos', 'n_betahat', 'mean_betahat', 'mean_betahat_shrunk',
                  'se_betahat', 'radius', 'cluster', 'discovery_fdr', 'discovery_aa_pos', 'gene_name']
 
-    df_out = pd.DataFrame(trait_rows)
-    df_out = df_out[[c for c in col_order if c in df_out.columns]]
+    trait_col_order = col_order + ['is_significant_discovery', 'is_significant_other_trait']
+    df_out = df_out[[c for c in trait_col_order if c in df_out.columns]]
     df_out.to_csv(output_file, sep='\t', index=False)
     logger.info(f"Wrote {len(df_out)} rows to {output_file}")
 
-    clinvar_col_order = col_order + ['se_ratio_approx', 'nbhd_case', 'nbhd_control']
-    df_clinvar_out = pd.DataFrame(clinvar_rows)
+    clinvar_col_order = col_order + ['se_ratio_approx', 'nbhd_case', 'nbhd_control', 'is_significant_clinvar']
     df_clinvar_out = df_clinvar_out[[c for c in clinvar_col_order if c in df_clinvar_out.columns]]
     df_clinvar_out.to_csv(clinvar_output_file, sep='\t', index=False)
     logger.info(f"Wrote {len(df_clinvar_out)} rows to {clinvar_output_file}")
@@ -531,10 +734,16 @@ def _main():
                               'for spatial autocorrelation from overlapping '
                               'neighborhoods); set to 0 to skip and show only rho. '
                               'Default: 1000.')
+    parser.add_argument('--no-annotate', action='store_true', default=False,
+                         help='skip the UniProt feature annotation track (domains, '
+                              'sites, motifs, etc.) drawn below each plot by default; '
+                              'use this if you have no network access or want faster '
+                              'plotting.')
     args = parser.parse_args()
     nbhd_subset = parse_nbhd_subset(args.nbhd_subset)
     plot_profiles_from_files(args.trait_tsv, args.clinvar_tsv, args.plot_file,
-                              nbhd_subset=nbhd_subset, value_col=args.value_col, n_perm=args.n_perm)
+                              nbhd_subset=nbhd_subset, value_col=args.value_col, n_perm=args.n_perm,
+                              annotate=not args.no_annotate)
 
 
 if __name__ == '__main__':
