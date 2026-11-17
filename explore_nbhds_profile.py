@@ -492,11 +492,11 @@ def _plot_profiles(df_trait, df_clinvar, pdf_path, nbhd_subset=None, value_col='
                 x_t = t['aa_pos'].to_numpy()
                 if disc_mask.any():
                     ax.scatter(x_t[disc_mask], z_t[disc_mask], color='tab:blue', marker='o',
-                               s=50, zorder=5, edgecolor='black', linewidth=0.6,
+                               s=50, zorder=10, edgecolor='black', linewidth=0.6,
                                label='significant (discovery trait)')
                 if other_mask.any():
                     ax.scatter(x_t[other_mask], z_t[other_mask], color='tab:blue', marker='D',
-                               s=45, zorder=5, edgecolor='black', linewidth=0.6,
+                               s=45, zorder=10, edgecolor='black', linewidth=0.6,
                                label='significant (other trait)')
 
             title = f'{protein} | radius={radius}'
