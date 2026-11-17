@@ -300,6 +300,34 @@ def _zscore(x):
     return (x - mu) / sd
 
 
+def _minmax(x):
+    """Scale to [-1, 1] via (x - min) / (max - min), rescaled."""
+    x = np.asarray(x, dtype=float)
+    lo, hi = np.nanmin(x), np.nanmax(x)
+    if not np.isfinite(hi - lo) or hi == lo:
+        return np.zeros_like(x)
+    return 2 * (x - lo) / (hi - lo) - 1
+
+
+def _robust_scale(x):
+    """Median/MAD scaling: (x - median) / (1.4826 * MAD), robust to outliers."""
+    x = np.asarray(x, dtype=float)
+    med = np.nanmedian(x)
+    mad = np.nanmedian(np.abs(x - med))
+    if not np.isfinite(mad) or mad == 0:
+        return np.zeros_like(x)
+    return (x - med) / (1.4826 * mad)
+
+
+NORM_METHODS = {'zscore': _zscore, 'minmax': _minmax, 'robust': _robust_scale}
+
+
+def _normalize(x, method='zscore'):
+    if method not in NORM_METHODS:
+        raise ValueError(f"Unknown --norm method '{method}'; choices: {list(NORM_METHODS)}")
+    return NORM_METHODS[method](x)
+
+
 def _import_matplotlib():
     """Import matplotlib lazily, installing it on the fly if missing."""
     try:
@@ -440,15 +468,22 @@ def _spearman_with_circular_perm(x, y, n_perm=1000, min_n=5, seed=0):
 
 
 def _plot_profiles(df_trait, df_clinvar, pdf_path, nbhd_subset=None, value_col='mean_betahat',
-                    n_perm=1000, annotate=True):
+                    n_perm=1000, annotate=True, norm='zscore', abs_corr=False):
     """
-    One page per (protein, radius): z-scored trait profile vs. z-scored
-    ClinVar ratio. If annotate is True, a UniProt feature annotation track
+    One page per (protein, radius): normalized trait profile vs. normalized
+    ClinVar ratio (normalization method set by norm: 'zscore', 'minmax', or
+    'robust'). If annotate is True, a UniProt feature annotation track
     (domains, sites, motifs, etc.) is drawn below each line plot, sharing
     the aa_pos x-axis, so functionally known regions of the protein are
     visible alongside the signal. Annotations are fetched once per protein
     (not per radius) and skipped silently (with a logged warning) if the
     UniProt API call fails, e.g. no network access.
+
+    If abs_corr is True, the trait series is sign-flipped (multiplied by -1)
+    whenever its raw Spearman correlation with the ClinVar series is
+    negative, since the sign of that correlation is just a convention of how
+    the trait/ratio happen to be coded; the title then reports the
+    (now-positive) correlation and notes that the trait was flipped.
     """
     plt, PdfPages = _import_matplotlib()
     df_trait = _apply_nbhd_subset(df_trait, nbhd_subset, value_col)
@@ -481,8 +516,25 @@ def _plot_profiles(df_trait, df_clinvar, pdf_path, nbhd_subset=None, value_col='
                 fig, ax = plt.subplots(figsize=(10, 4))
                 axt = None
 
-            z_t = _zscore(t[value_col])
-            ax.plot(t['aa_pos'], z_t, label=f'trait {trait} ({value_col})', color='tab:blue')
+            title = f'{protein} | radius={radius}'
+            rho = n_pairs = perm_p = np.nan
+            flip_sign = 1.0
+            if len(c) > 0:
+                # align on aa_pos so both series share the same positions in order
+                t_vals = t[['aa_pos', value_col]].rename(columns={value_col: '_trait_val'})
+                c_vals = c[['aa_pos', clinvar_value_col]].rename(columns={clinvar_value_col: '_clinvar_val'})
+                merged = t_vals.merge(c_vals, on='aa_pos', how='outer').sort_values('aa_pos')
+                rho, n_pairs, perm_p = _spearman_with_circular_perm(
+                    merged['_trait_val'], merged['_clinvar_val'], n_perm=n_perm
+                )
+                if abs_corr and np.isfinite(rho) and rho < 0:
+                    flip_sign = -1.0
+
+            z_t = _normalize(flip_sign * t[value_col].to_numpy(dtype=float), norm)
+            trait_label = f'trait {trait} ({value_col})'
+            if flip_sign < 0:
+                trait_label += ', flipped'
+            ax.plot(t['aa_pos'], z_t, label=trait_label, color='tab:blue')
 
             if 'is_significant_discovery' in t.columns:
                 disc_mask = t['is_significant_discovery'].fillna(False).to_numpy()
@@ -493,22 +545,14 @@ def _plot_profiles(df_trait, df_clinvar, pdf_path, nbhd_subset=None, value_col='
                 if disc_mask.any():
                     ax.scatter(x_t[disc_mask], z_t[disc_mask], color='tab:blue', marker='o',
                                s=50, zorder=10, edgecolor='black', linewidth=0.6,
-                               label='significant (discovery trait)')
+                               label=f'significant (discovery trait, n={int(disc_mask.sum())})')
                 if other_mask.any():
                     ax.scatter(x_t[other_mask], z_t[other_mask], color='tab:blue', marker='D',
                                s=45, zorder=10, edgecolor='black', linewidth=0.6,
-                               label='significant (other trait)')
+                               label=f'significant (other trait, n={int(other_mask.sum())})')
 
-            title = f'{protein} | radius={radius}'
             if len(c) > 0:
-                # align on aa_pos so both series share the same positions in order
-                t_vals = t[['aa_pos', value_col]].rename(columns={value_col: '_trait_val'})
-                c_vals = c[['aa_pos', clinvar_value_col]].rename(columns={clinvar_value_col: '_clinvar_val'})
-                merged = t_vals.merge(c_vals, on='aa_pos', how='outer').sort_values('aa_pos')
-                rho, n_pairs, perm_p = _spearman_with_circular_perm(
-                    merged['_trait_val'], merged['_clinvar_val'], n_perm=n_perm
-                )
-                z_c = _zscore(c[clinvar_value_col])
+                z_c = _normalize(c[clinvar_value_col].to_numpy(dtype=float), norm)
                 ax.plot(c['aa_pos'], z_c, label=f'ClinVar ({clinvar_value_col})', color='tab:red')
                 if 'is_significant_clinvar' in c.columns:
                     cv_mask = c['is_significant_clinvar'].fillna(False).to_numpy()
@@ -516,14 +560,17 @@ def _plot_profiles(df_trait, df_clinvar, pdf_path, nbhd_subset=None, value_col='
                         x_c = c['aa_pos'].to_numpy()
                         ax.scatter(x_c[cv_mask], z_c[cv_mask], color='tab:red', marker='o',
                                    s=50, zorder=5, edgecolor='black', linewidth=0.6,
-                                   label='significant (ClinVar)')
+                                   label=f'significant (ClinVar, n={int(cv_mask.sum())})')
+                display_rho = abs(rho) if (abs_corr and np.isfinite(rho)) else rho
                 if np.isnan(rho):
                     title += ' | Spearman rho: NA (too few shared positions)'
                 elif n_perm > 0:
-                    title += f' | Spearman rho={rho:.3f} (n={n_pairs}, perm p={perm_p:.3g})'
+                    title += f' | Spearman rho={display_rho:.3f} (n={n_pairs}, perm p={perm_p:.3g})'
                 else:
-                    title += f' | Spearman rho={rho:.3f} (n={n_pairs})'
-            ax.set_ylabel('z-scored effect')
+                    title += f' | Spearman rho={display_rho:.3f} (n={n_pairs})'
+                if flip_sign < 0:
+                    title += ' | trait sign flipped (--abs-corr)'
+            ax.set_ylabel(f'{norm}-normalized effect')
             if nbhd_subset:
                 title += ' | neighborhood subset applied'
             ax.set_title(title, fontsize=10)
@@ -557,7 +604,8 @@ def parse_nbhd_subset(subset_arg):
 
 
 def plot_profiles_from_files(trait_tsv, clinvar_tsv, plot_file, nbhd_subset=None,
-                              value_col='mean_betahat', n_perm=1000, annotate=True):
+                              value_col='mean_betahat', n_perm=1000, annotate=True,
+                              norm='zscore', abs_corr=False):
     """
     Standalone replotting entry point: read the two tsvs already produced by
     --explore-nhbds-traits and generate the comparison PDF, optionally
@@ -571,7 +619,11 @@ def plot_profiles_from_files(trait_tsv, clinvar_tsv, plot_file, nbhd_subset=None
     (pairwise-complete, NAs dropped from both), plus a circular-shift
     permutation p-value (set n_perm=0 to skip it). If annotate is True
     (default), a UniProt feature annotation track is drawn below each plot
-    (requires network access; set annotate=False to skip).
+    (requires network access; set annotate=False to skip). norm selects the
+    normalization used for plotting ('zscore', 'minmax', or 'robust'). If
+    abs_corr is True, the trait series is sign-flipped when its raw
+    correlation with ClinVar is negative, since that sign is just a
+    convention (see _plot_profiles docstring).
     """
     df_trait = pd.read_csv(trait_tsv, sep='\t')
     df_clinvar = pd.read_csv(clinvar_tsv, sep='\t')
@@ -579,7 +631,8 @@ def plot_profiles_from_files(trait_tsv, clinvar_tsv, plot_file, nbhd_subset=None
         raise ValueError(f"--value-col '{value_col}' not found in {trait_tsv}; "
                           f"available columns: {list(df_trait.columns)}")
     _plot_profiles(df_trait, df_clinvar, plot_file, nbhd_subset=nbhd_subset,
-                    value_col=value_col, n_perm=n_perm, annotate=annotate)
+                    value_col=value_col, n_perm=n_perm, annotate=annotate,
+                    norm=norm, abs_corr=abs_corr)
     logger.info(f"Wrote profile comparison plot to {plot_file}")
 
 
@@ -739,11 +792,28 @@ def _main():
                               'sites, motifs, etc.) drawn below each plot by default; '
                               'use this if you have no network access or want faster '
                               'plotting.')
+    parser.add_argument('--norm', type=str, default='zscore',
+                         choices=['zscore', 'minmax', 'robust'],
+                         help='''
+                         Normalization used to make the trait and ClinVar series
+                         visually comparable. 'zscore' (default): (x-mean)/sd.
+                         'minmax': rescale to [-1, 1]. 'robust': (x-median)/(1.4826*MAD),
+                         less sensitive to outlier residues than zscore/minmax.
+                         ''')
+    parser.add_argument('--abs-corr', action='store_true', default=False,
+                         help='''
+                         If the raw Spearman correlation between the trait and
+                         ClinVar series is negative, sign-flip the trait series
+                         before plotting/normalizing (the sign is only a
+                         convention of how the trait/ratio are coded). The title
+                         then reports the resulting (positive) correlation and
+                         notes the flip.
+                         ''')
     args = parser.parse_args()
     nbhd_subset = parse_nbhd_subset(args.nbhd_subset)
     plot_profiles_from_files(args.trait_tsv, args.clinvar_tsv, args.plot_file,
                               nbhd_subset=nbhd_subset, value_col=args.value_col, n_perm=args.n_perm,
-                              annotate=not args.no_annotate)
+                              annotate=not args.no_annotate, norm=args.norm, abs_corr=args.abs_corr)
 
 
 if __name__ == '__main__':
