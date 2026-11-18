@@ -63,6 +63,20 @@ def test_fisher_by_column_matches_hypergeom():
     assert np.allclose(got, np.where(enriched, want, 1.0))
 
 
+def test_fisher_by_column_bitwise_with_repeated_float_margins():
+    # The packed-key dedupe must hand hypergeom.sf exactly the per-cell arguments.
+    rng = np.random.default_rng(1)
+    nc = rng.choice([1, 7, 40, 300], 50).astype(float)
+    nn = rng.choice([1, 9, 60, 900], 50).astype(float)
+    a = np.minimum(rng.integers(0, 40, (30, 50)), nc.astype(int))
+    b = np.minimum(rng.integers(0, 40, (30, 50)), nn.astype(int))
+    a[0], b[0], b[1] = nc, 0, nn  # a = whole margin, b = 0, b = whole margin
+    got = fisher_greater_pvals_by_column(a, b, nc, nn)
+    enriched = (a > 0) & (a * nn > b * nc)
+    assert np.array_equal(got, np.where(enriched, hypergeom.sf(a - 1, nc + nn, nc, a + b), 1.0))
+    assert (got[0] < 1).any() and (got == 1).any()
+
+
 def test_cmh_by_column_matches_expected_variance():
     rng = np.random.default_rng(0)
     n_res = 8

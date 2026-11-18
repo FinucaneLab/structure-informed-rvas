@@ -894,10 +894,15 @@ def fisher_greater_pvals_by_column(a, b, n_case, n_ctrl):
     sel = (a > 0) & (a * n_ctrl > b * n_case)
     if not sel.any():
         return pvals
-    cols = np.broadcast_to(np.arange(a.shape[1]), a.shape)[sel]
-    keys = np.stack([a[sel], b[sel], n_case[0, cols], n_ctrl[0, cols]], axis=1)
-    uniq, inverse = np.unique(keys, axis=0, return_inverse=True)
-    pvals[sel] = fisher_greater_pvals(uniq[:, 0], uniq[:, 1], uniq[:, 2], uniq[:, 3])[inverse.ravel()]
+    # Dedupe on one int64 code (margin id, a, b): np.unique(axis=0) sorts void rows, ~10x slower.
+    margins, margin_id = np.unique(np.stack([n_case[0], n_ctrl[0]], axis=1), axis=0, return_inverse=True)
+    a_sel, b_sel = a[sel].astype(np.int64), b[sel].astype(np.int64)
+    na, nb = int(a_sel.max()) + 1, int(b_sel.max()) + 1
+    assert len(margins) * na * nb < 2**62, "key overflow"
+    m_sel = np.broadcast_to(margin_id.ravel(), a.shape)[sel]
+    uniq, inverse = np.unique((m_sel * na + a_sel) * nb + b_sel, return_inverse=True)
+    ua, ub, um = uniq // nb % na, uniq % nb, margins[uniq // (na * nb)]
+    pvals[sel] = fisher_greater_pvals(ua, ub, um[:, 0], um[:, 1])[inverse]
     return pvals
 
 
