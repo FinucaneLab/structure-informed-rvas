@@ -747,6 +747,13 @@ if __name__ == '__main__':
         help='count every variant only once',
     )
     parser.add_argument(
+        '--exclusive-variants',
+        action='store_true',
+        default=False,
+        help='Drop variants seen in both cases and controls, re-applied in every permutation. '
+             'Variant = (aa_pos, aa_alt). Greater only.',
+    )
+    parser.add_argument(
         '--dont-remove-common',
         action='store_true',
         default=False,
@@ -970,6 +977,14 @@ if __name__ == '__main__':
         raise ValueError("--mu-col and --mu-file are mutually exclusive")
 
     mutation_rate_mode = (args.mu_col is not None) or (args.mu_file is not None)
+
+    if args.exclusive_variants:
+        # --ignore-ac drops shared variants once, before permuting, which is the biased version.
+        if args.ignore_ac or args.alternative != 'greater' or mutation_rate_mode:
+            raise ValueError(
+                "--exclusive-variants requires --alternative greater and cannot be combined "
+                "with --ignore-ac or a mutation-rate null (--mu-col/--mu-file)"
+            )
 
     if mutation_rate_mode:
         if args.ac_control_col is not None:
@@ -1218,7 +1233,7 @@ if __name__ == '__main__':
             alternative=args.alternative, min_alleles=args.min_alleles,
             gene_criterion=args.conditional_gene_criterion,
             gene_cutoff=args.conditional_gene_cutoff, min_denovo=args.min_denovo,
-            keep_round_pvals=args.keep_round_pvals,
+            keep_round_pvals=args.keep_round_pvals, exclusive=args.exclusive_variants,
         )
         did_nothing = False
 
@@ -1276,6 +1291,7 @@ if __name__ == '__main__':
             args.seed,
             args.alternative,
             args.min_alleles,
+            exclusive=args.exclusive_variants,
         )
         did_nothing = False
 
@@ -1300,6 +1316,7 @@ if __name__ == '__main__':
             args.seed,
             args.alternative,
             args.min_alleles,
+            exclusive=args.exclusive_variants,
         )
         did_nothing = False
     
@@ -1399,6 +1416,7 @@ if __name__ == '__main__':
             alternative=args.alternative,
             result_fn=args.annotation_result_fn,
             min_alleles=args.min_alleles,
+            exclusive=args.exclusive_variants,
             **mu_kwargs,
         )
         did_nothing = False

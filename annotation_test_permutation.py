@@ -29,6 +29,7 @@ from tqdm.auto import tqdm
 
 from cmh import (
     cmh_expected_variance,
+    cmh_pvals_by_column,
     mantel_haenszel_or,
     screen_and_exact_pvalues,
     summarize_strata,
@@ -49,6 +50,8 @@ from utils import (
     DEFAULT_SCREEN_CHI2,
     SCREEN_CHI2_GREATER,
     fisher_greater_pvals,
+    fisher_greater_pvals_by_column,
+    exclusive_case_control,
     get_case_control_ac_matrix,
     get_chi2_pvals_case_control,
     get_distance_and_pae_matrices,
@@ -419,7 +422,8 @@ def test_protein_annotations(
     n_perm: int,
     seed: int = 0,
     alternative: str = "greater",
-) -> pd.DataFrame:
+    exclusive: bool = False,
+) -> pd.DataFrame | None:
     """Permutation test for one protein's annotations.
 
     Null: for each residue, total (case+control) allele count is fixed and case/control
@@ -428,47 +432,70 @@ def test_protein_annotations(
     (Fisher's exact for borderline cases), against the observed count and against each
     permutation, giving local_fdr/local_fwer within this protein.
     alternative="greater" tests case enrichment inside the annotation only.
+
+    exclusive: variants seen in both cases and controls are dropped in every column
+    (observed and permuted), see exclusive_case_control; the labels are then redrawn per
+    variant. Margins differ per column, so p-values are exact hypergeometric per column.
+    Returns None if no case or no control allele is left after the filter.
     """
-    case_ac_matrix, ctrl_ac_matrix = get_case_control_ac_matrix(
-        prot_rvas_df, n_res=seq_len, n_sim=n_perm, seed=protein_seed(uniprot_id, seed)
-    )
-
-    # only residues with alleles matter; cast after trimming so the int64 copy is only of those rows
-    cols = np.flatnonzero(case_ac_matrix.sum(1) + ctrl_ac_matrix.sum(1))
-    case_ac = case_ac_matrix[cols].astype(int)
-    ctrl_ac = ctrl_ac_matrix[cols].astype(int)
-    labels = csr_matrix(label_matrix[:, cols].astype(np.int8))  # sparse int8 avoids numpy's slow integer matmul
-    ac_in_case = np.asarray(labels @ case_ac)  # (n_annotations, 1 + n_perm)
-    ac_in_ctrl = np.asarray(labels @ ctrl_ac)
-
-    total_ac_case = int(case_ac[:, 0].sum())
-    total_ac_ctrl = int(ctrl_ac[:, 0].sum())
-
-    pvals_table, potential_significant_table = get_chi2_pvals_case_control(
-        ac_in_case, ac_in_ctrl, total_ac_case, total_ac_ctrl, alternative
-    )
-    or_table = np.ones_like(pvals_table)
-
-    # Only run the exact test on (a, b) pairs that are both observed somewhere in this
-    # protein's data (avoid computing it for every unobserved cell in the lookup table)
-    # and flagged borderline by the chi-square pre-filter.
-    observed_table = np.zeros_like(potential_significant_table, dtype=bool)
-    a_obs, b_obs = ac_in_case.ravel(), ac_in_ctrl.ravel()
-    valid_pairs = (a_obs + b_obs) > 0
-    observed_table[a_obs[valid_pairs], b_obs[valid_pairs]] = True
-    cells = np.argwhere(observed_table & potential_significant_table)
-    if alternative == "greater":
-        a, b = cells[:, 0], cells[:, 1]
-        pvals_table[a, b] = fisher_greater_pvals(a, b, total_ac_case, total_ac_ctrl)
+    if exclusive:
+        if alternative != "greater":
+            raise ValueError("exclusive supports only alternative='greater'")
+        case, ctrl = exclusive_case_control(prot_rvas_df, seq_len, n_perm, protein_seed(uniprot_id, seed))
+        case, ctrl = case[0], ctrl[0]
+        if case[:, 0].sum() == 0 or ctrl[:, 0].sum() == 0:
+            logger.warning(f"{uniprot_id}: no case or no control alleles left after the exclusive-variants filter; skipping")
+            return None
+        cols = np.flatnonzero(case.sum(1) + ctrl.sum(1))
+        labels = csr_matrix(label_matrix[:, cols].astype(np.int8))
+        ac_in_case = np.asarray(labels @ case[cols].astype(int))
+        ac_in_ctrl = np.asarray(labels @ ctrl[cols].astype(int))
+        total_case, total_ctrl = case.sum(0), ctrl.sum(0)
+        pvalues = fisher_greater_pvals_by_column(ac_in_case, ac_in_ctrl, total_case, total_ctrl)
         with np.errstate(divide="ignore", invalid="ignore"):
-            or_table[a, b] = a * (total_ac_ctrl - b) / ((total_ac_case - a) * b)
+            odds_ratio = ac_in_case[:, 0] * (total_ctrl[0] - ac_in_ctrl[:, 0]) / ((total_case[0] - ac_in_case[:, 0]) * ac_in_ctrl[:, 0])
+        odds_ratios = odds_ratio[:, None]
     else:
-        for a, b in cells:
-            table = [[a, total_ac_case - a], [b, total_ac_ctrl - b]]
-            or_table[a, b], pvals_table[a, b] = fisher_exact(table)
+        case_ac_matrix, ctrl_ac_matrix = get_case_control_ac_matrix(
+            prot_rvas_df, n_res=seq_len, n_sim=n_perm, seed=protein_seed(uniprot_id, seed)
+        )
 
-    pvalues = pvals_table[ac_in_case, ac_in_ctrl]
-    odds_ratios = or_table[ac_in_case, ac_in_ctrl]
+        # only residues with alleles matter; cast after trimming so the int64 copy is only of those rows
+        cols = np.flatnonzero(case_ac_matrix.sum(1) + ctrl_ac_matrix.sum(1))
+        case_ac = case_ac_matrix[cols].astype(int)
+        ctrl_ac = ctrl_ac_matrix[cols].astype(int)
+        labels = csr_matrix(label_matrix[:, cols].astype(np.int8))  # sparse int8 avoids numpy's slow integer matmul
+        ac_in_case = np.asarray(labels @ case_ac)  # (n_annotations, 1 + n_perm)
+        ac_in_ctrl = np.asarray(labels @ ctrl_ac)
+
+        total_ac_case = int(case_ac[:, 0].sum())
+        total_ac_ctrl = int(ctrl_ac[:, 0].sum())
+
+        pvals_table, potential_significant_table = get_chi2_pvals_case_control(
+            ac_in_case, ac_in_ctrl, total_ac_case, total_ac_ctrl, alternative
+        )
+        or_table = np.ones_like(pvals_table)
+
+        # Only run the exact test on (a, b) pairs that are both observed somewhere in this
+        # protein's data (avoid computing it for every unobserved cell in the lookup table)
+        # and flagged borderline by the chi-square pre-filter.
+        observed_table = np.zeros_like(potential_significant_table, dtype=bool)
+        a_obs, b_obs = ac_in_case.ravel(), ac_in_ctrl.ravel()
+        valid_pairs = (a_obs + b_obs) > 0
+        observed_table[a_obs[valid_pairs], b_obs[valid_pairs]] = True
+        cells = np.argwhere(observed_table & potential_significant_table)
+        if alternative == "greater":
+            a, b = cells[:, 0], cells[:, 1]
+            pvals_table[a, b] = fisher_greater_pvals(a, b, total_ac_case, total_ac_ctrl)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                or_table[a, b] = a * (total_ac_ctrl - b) / ((total_ac_case - a) * b)
+        else:
+            for a, b in cells:
+                table = [[a, total_ac_case - a], [b, total_ac_ctrl - b]]
+                or_table[a, b], pvals_table[a, b] = fisher_exact(table)
+
+        pvalues = pvals_table[ac_in_case, ac_in_ctrl]
+        odds_ratios = or_table[ac_in_case, ac_in_ctrl]
 
     observed_pvals = pvalues[:, 0]
     null_pvals = pvalues[:, 1:]
@@ -569,8 +596,14 @@ def test_protein_annotations_cmh(
     seed: int = 0,
     screen_chi2: float = DEFAULT_SCREEN_CHI2,
     alternative: str = "greater",
-) -> pd.DataFrame:
+    exclusive: bool = False,
+) -> pd.DataFrame | None:
     """CMH-adjusted version of test_protein_annotations.
+
+    exclusive: variants seen in both cases and controls (pooled over strata) are dropped
+    in every column, see exclusive_case_control. Margins differ per column, so the exact
+    p-values are computed per column on screened cells, see cmh_pvals_by_column. Returns None
+    if nothing is left to test.
 
     Case/control labels are redrawn within each stratum (only on residues carrying alleles);
     the statistic per annotation is the sum over strata of case alleles inside it, with an
@@ -578,35 +611,61 @@ def test_protein_annotations_cmh(
     1.0, to avoid a point mass). Strata with no case/control variation inside the protein
     carry no information.
     """
-    case_ac_matrix, case_by_stratum, total_by_stratum = get_stratified_case_ac_matrix(
-        prot_rvas_df, stratum_col, label_matrix.shape[1], n_perm, protein_seed(uniprot_id, seed)
-    )
-    cols = np.flatnonzero(total_by_stratum.sum(1))
-    labels = csr_matrix(label_matrix[:, cols].astype(np.int8))
-    inside_totals = np.asarray(labels @ total_by_stratum[cols], dtype=np.int64)
-    inside_case = np.asarray(labels @ case_by_stratum[cols], dtype=np.int64)
-    case_totals, stratum_totals = case_by_stratum.sum(0), total_by_stratum.sum(0)
-    expected, variance = cmh_expected_variance(inside_totals, case_totals, stratum_totals)
-    cmh = {
-        "s_case_inside": np.asarray(labels @ case_ac_matrix[cols], dtype=np.int64),
-        "expected_sum": expected,
-        "variance_sum": variance,
-        "inside_totals_by_stratum": inside_totals,
-        "inside_case_by_stratum": inside_case,
-        "case_totals": case_totals,
-        "stratum_totals": stratum_totals,
-    }
-
-    pvals, stat = screen_and_exact_pvalues(cmh, screen_chi2, alternative)
-    if alternative == "greater":
-        z = (cmh["s_case_inside"] - expected[:, None]) / np.sqrt(np.where(variance > 0, variance, 1.0))[:, None]
-        fallback = np.where(variance[:, None] > 0, norm.sf(z), 1.0)
-        screened = (stat > (SCREEN_CHI2_GREATER if screen_chi2 == DEFAULT_SCREEN_CHI2 else screen_chi2)) & (z > 0)
+    if exclusive:
+        if alternative != "greater":
+            raise ValueError("exclusive supports only alternative='greater'")
+        case, ctrl = exclusive_case_control(
+            prot_rvas_df, label_matrix.shape[1], n_perm, protein_seed(uniprot_id, seed), stratum_col=stratum_col
+        )
+        if case[..., 0].sum() == 0 or ctrl[..., 0].sum() == 0:
+            logger.warning(f"{uniprot_id}: no case or no control alleles left after the exclusive-variants filter; skipping")
+            return None
+        cols = np.flatnonzero((case + ctrl).sum(axis=(0, 2)))
+        labels = csr_matrix(label_matrix[:, cols].astype(np.int8))
+        pvals, stat, _, variance = cmh_pvals_by_column(labels, case[:, cols], ctrl[:, cols])
+        case_by_stratum, total_by_stratum = case[:, cols, 0].T.astype(np.int64), (case + ctrl)[:, cols, 0].T.astype(np.int64)
+        inside_totals = np.asarray(labels @ total_by_stratum, dtype=np.int64)
+        inside_case = np.asarray(labels @ case_by_stratum, dtype=np.int64)
+        case_totals, stratum_totals = case_by_stratum.sum(0), total_by_stratum.sum(0)
+        local_fwer, local_fdr = local_fwer_fdr(pvals[:, 0], pvals[:, 1:])
+        cmh = {
+            "s_case_inside": inside_case.sum(axis=1)[:, None],
+            "variance_sum": variance,
+            "inside_totals_by_stratum": inside_totals,
+            "inside_case_by_stratum": inside_case,
+            "case_totals": case_totals,
+            "stratum_totals": stratum_totals,
+        }
     else:
-        fallback = chi2.sf(stat, 1)
-        screened = stat > screen_chi2
-    pvals = np.where(screened, pvals, fallback)
-    local_fwer, local_fdr = local_fwer_fdr(pvals[:, 0], pvals[:, 1:])
+        case_ac_matrix, case_by_stratum, total_by_stratum = get_stratified_case_ac_matrix(
+            prot_rvas_df, stratum_col, label_matrix.shape[1], n_perm, protein_seed(uniprot_id, seed)
+        )
+        cols = np.flatnonzero(total_by_stratum.sum(1))
+        labels = csr_matrix(label_matrix[:, cols].astype(np.int8))
+        inside_totals = np.asarray(labels @ total_by_stratum[cols], dtype=np.int64)
+        inside_case = np.asarray(labels @ case_by_stratum[cols], dtype=np.int64)
+        case_totals, stratum_totals = case_by_stratum.sum(0), total_by_stratum.sum(0)
+        expected, variance = cmh_expected_variance(inside_totals, case_totals, stratum_totals)
+        cmh = {
+            "s_case_inside": np.asarray(labels @ case_ac_matrix[cols], dtype=np.int64),
+            "expected_sum": expected,
+            "variance_sum": variance,
+            "inside_totals_by_stratum": inside_totals,
+            "inside_case_by_stratum": inside_case,
+            "case_totals": case_totals,
+            "stratum_totals": stratum_totals,
+        }
+
+        pvals, stat = screen_and_exact_pvalues(cmh, screen_chi2, alternative)
+        if alternative == "greater":
+            z = (cmh["s_case_inside"] - expected[:, None]) / np.sqrt(np.where(variance > 0, variance, 1.0))[:, None]
+            fallback = np.where(variance[:, None] > 0, norm.sf(z), 1.0)
+            screened = (stat > (SCREEN_CHI2_GREATER if screen_chi2 == DEFAULT_SCREEN_CHI2 else screen_chi2)) & (z > 0)
+        else:
+            fallback = chi2.sf(stat, 1)
+            screened = stat > screen_chi2
+        pvals = np.where(screened, pvals, fallback)
+        local_fwer, local_fdr = local_fwer_fdr(pvals[:, 0], pvals[:, 1:])
 
     inside_totals = cmh["inside_totals_by_stratum"]
     case_totals, stratum_totals = cmh["case_totals"], cmh["stratum_totals"]
@@ -980,6 +1039,7 @@ def process_protein(
     lambda_hat: float | None = None,
     direction: str = "enrichment",
     stats: dict | None = None,
+    exclusive: bool = False,
 ) -> pd.DataFrame | None:
     """Build the label matrix, run the permutation test, and write the per-protein parquet.
 
@@ -1049,12 +1109,16 @@ def process_protein(
         )
     elif stratum_col is None:
         pvals_df = test_protein_annotations(
-            uniprot_id, prot_rvas_df, label_matrix, row_meta, seq_len, n_perm, seed, alternative
+            uniprot_id, prot_rvas_df, label_matrix, row_meta, seq_len, n_perm, seed, alternative,
+            exclusive=exclusive,
         )
     else:
         pvals_df = test_protein_annotations_cmh(
-            uniprot_id, prot_rvas_df, label_matrix, row_meta, n_perm, stratum_col, seed, alternative=alternative
+            uniprot_id, prot_rvas_df, label_matrix, row_meta, n_perm, stratum_col, seed, alternative=alternative,
+            exclusive=exclusive,
         )
+    if pvals_df is None:
+        return None
     per_protein_dir = results_dir / "per_protein"
     per_protein_dir.mkdir(exist_ok=True)
     write_shard(pvals_df, per_protein_dir / f"{uniprot_id}_annotation_pvals.parquet")
@@ -1090,6 +1154,7 @@ def run_annotation_test(
     lambda_hat: float | None = None,
     min_denovo: int = 5,
     direction: str = "enrichment",
+    exclusive: bool = False,
 ) -> pd.DataFrame:
     """Run the annotation test for every protein present in both rvas_df and ann_df.
 
@@ -1129,6 +1194,9 @@ def run_annotation_test(
         genes need >= min_denovo de novos and a nonzero rate; lambda_hat must come from
         estimate_lambda BEFORE gene selection. Use a fresh results_dir (shards of the two modes
         would collide). Incompatible with stratum_col.
+    exclusive: drop variants (aa_pos, aa_alt) seen in both cases and controls, re-applied in
+        every permutation (see exclusive_case_control). alternative="greater" only; not
+        with the de novo mode.
     cleanup_per_protein: delete the per-protein parquet shards once results.* is
         written, see summarize_annotation_test.
     format: "tsv.gz" (default) or "parquet" for the pooled results file. Per-protein
@@ -1140,6 +1208,8 @@ def run_annotation_test(
     n_perm) are reused, so a crashed run resumes; use a fresh results_dir after changing
     other parameters.
     """
+    if exclusive and (alternative != "greater" or mu_lookup is not None):
+        raise ValueError("exclusive requires alternative='greater' and is not available in de novo mode")
     results_dir = Path(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1220,7 +1290,7 @@ def run_annotation_test(
 
     def _call(uniprot_id: str) -> pd.DataFrame | None:
         shard = shard_dir / f"{uniprot_id}_annotation_pvals.parquet"
-        # ponytail: only n_perm is checked; a changed seed/radius/annotation set in the same results_dir reuses stale shards - use a fresh results_dir
+        # ponytail: only n_perm is checked; a changed seed/radius/annotation set/exclusive in the same results_dir reuses stale shards - use a fresh results_dir
         if shard.exists():
             if shard_n_perm(shard) == n_perm:
                 return read_shard(shard)
@@ -1244,6 +1314,7 @@ def run_annotation_test(
             lambda_hat=lambda_hat,
             direction=direction,
             stats=ann_stats,
+            exclusive=exclusive,
         )
 
     n_resumed = sum(

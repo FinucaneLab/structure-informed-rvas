@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import sklearn.metrics
 from Bio.PDB import PDBParser
+from scipy.sparse import csr_matrix
 from scipy.stats import chi2 as chi2_dist, hypergeom
 
 from logger_config import get_logger
@@ -815,6 +816,89 @@ def get_case_control_ac_matrix(df, n_res, n_sim, seed=None, keep=None):
     case_ac_matrix = np.hstack([case_ac_per_residue, null_case_ac_per_residue])
     control_ac_matrix = np.hstack([control_ac_per_residue, null_control_ac_per_residue])
     return case_ac_matrix, control_ac_matrix
+
+
+def exclusive_case_control(df, n_res, n_sim, seed=None, keep=None, stratum_col=None):
+    """
+    Variant-level label redraw with the exclusive-variants filter applied inside every column.
+
+    Labels are redrawn per (aa_pos, aa_alt[, stratum]) unit, then in each column
+    (observed = column 0, then n_sim nulls) every variant with >=1 case and >=1
+    control allele (pooled over strata) is zeroed, then units are summed to residues.
+    The filter is part of the statistic, so permutation p-values stay valid;
+    pre-filtering the observed data would not.
+
+    Returns case, ctrl of shape (k, n_res, 1 + n_sim), int32; k = number of strata
+    (1 without stratum_col), sorted as in get_stratified_case_ac_matrix.
+    """
+    if stratum_col is not None:
+        if stratum_col not in df.columns:
+            raise KeyError(f"Missing stratum column '{stratum_col}'")
+        if df[stratum_col].isna().any():
+            raise ValueError(f"Missing values found in stratum column '{stratum_col}'")
+    pos = df["aa_pos"].to_numpy(dtype=np.int64) - 1
+    bad = (pos < 0) | (pos >= n_res)
+    if bad.any():
+        raise ValueError(f"Amino-acid positions outside structure bounds: {(pos[bad] + 1)[:10].tolist()}")
+
+    work = pd.DataFrame({
+        "pos": pos,
+        "alt": df["aa_alt"].astype(str).to_numpy(),
+        "stratum": df[stratum_col].astype(str).to_numpy() if stratum_col else "",
+        "case": df["ac_case"].to_numpy(dtype=np.int64),
+        "total": (df["ac_case"] + df["ac_control"]).to_numpy(dtype=np.int64),
+    })
+    if keep is not None:
+        # Before the draw, as in get_case_control_ac_matrix: masked residues take no alleles.
+        work = work[np.asarray(keep).ravel()[work["pos"].to_numpy()].astype(bool)]
+    units = work.groupby(["pos", "alt", "stratum"], as_index=False)[["case", "total"]].sum()
+    units = units[units["total"] > 0].reset_index(drop=True)
+    strata = np.sort(units["stratum"].unique()) if len(units) else np.array([""])
+    k, n_units, n_cols = len(strata), len(units), 1 + n_sim
+
+    scode = np.searchsorted(strata, units["stratum"].to_numpy())
+    total = units["total"].to_numpy()
+    case_u = np.zeros((n_units, n_cols), dtype=np.int32)
+    case_u[:, 0] = units["case"]
+    rng = np.random.default_rng(seed)
+    for s in range(k):
+        idx = np.flatnonzero(scode == s)
+        if len(idx):
+            case_u[idx, 1:] = draw_stratified_null_cases(total[idx], units["case"].to_numpy()[idx].sum(), n_sim, rng)
+    ctrl_u = total[:, None].astype(np.int32) - case_u
+
+    # Shared = case and control alleles both present, summed over strata.
+    vcode = units.groupby(["pos", "alt"], sort=False).ngroup().to_numpy()
+    variant_sum = csr_matrix((np.ones(n_units, dtype=np.int32), (vcode, np.arange(n_units))),
+                             shape=(vcode.max() + 1 if n_units else 0, n_units))
+    shared = ((variant_sum @ case_u) > 0) & ((variant_sum @ ctrl_u) > 0)
+    drop = shared[vcode] if n_units else np.zeros((0, n_cols), dtype=bool)
+    case_u[drop] = 0
+    ctrl_u[drop] = 0
+
+    to_residue = csr_matrix((np.ones(n_units, dtype=np.int32), (scode * n_res + units["pos"].to_numpy(), np.arange(n_units))),
+                            shape=(k * n_res, n_units))
+    case = np.asarray((to_residue @ case_u).reshape(k, n_res, n_cols), dtype=np.int32)
+    ctrl = np.asarray((to_residue @ ctrl_u).reshape(k, n_res, n_cols), dtype=np.int32)
+    return case, ctrl
+
+
+def fisher_greater_pvals_by_column(a, b, n_case, n_ctrl):
+    """
+    fisher_greater_pvals with per-column margins: a, b are (rows, cols) inside counts,
+    n_case, n_ctrl are (cols,) totals. 1.0 unless a > 0 and case-enriched.
+    """
+    a, b = np.asarray(a), np.asarray(b)
+    n_case, n_ctrl = np.asarray(n_case)[None, :], np.asarray(n_ctrl)[None, :]
+    pvals = np.ones(a.shape)
+    sel = (a > 0) & (a * n_ctrl > b * n_case)
+    if not sel.any():
+        return pvals
+    cols = np.broadcast_to(np.arange(a.shape[1]), a.shape)[sel]
+    keys = np.stack([a[sel], b[sel], n_case[0, cols], n_ctrl[0, cols]], axis=1)
+    uniq, inverse = np.unique(keys, axis=0, return_inverse=True)
+    pvals[sel] = fisher_greater_pvals(uniq[:, 0], uniq[:, 1], uniq[:, 2], uniq[:, 3])[inverse.ravel()]
+    return pvals
 
 
 def get_stratified_case_ac_matrix(
