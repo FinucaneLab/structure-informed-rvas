@@ -226,6 +226,7 @@ def conditional_scan(
     min_denovo=5,
     default_radius=15.0,
     keep_round_pvals=False,
+    exclusive=False,
 ):
     """
     Run the base scan, then repeat it with each gene's called neighborhoods masked out.
@@ -308,6 +309,7 @@ def conditional_scan(
             False, False, fdr_cutoff, df_filter, ignore_ac, fdr_file, pval_file,
             conditioning=None, seed=seed, alternative=alternative,
             min_retained=min_retained, min_alleles=min_alleles,
+            exclusive=exclusive,
         )
 
     df_results = pd.read_csv(os.path.join(results_dir, fdr_file), sep='\t')
@@ -549,7 +551,7 @@ def conditional_scan(
                     current_pval_file, conditioning=conditioning, seed=seed,
                     alternative=alternative, min_retained=min_retained,
                     seed_salt=round_idx, requested=active, min_alleles=min_alleles,
-                    stats=round_stats,
+                    stats=round_stats, exclusive=exclusive,
                 )
             active, round_filter = _drop_failed_rescans(
                 active, scanned, round_filter, round_idx)
