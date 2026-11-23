@@ -8,13 +8,13 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix
 
-from cmh import cmh_expected_variance, screen_and_exact_pvalues
+from cmh import cmh_expected_variance, cmh_pvals_by_column, screen_and_exact_pvalues
 from empirical_fdr import compute_fdr
-from value_tracking import log_counts, record_skip, skip_reason, stats_fields
+from value_tracking import GeneSkipped, log_counts, record_skip, skip_reason, stats_fields
 from scan_test import _without_out_of_structure
 from logger_config import get_logger
 from utils import (DEFAULT_MIN_ALLELES, DEFAULT_SCREEN_CHI2, draw_stratified_null_cases,
-                   get_adjacency_matrix, write_dataset)
+                   get_adjacency_matrix, exclusive_case_control, write_dataset)
 
 
 logger = get_logger(__name__)
@@ -150,6 +150,7 @@ def compute_all_cmh_pvals(
     screen_chi2=DEFAULT_SCREEN_CHI2,
     seed=1,
     alternative="greater",
+    exclusive=False,
 ):
     if isinstance(radius, str):
         raise NotImplementedError(
@@ -168,18 +169,41 @@ def compute_all_cmh_pvals(
     if adjacency_matrix is None:
         raise FileNotFoundError(f"No usable adjacency matrix for {uniprot_id}")
 
-    cmh = _build_cmh_inputs(
-        df=df,
-        adjacency_matrix=adjacency_matrix,
-        n_sims=n_sims,
-        stratum_col=stratum_col,
-        seed=_protein_seed(seed, uniprot_id),
-    )
-    pval_matrix, cmh_stat_matrix = screen_and_exact_pvalues(
-        cmh,
-        screen_chi2=screen_chi2,
-        alternative=alternative,
-    )
+    if exclusive:
+        if alternative != "greater":
+            raise ValueError("--exclusive-variants supports only --alternative greater")
+        case, ctrl = exclusive_case_control(
+            df, adjacency_matrix.shape[0], n_sims, _protein_seed(seed, uniprot_id),
+            stratum_col=stratum_col)
+        case_all, ctrl_all = case.sum(0), ctrl.sum(0)
+        if case_all[:, 0].sum() == 0 or ctrl_all[:, 0].sum() == 0:
+            raise GeneSkipped(
+                f"{uniprot_id}: no case or no control alleles left after dropping variants seen in both",
+                "no_alleles_after_exclusive_filter",
+            )
+        pval_matrix, cmh_stat_matrix, _, variance_obs = cmh_pvals_by_column(
+            adjacency_matrix, case, ctrl)
+        adj = csr_matrix(adjacency_matrix.astype(np.int8, copy=False))
+        cmh = {
+            "observed_nbhd_case": np.asarray(adj @ case_all[:, 0]).ravel(),
+            "observed_nbhd_control": np.asarray(adj @ ctrl_all[:, 0]).ravel(),
+            "original_case": case_all[:, 0],
+            "original_control": ctrl_all[:, 0],
+            "variance_sum": variance_obs,
+        }
+    else:
+        cmh = _build_cmh_inputs(
+            df=df,
+            adjacency_matrix=adjacency_matrix,
+            n_sims=n_sims,
+            stratum_col=stratum_col,
+            seed=_protein_seed(seed, uniprot_id),
+        )
+        pval_matrix, cmh_stat_matrix = screen_and_exact_pvalues(
+            cmh,
+            screen_chi2=screen_chi2,
+            alternative=alternative,
+        )
 
     pval_columns = ["p_value"] + [f"null_pval_{i}" for i in range(n_sims)]
     df_pvals = pd.DataFrame(pval_matrix, columns=pval_columns)
@@ -282,6 +306,7 @@ def scan_test_cmh(
     alternative="greater",
     min_alleles=DEFAULT_MIN_ALLELES,
     stats=None,
+    exclusive=False,
 ):
     # `stats`: optional dict filled with why genes were skipped (see value_tracking).
     stats = {} if stats is None else stats
@@ -402,6 +427,7 @@ def scan_test_cmh(
                 screen_chi2=screen_chi2,
                 seed=seed,
                 alternative=alternative,
+                exclusive=exclusive,
             )
             write_cmh_pvals(
                 results_dir,

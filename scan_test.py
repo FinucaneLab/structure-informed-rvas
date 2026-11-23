@@ -6,7 +6,7 @@ import bisect
 import h5py
 from scipy.stats import fisher_exact, binom
 from scipy import special
-from utils import (DEFAULT_MIN_ALLELES, DEFAULT_SCREEN_CHI2, SCREEN_CHI2_GREATER, fisher_greater_pvals,
+from utils import (DEFAULT_MIN_ALLELES, DEFAULT_SCREEN_CHI2, SCREEN_CHI2_GREATER, fisher_greater_pvals, fisher_greater_pvals_by_column, exclusive_case_control,
                    get_adjacency_matrix, valid_for_fisher, write_dataset, read_p_values,
                    get_case_control_ac_matrix, restrict_to_structure,
                    neighborhood_retention, check_keep_mask,
@@ -158,6 +158,20 @@ def get_nbhd_counts(adjacency_matrix, ac_per_residue):
     nbhd_counts = nbhd_counts.astype(int)
     return nbhd_counts
 
+def exclusive_matrices(df, n_res, n_sims, seed, keep, uniprot_id):
+    """Variant-level null with shared variants dropped per column; (n_res, 1 + n_sims) case and control."""
+    case, ctrl = exclusive_case_control(df, n_res, n_sims, seed, keep)
+    # float64: a dense adjacency times int32 falls back to numpy's slow integer matmul
+    case, ctrl = case[0].astype(np.float64), ctrl[0].astype(np.float64)
+    if case[:, 0].sum() == 0 or ctrl[:, 0].sum() == 0:
+        raise GeneSkipped(
+            f'{uniprot_id}: no case or no control alleles left after dropping variants '
+            f'seen in both ({case[:, 0].sum()} case, {ctrl[:, 0].sum()} control)',
+            'no_alleles_after_exclusive_filter',
+        )
+    return case, ctrl
+
+
 def _restrict_and_recheck(df, n_res, uniprot_id, out_of_structure, min_alleles):
     """Drop positions outside the structure, then re-apply the allele floor.
 
@@ -244,7 +258,10 @@ def compute_all_pvals(
         keep_residues = None,
         min_retained = DEFAULT_MIN_RETAINED,
         stats = None,
+        exclusive = False,
 ):
+    if exclusive and alternative != 'greater':
+        raise ValueError("exclusive supports only alternative='greater'")
     if radius in ('multiple-small', 'multiple-big'):
         radii = MULTI_RADII_SMALL if radius == 'multiple-small' else MULTI_RADII_BIG
         adj_matrices = {
@@ -255,8 +272,11 @@ def compute_all_pvals(
         df = _restrict_and_recheck(df, n_res, uniprot_id, out_of_structure, min_alleles)
         keep = check_keep_mask(keep_residues, n_res, uniprot_id)
         _refuse_if_nothing_testable([adj_matrices[r] for r in radii], keep, min_retained, uniprot_id, n_res)
-        case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(
-            df, n_res, n_sims, seed, keep)
+        if exclusive:
+            case_ac_matrix, control_ac_matrix = exclusive_matrices(df, n_res, n_sims, seed, keep, uniprot_id)
+        else:
+            case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(
+                df, n_res, n_sims, seed, keep)
         n_case = case_ac_matrix[:,0].sum()
         n_control = control_ac_matrix[:,0].sum()
 
@@ -264,9 +284,15 @@ def compute_all_pvals(
         dead_all = None
         nbhd_counts = {}
         for r in radii:
-            pval_mat, n_case_nbhd, n_ctrl_nbhd = _compute_pval_matrix_for_radius(
-                adj_matrices[r], case_ac_matrix, control_ac_matrix, n_case, n_control, alternative
-            )
+            if exclusive:
+                n_case_nbhd = get_nbhd_counts(adj_matrices[r], case_ac_matrix)
+                n_ctrl_nbhd = get_nbhd_counts(adj_matrices[r], control_ac_matrix)
+                pval_mat = fisher_greater_pvals_by_column(
+                    n_case_nbhd, n_ctrl_nbhd, case_ac_matrix.sum(0), control_ac_matrix.sum(0))
+            else:
+                pval_mat, n_case_nbhd, n_ctrl_nbhd = _compute_pval_matrix_for_radius(
+                    adj_matrices[r], case_ac_matrix, control_ac_matrix, n_case, n_control, alternative
+                )
             if keep is not None:
                 # Per radius, before combining: a centre can keep enough of its
                 # neighborhood at one radius and lose it at another, and the rule
@@ -312,14 +338,21 @@ def compute_all_pvals(
         df = _restrict_and_recheck(df, n_res, uniprot_id, out_of_structure, min_alleles)
         keep = check_keep_mask(keep_residues, n_res, uniprot_id)
         _refuse_if_nothing_testable([adjacency_matrix], keep, min_retained, uniprot_id, n_res)
-        case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(
-            df, n_res, n_sims, seed, keep)
+        if exclusive:
+            case_ac_matrix, control_ac_matrix = exclusive_matrices(df, n_res, n_sims, seed, keep, uniprot_id)
+        else:
+            case_ac_matrix, control_ac_matrix = get_case_control_ac_matrix(
+                df, n_res, n_sims, seed, keep)
         n_case = case_ac_matrix[:,0].sum()
         n_control = control_ac_matrix[:,0].sum()
         n_case_nbhd_mat = get_nbhd_counts(adjacency_matrix, case_ac_matrix)
         n_control_nbhd_mat = get_nbhd_counts(adjacency_matrix, control_ac_matrix)
-        pval_lookup = get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_control, alternative)
-        pval_matrix = pval_lookup[n_case_nbhd_mat, n_control_nbhd_mat]
+        if exclusive:
+            pval_matrix = fisher_greater_pvals_by_column(
+                n_case_nbhd_mat, n_control_nbhd_mat, case_ac_matrix.sum(0), control_ac_matrix.sum(0))
+        else:
+            pval_lookup = get_pval_lookup_case_control(n_case_nbhd_mat, n_control_nbhd_mat, n_case, n_control, alternative)
+            pval_matrix = pval_lookup[n_case_nbhd_mat, n_control_nbhd_mat]
         # One radius, so the union and the intersection coincide.
         dead_all = neutralized_positions(adjacency_matrix, keep, min_retained)
         pval_matrix = _neutralize(pval_matrix, dead_all)
@@ -361,7 +394,7 @@ def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir,
                           uniprot_id, radius, pae_cutoff, n_sims, pval_file, seed=None,
                           alternative='greater', out_of_structure=None,
                           min_alleles=DEFAULT_MIN_ALLELES, keep_residues=None,
-                          min_retained=DEFAULT_MIN_RETAINED, stats=None):
+                          min_retained=DEFAULT_MIN_RETAINED, stats=None, exclusive=False):
     df_pvals, adj_mat = compute_all_pvals(
         df,
         pdb_file_pos_guide,
@@ -378,6 +411,7 @@ def scan_test_one_protein(df, pdb_file_pos_guide, pdb_dir, pae_dir, results_dir,
         keep_residues,
         min_retained,
         stats,
+        exclusive,
     )
     write_df_pvals(results_dir, uniprot_id, df_pvals, pval_file)
 
@@ -425,7 +459,8 @@ def _filter_proteins_by_allele_count(df_rvas, df_fdr_filter, min_alleles=DEFAULT
 def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae_cutoff,
                             results_dir, n_sims, conditioning, pval_file, seed=None,
                             alternative='greater', min_alleles=DEFAULT_MIN_ALLELES,
-                            min_retained=DEFAULT_MIN_RETAINED, seed_salt=None, stats=None):
+                            min_retained=DEFAULT_MIN_RETAINED, seed_salt=None, stats=None,
+                            exclusive=False):
     """Process each protein individually with scan test.
 
     Returns the list of (uniprot_id, n_res, dropped_positions) for proteins whose
@@ -495,7 +530,7 @@ def _process_proteins_batch(df_rvas, uniprot_id_list, reference_dir, radius, pae
                 df, pdb_file_pos_guide, pdb_dir, pae_dir, 
                 results_dir, uniprot_id, radius, pae_cutoff, n_sims,
                 pval_file, protein_seed, alternative, out_of_structure, min_alleles,
-                keep_residues, min_retained, stats
+                keep_residues, min_retained, stats, exclusive
             )
             scanned.add(uniprot_id)
         except FileNotFoundError as e:
@@ -579,6 +614,7 @@ def scan_test(
     requested=None,
     seed_salt=None,
     stats=None,
+    exclusive=False,
 ):
     """
     Perform scan test analysis on protein structure data.
@@ -627,7 +663,7 @@ def scan_test(
         df_processed, uniprot_id_list, reference_dir,
         radius, pae_cutoff, results_dir, n_sims, conditioning,
         pval_file, seed, alternative, min_alleles, min_retained, seed_salt,
-        stats=stats,
+        stats=stats, exclusive=exclusive,
     )
 
     # Variants outside their structure were dropped from the scan, so they are not
