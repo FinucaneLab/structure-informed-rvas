@@ -17,7 +17,12 @@ Workflow:
    SE of the ratio is included as an extra column, but the primary
    se_betahat column is NA for this file, as requested). The trait profile
    also includes mean_betahat_shrunk, a shrinkage-toward-0 estimate
-   analogous to the ClinVar ratio's pseudocount regularization.
+   analogous to the ClinVar ratio's pseudocount regularization. The ClinVar
+   profile also includes odds_ratio/or_ci_low/or_ci_high: a Haldane-Anscombe
+   corrected odds ratio (and 95% CI) for enrichment of case variants in each
+   neighborhood vs. the rest of the protein, from the 2x2 table
+   [[nbhd_case, total_case - nbhd_case], [nbhd_control, total_control -
+   nbhd_control]] -- a proper CI-bearing statistic, unlike the ratio column.
 4. Both tsvs also carry significance marker columns (is_significant_discovery,
    is_significant_other_trait on the trait tsv; is_significant_clinvar on the
    ClinVar tsv), computed from --fdr-results-file (all traits, not just the
@@ -40,6 +45,7 @@ import sys
 import subprocess
 import numpy as np
 import pandas as pd
+import h5py
 
 from utils import get_distance_matrix_structure, get_pae_matrix_structure
 from q_scan_test import get_betahats_per_residue, get_nbhd_stats, MULTI_RADII_SMALL, MULTI_RADII_BIG
@@ -278,6 +284,21 @@ def compute_clinvar_profile(df_mapped_clinvar, protein, adj_by_radius):
                 1 / np.maximum(case_nbhd, 1e-9) + 1 / np.maximum(control_nbhd, 1e-9)
             )
 
+        # Odds ratio (+ 95% CI) for enrichment of case variants in this
+        # neighborhood vs. the rest of the protein, from the 2x2 table
+        # [[case_nbhd, case_outside], [control_nbhd, control_outside]], with
+        # the standard Haldane-Anscombe 0.5 pseudocount (well-defined even
+        # when a cell is 0).
+        a = case_nbhd + 0.5
+        b = (n_case_total - case_nbhd) + 0.5
+        c = control_nbhd + 0.5
+        d = (n_control_total - control_nbhd) + 0.5
+        odds_ratio = (a * d) / (b * c)
+        se_log_or = np.sqrt(1 / a + 1 / b + 1 / c + 1 / d)
+        log_or = np.log(odds_ratio)
+        or_ci_low = np.exp(log_or - 1.96 * se_log_or)
+        or_ci_high = np.exp(log_or + 1.96 * se_log_or)
+
         for i in range(n_res):
             rows.append({
                 'aa_pos': i + 1,
@@ -287,6 +308,9 @@ def compute_clinvar_profile(df_mapped_clinvar, protein, adj_by_radius):
                 'se_ratio_approx': float(se_ratio_approx[i]),
                 'nbhd_case': float(case_nbhd[i]),
                 'nbhd_control': float(control_nbhd[i]),
+                'odds_ratio': float(odds_ratio[i]),
+                'or_ci_low': float(or_ci_low[i]),
+                'or_ci_high': float(or_ci_high[i]),
                 'radius': radius,
             })
     return rows
@@ -403,20 +427,20 @@ def _draw_annotation_track(axt, feats, seq_len):
     axt.spines[['top', 'right']].set_visible(False)
 
 
-def _apply_nbhd_subset(df, nbhd_subset, value_col):
+def _apply_nbhd_subset(df, nbhd_subset, value_col, extra_cols=()):
     """
     If nbhd_subset is given (a set of (uniprot_id, aa_pos, radius) tuples),
-    blank out (set to NaN) value_col/se_betahat for rows not in the
-    subset, while keeping every row (and the full aa_pos range) in the
-    frame, so the plotted x-axis still spans the whole protein with gaps
-    where data was excluded.
+    blank out (set to NaN) value_col/se_betahat (plus any extra_cols, e.g.
+    CI bounds) for rows not in the subset, while keeping every row (and the
+    full aa_pos range) in the frame, so the plotted x-axis still spans the
+    whole protein with gaps where data was excluded.
     """
     if not nbhd_subset:
         return df
     df = df.copy()
     keys = list(zip(df['uniprot_id'], df['aa_pos'].astype(int), df['radius'].astype(float)))
     mask = np.array([k not in nbhd_subset for k in keys])
-    for col in (value_col, 'se_betahat'):
+    for col in (value_col, 'se_betahat') + tuple(extra_cols):
         if col in df.columns:
             df.loc[mask, col] = np.nan
     return df
@@ -586,6 +610,124 @@ def _plot_profiles(df_trait, df_clinvar, pdf_path, nbhd_subset=None, value_col='
             plt.close(fig)
 
 
+def _plot_dual_profiles(df_trait, df_clinvar, pdf_path, nbhd_subset=None,
+                         value_col='mean_betahat', ci_z=1.96, annotate=True):
+    """
+    One page per (protein, radius): trait and ClinVar signals on two stacked
+    panels, each on its own native scale (no normalization), with 95% CIs.
+    Top panel: value_col +/- ci_z*se_betahat (se_betahat is always the
+    unshrunk standard error, even when value_col is mean_betahat_shrunk --
+    there is no shrunk-estimator SE, so the band should be read as the CI of
+    the unshrunk mean, not of the shrinkage estimate itself). Bottom panel:
+    odds_ratio (enrichment of case variants in the neighborhood vs. the rest
+    of the protein) on a log-scaled y-axis, with its Haldane-Anscombe 95% CI
+    (or_ci_low/or_ci_high) and a reference line at OR=1. If annotate is True,
+    a UniProt feature annotation track is drawn below both, sharing the
+    aa_pos x-axis.
+    """
+    plt, PdfPages = _import_matplotlib()
+    df_trait = _apply_nbhd_subset(df_trait, nbhd_subset, value_col)
+    df_clinvar = _apply_nbhd_subset(df_clinvar, nbhd_subset, 'odds_ratio',
+                                     extra_cols=('or_ci_low', 'or_ci_high'))
+    annotation_cache = {}
+    with PdfPages(pdf_path) as pdf:
+        combos = df_trait[['uniprot_id', 'radius', 'trait']].drop_duplicates()
+        for _, combo in combos.iterrows():
+            protein, radius, trait = combo['uniprot_id'], combo['radius'], combo['trait']
+
+            t = df_trait[(df_trait.uniprot_id == protein) & (df_trait.radius == radius)].sort_values('aa_pos')
+            c = df_clinvar[(df_clinvar.uniprot_id == protein) & (df_clinvar.radius == radius)].sort_values('aa_pos')
+            if len(t) == 0:
+                continue
+
+            feats, seq_len = (None, None)
+            if annotate:
+                if protein not in annotation_cache:
+                    annotation_cache[protein] = fetch_uniprot_features(protein)
+                feats, seq_len = annotation_cache[protein]
+
+            n_rows = 3 if feats else 2
+            height_ratios = [3, 3] + ([max(1, 0.35 * len(dict.fromkeys(f[0] for f in feats)))] if feats else [])
+            fig, axes = plt.subplots(n_rows, 1, sharex=True, figsize=(10, sum(height_ratios) + 1),
+                                      height_ratios=height_ratios)
+            ax_trait, ax_clinvar = axes[0], axes[1]
+            axt = axes[2] if feats else None
+
+            x_t = t['aa_pos'].to_numpy()
+            y_t = t[value_col].to_numpy(dtype=float)
+            se_t = t['se_betahat'].to_numpy(dtype=float) if 'se_betahat' in t.columns else np.full_like(y_t, np.nan)
+            ax_trait.plot(x_t, y_t, color='tab:blue', label=f'trait {trait} ({value_col})')
+            lo_t, hi_t = y_t - ci_z * se_t, y_t + ci_z * se_t
+            ax_trait.fill_between(x_t, lo_t, hi_t, color='tab:blue', alpha=0.2, label=f'{ci_z}-sigma CI')
+
+            if 'is_significant_discovery' in t.columns:
+                disc_mask = t['is_significant_discovery'].fillna(False).to_numpy()
+                other_mask = (t['is_significant_other_trait'].fillna(False).to_numpy()
+                              if 'is_significant_other_trait' in t.columns
+                              else np.zeros_like(disc_mask)) & ~disc_mask
+                if disc_mask.any():
+                    ax_trait.scatter(x_t[disc_mask], y_t[disc_mask], color='tab:blue', marker='o',
+                                      s=50, zorder=10, edgecolor='black', linewidth=0.6,
+                                      label=f'significant (discovery trait, n={int(disc_mask.sum())})')
+                if other_mask.any():
+                    ax_trait.scatter(x_t[other_mask], y_t[other_mask], color='tab:blue', marker='D',
+                                      s=45, zorder=10, edgecolor='black', linewidth=0.6,
+                                      label=f'significant (other trait, n={int(other_mask.sum())})')
+            ax_trait.set_ylabel(value_col)
+            ax_trait.set_title(f'{protein} | radius={radius} | trait {trait}', fontsize=10)
+            ax_trait.legend(fontsize=8)
+
+            if len(c) > 0:
+                x_c = c['aa_pos'].to_numpy()
+                or_c = c['odds_ratio'].to_numpy(dtype=float)
+                lo_c = c['or_ci_low'].to_numpy(dtype=float) if 'or_ci_low' in c.columns else np.full_like(or_c, np.nan)
+                hi_c = c['or_ci_high'].to_numpy(dtype=float) if 'or_ci_high' in c.columns else np.full_like(or_c, np.nan)
+                ax_clinvar.plot(x_c, or_c, color='tab:red', label='ClinVar odds ratio')
+                ax_clinvar.fill_between(x_c, lo_c, hi_c, color='tab:red', alpha=0.2, label='95% CI')
+                ax_clinvar.axhline(1.0, color='black', lw=0.8, linestyle='--')
+                ax_clinvar.set_yscale('log')
+                if 'is_significant_clinvar' in c.columns:
+                    cv_mask = c['is_significant_clinvar'].fillna(False).to_numpy()
+                    if cv_mask.any():
+                        ax_clinvar.scatter(x_c[cv_mask], or_c[cv_mask], color='tab:red', marker='o',
+                                           s=50, zorder=10, edgecolor='black', linewidth=0.6,
+                                           label=f'significant (ClinVar, n={int(cv_mask.sum())})')
+            ax_clinvar.set_ylabel('odds ratio (log scale)')
+            if nbhd_subset:
+                ax_clinvar.set_title('neighborhood subset applied', fontsize=8, loc='right')
+            ax_clinvar.legend(fontsize=8)
+
+            if axt is not None:
+                _draw_annotation_track(axt, feats, seq_len)
+            else:
+                ax_clinvar.set_xlabel('aa_pos')
+
+            fig.tight_layout()
+            pdf.savefig(fig)
+            plt.close(fig)
+
+
+def plot_dual_profiles_from_files(trait_tsv, clinvar_tsv, plot_file, nbhd_subset=None,
+                                   value_col='mean_betahat', ci_z=1.96, annotate=True):
+    """
+    Standalone replotting entry point for the dual-axis (trait/ClinVar on
+    their own scales, with CIs) view: read the two tsvs already produced by
+    --explore-nhbds-traits and generate the comparison PDF. See
+    _plot_dual_profiles for details.
+    """
+    df_trait = pd.read_csv(trait_tsv, sep='\t')
+    df_clinvar = pd.read_csv(clinvar_tsv, sep='\t')
+    if value_col not in df_trait.columns:
+        raise ValueError(f"--value-col '{value_col}' not found in {trait_tsv}; "
+                          f"available columns: {list(df_trait.columns)}")
+    if 'odds_ratio' not in df_clinvar.columns:
+        raise ValueError(f"'odds_ratio' not found in {clinvar_tsv}; re-run "
+                          f"--explore-nhbds-traits with the updated script to get it.")
+    _plot_dual_profiles(df_trait, df_clinvar, plot_file, nbhd_subset=nbhd_subset,
+                         value_col=value_col, ci_z=ci_z, annotate=annotate)
+    logger.info(f"Wrote dual-axis profile comparison plot to {plot_file}")
+
+
 def parse_nbhd_subset(subset_arg):
     """
     Parse --nbhd-subset, or None. subset_arg must be a path to a tab-delimited
@@ -603,9 +745,59 @@ def parse_nbhd_subset(subset_arg):
     return set(zip(df['uniprot_id'], df['aa_pos'].astype(int), df['radius'].astype(float)))
 
 
+def load_pvalues_h5(h5_path, protein):
+    """
+    Read one protein's per-neighborhood p-value and matching radius from a
+    per-trait p_values.h5 file (produced by q_scan_test.py with method='pval').
+    With --neighborhood-radius='multiple-big'/'multiple-small', the radius
+    recorded per position is whichever radius had the smallest p-value there
+    (the single best radius, not one p-value per radius); with a fixed
+    radius, radius is constant across positions. Returns a DataFrame with
+    columns aa_pos, radius, p_value, or None if the protein isn't in the file.
+    """
+    with h5py.File(h5_path, 'r') as fid:
+        if protein not in fid:
+            return None
+        p_value = fid[protein][:, 0]
+        aa_pos = fid[f'{protein}_aa_pos'][:].flatten()
+        radius = fid[f'{protein}_radius'][:].flatten()
+    return pd.DataFrame({'aa_pos': aa_pos.astype(int), 'radius': radius, 'p_value': p_value})
+
+
+def report_pvalue_correlation(df_profile, pvalues_h5, value_col, series_label):
+    """
+    For every protein in df_profile, align its (aa_pos, radius) rows to the
+    matching p-value in pvalues_h5 -- i.e. each position's value_col is taken
+    at the SAME radius its p-value was computed at, since method='pval' with
+    multiple radii only keeps one (best) radius per position -- and print the
+    Spearman correlation between |value_col| and -log10(p_value) to stdout,
+    one line per protein. Meant to be run by hand across different
+    --shrink-k/--value-col/--norm choices to see which tracks significance
+    best; no looping is done internally.
+    """
+    from scipy.stats import spearmanr
+    for protein, df_p in df_profile.groupby('uniprot_id'):
+        df_pvals = load_pvalues_h5(pvalues_h5, protein)
+        if df_pvals is None:
+            print(f"{protein} ({series_label}): not found in {pvalues_h5}")
+            continue
+        merged = df_p[['aa_pos', 'radius', value_col]].merge(df_pvals, on=['aa_pos', 'radius'], how='inner')
+        merged = merged.dropna(subset=[value_col, 'p_value'])
+        merged = merged[merged['p_value'] > 0]
+        if len(merged) < 3:
+            print(f"{protein} ({series_label}): too few matched positions (n={len(merged)}) for correlation")
+            continue
+        mag = merged[value_col].abs().to_numpy()
+        neglogp = -np.log10(merged['p_value'].to_numpy())
+        rho, pval = spearmanr(mag, neglogp)
+        print(f"{protein} ({series_label}): Spearman(|{value_col}|, -log10(p)) = "
+              f"{rho:.3f} (p={pval:.3g}, n={len(merged)})")
+
+
 def plot_profiles_from_files(trait_tsv, clinvar_tsv, plot_file, nbhd_subset=None,
                               value_col='mean_betahat', n_perm=1000, annotate=True,
-                              norm='zscore', abs_corr=False):
+                              norm='zscore', abs_corr=False, trait_pvalues_h5=None,
+                              clinvar_pvalues_h5=None):
     """
     Standalone replotting entry point: read the two tsvs already produced by
     --explore-nhbds-traits and generate the comparison PDF, optionally
@@ -623,13 +815,23 @@ def plot_profiles_from_files(trait_tsv, clinvar_tsv, plot_file, nbhd_subset=None
     normalization used for plotting ('zscore', 'minmax', or 'robust'). If
     abs_corr is True, the trait series is sign-flipped when its raw
     correlation with ClinVar is negative, since that sign is just a
-    convention (see _plot_profiles docstring).
+    convention (see _plot_profiles docstring). If trait_pvalues_h5 and/or
+    clinvar_pvalues_h5 are given (per-trait p_values.h5 files from
+    q_scan_test.py with method='pval'), prints to stdout, per protein, the
+    Spearman correlation between |value_col| and -log10(p_value) -- a way to
+    check how well a given --shrink-k/--value-col/--norm choice tracks
+    significance (see report_pvalue_correlation).
     """
     df_trait = pd.read_csv(trait_tsv, sep='\t')
     df_clinvar = pd.read_csv(clinvar_tsv, sep='\t')
     if value_col not in df_trait.columns:
         raise ValueError(f"--value-col '{value_col}' not found in {trait_tsv}; "
                           f"available columns: {list(df_trait.columns)}")
+    if trait_pvalues_h5 is not None:
+        report_pvalue_correlation(df_trait, trait_pvalues_h5, value_col, 'trait')
+    if clinvar_pvalues_h5 is not None:
+        clinvar_value_col = value_col if value_col in df_clinvar.columns else 'mean_betahat'
+        report_pvalue_correlation(df_clinvar, clinvar_pvalues_h5, clinvar_value_col, 'ClinVar')
     _plot_profiles(df_trait, df_clinvar, plot_file, nbhd_subset=nbhd_subset,
                     value_col=value_col, n_perm=n_perm, annotate=annotate,
                     norm=norm, abs_corr=abs_corr)
@@ -752,7 +954,8 @@ def run_explore_nbhds_profile(
     df_out.to_csv(output_file, sep='\t', index=False)
     logger.info(f"Wrote {len(df_out)} rows to {output_file}")
 
-    clinvar_col_order = col_order + ['se_ratio_approx', 'nbhd_case', 'nbhd_control', 'is_significant_clinvar']
+    clinvar_col_order = col_order + ['se_ratio_approx', 'nbhd_case', 'nbhd_control',
+                                      'odds_ratio', 'or_ci_low', 'or_ci_high', 'is_significant_clinvar']
     df_clinvar_out = df_clinvar_out[[c for c in clinvar_col_order if c in df_clinvar_out.columns]]
     df_clinvar_out.to_csv(clinvar_output_file, sep='\t', index=False)
     logger.info(f"Wrote {len(df_clinvar_out)} rows to {clinvar_output_file}")
@@ -809,11 +1012,36 @@ def _main():
                          then reports the resulting (positive) correlation and
                          notes the flip.
                          ''')
+    parser.add_argument('--trait-pvalues-h5', type=str, default=None,
+                         help='path to the discovery trait\'s per-trait p_values.h5 '
+                              '(q_scan_test.py output, method=\'pval\'); if given, prints '
+                              'to stdout, per protein, the Spearman correlation between '
+                              '|--value-col| and -log10(p_value), matched on (aa_pos, '
+                              'radius). Default: no report.')
+    parser.add_argument('--clinvar-pvalues-h5', type=str, default=None,
+                         help='same as --trait-pvalues-h5 but for the ClinVar scan; '
+                              'reports the correlation for the ClinVar series. '
+                              'Default: no report.')
+    parser.add_argument('--dual', action='store_true', default=False,
+                         help='plot the trait and ClinVar signals on two stacked '
+                              'panels, each on its own native scale, with 95%% CIs '
+                              '(trait: value_col +/- 1.96*se_betahat; ClinVar: '
+                              'odds_ratio +/- its Haldane-Anscombe 95%% CI), instead '
+                              'of the single normalized overlay plot. Ignores '
+                              '--norm/--abs-corr/--n-perm (not applicable: no '
+                              'normalization or correlation is computed in this mode).')
     args = parser.parse_args()
     nbhd_subset = parse_nbhd_subset(args.nbhd_subset)
-    plot_profiles_from_files(args.trait_tsv, args.clinvar_tsv, args.plot_file,
-                              nbhd_subset=nbhd_subset, value_col=args.value_col, n_perm=args.n_perm,
-                              annotate=not args.no_annotate, norm=args.norm, abs_corr=args.abs_corr)
+    if args.dual:
+        plot_dual_profiles_from_files(args.trait_tsv, args.clinvar_tsv, args.plot_file,
+                                       nbhd_subset=nbhd_subset, value_col=args.value_col,
+                                       annotate=not args.no_annotate)
+    else:
+        plot_profiles_from_files(args.trait_tsv, args.clinvar_tsv, args.plot_file,
+                                  nbhd_subset=nbhd_subset, value_col=args.value_col, n_perm=args.n_perm,
+                                  annotate=not args.no_annotate, norm=args.norm, abs_corr=args.abs_corr,
+                                  trait_pvalues_h5=args.trait_pvalues_h5,
+                                  clinvar_pvalues_h5=args.clinvar_pvalues_h5)
 
 
 if __name__ == '__main__':
