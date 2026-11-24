@@ -352,6 +352,35 @@ def _normalize(x, method='zscore'):
     return NORM_METHODS[method](x)
 
 
+def _fit_norm_params(x, method):
+    """
+    Fit the (center, scale) of the affine transform (x - center) / scale for
+    method ('zscore', 'minmax', or 'robust') from array x, so the same
+    transform can be applied consistently to a related array (e.g. CI
+    bounds) via _apply_affine -- keeping CI band widths correctly scaled
+    instead of being independently re-normalized.
+    """
+    x = np.asarray(x, dtype=float)
+    if method == 'zscore':
+        center, scale = np.nanmean(x), np.nanstd(x)
+    elif method == 'minmax':
+        lo, hi = np.nanmin(x), np.nanmax(x)
+        center, scale = (hi + lo) / 2, (hi - lo) / 2
+    elif method == 'robust':
+        center = np.nanmedian(x)
+        scale = 1.4826 * np.nanmedian(np.abs(x - center))
+    else:
+        raise ValueError(f"Unknown --norm method '{method}'; choices: {list(NORM_METHODS)}")
+    if not np.isfinite(scale) or scale == 0:
+        scale = 1.0
+    return center, scale
+
+
+def _apply_affine(x, center, scale):
+    """Apply the affine transform (x - center) / scale elementwise."""
+    return (np.asarray(x, dtype=float) - center) / scale
+
+
 def _import_matplotlib():
     """Import matplotlib lazily, installing it on the fly if missing."""
     try:
@@ -611,20 +640,36 @@ def _plot_profiles(df_trait, df_clinvar, pdf_path, nbhd_subset=None, value_col='
 
 
 def _plot_dual_profiles(df_trait, df_clinvar, pdf_path, nbhd_subset=None,
-                         value_col='mean_betahat', ci_z=1.96, annotate=True):
+                         value_col='mean_betahat', ci_z=1.96, annotate=True, norm='none',
+                         n_perm=1000):
     """
     One page per (protein, radius): trait and ClinVar signals on two stacked
-    panels, each on its own native scale (no normalization), with 95% CIs.
-    Top panel: value_col +/- ci_z*se_betahat (se_betahat is always the
-    unshrunk standard error, even when value_col is mean_betahat_shrunk --
-    there is no shrunk-estimator SE, so the band should be read as the CI of
-    the unshrunk mean, not of the shrinkage estimate itself). Bottom panel:
-    odds_ratio (enrichment of case variants in the neighborhood vs. the rest
-    of the protein) on a log-scaled y-axis, with its Haldane-Anscombe 95% CI
-    (or_ci_low/or_ci_high) and a reference line at OR=1. If annotate is True,
-    a UniProt feature annotation track is drawn below both, sharing the
-    aa_pos x-axis.
+    panels, with 95% CIs. Top panel: value_col +/- ci_z*se_betahat
+    (se_betahat is always the unshrunk standard error, even when value_col is
+    mean_betahat_shrunk -- there is no shrunk-estimator SE, so the band
+    should be read as the CI of the unshrunk mean, not of the shrinkage
+    estimate itself). Bottom panel: odds_ratio (enrichment of case variants
+    in the neighborhood vs. the rest of the protein), with its
+    Haldane-Anscombe 95% CI (or_ci_low/or_ci_high) and a reference line at
+    OR=1. If annotate is True, a UniProt feature annotation track is drawn
+    below both, sharing the aa_pos x-axis. The trait panel's title also
+    reports the Spearman rank correlation between value_col and odds_ratio
+    (pairwise-complete, computed on the raw, pre-normalization values --
+    rho is invariant to the monotonic normalization anyway), with a
+    circular-shift permutation p-value (set n_perm=0 to skip it).
+
+    norm controls each panel's scale. 'none' (default): each panel keeps its
+    own native units (trait in value_col's units; ClinVar odds ratio on a
+    log-scaled y-axis). 'zscore'/'minmax'/'robust': each panel is rescaled
+    with that method, fit on its own series (value_col for the trait panel,
+    odds_ratio for the ClinVar panel) via _fit_norm_params, with the SAME
+    affine transform then applied to that panel's CI bounds (and, for
+    ClinVar, to the OR=1 reference value) so CI widths stay consistent
+    rather than being independently re-normalized; the ClinVar y-axis
+    switches to linear in this case.
     """
+    if norm not in ('none',) and norm not in NORM_METHODS:
+        raise ValueError(f"Unknown --norm '{norm}'; choices: 'none', {list(NORM_METHODS)}")
     plt, PdfPages = _import_matplotlib()
     df_trait = _apply_nbhd_subset(df_trait, nbhd_subset, value_col)
     df_clinvar = _apply_nbhd_subset(df_clinvar, nbhd_subset, 'odds_ratio',
@@ -656,9 +701,24 @@ def _plot_dual_profiles(df_trait, df_clinvar, pdf_path, nbhd_subset=None,
             x_t = t['aa_pos'].to_numpy()
             y_t = t[value_col].to_numpy(dtype=float)
             se_t = t['se_betahat'].to_numpy(dtype=float) if 'se_betahat' in t.columns else np.full_like(y_t, np.nan)
-            ax_trait.plot(x_t, y_t, color='tab:blue', label=f'trait {trait} ({value_col})')
             lo_t, hi_t = y_t - ci_z * se_t, y_t + ci_z * se_t
-            ax_trait.fill_between(x_t, lo_t, hi_t, color='tab:blue', alpha=0.2, label=f'{ci_z}-sigma CI')
+
+            rho = n_pairs = perm_p = np.nan
+            if len(c) > 0:
+                merged = (t[['aa_pos', value_col]].rename(columns={value_col: '_trait_val'})
+                          .merge(c[['aa_pos', 'odds_ratio']].rename(columns={'odds_ratio': '_clinvar_val'}),
+                                 on='aa_pos', how='outer').sort_values('aa_pos'))
+                rho, n_pairs, perm_p = _spearman_with_circular_perm(
+                    merged['_trait_val'], merged['_clinvar_val'], n_perm=n_perm
+                )
+
+            if norm != 'none':
+                c_t, s_t = _fit_norm_params(y_t, norm)
+                y_t, lo_t, hi_t = (_apply_affine(a, c_t, s_t) for a in (y_t, lo_t, hi_t))
+            trait_label = f'trait {trait} ({value_col})' + (f', {norm}-normalized' if norm != 'none' else '')
+            ax_trait.plot(x_t, y_t, color='tab:blue', label=trait_label)
+            ax_trait.fill_between(x_t, lo_t, hi_t, color='tab:blue', alpha=0.2, edgecolor='none',
+                                   label=f'{ci_z}-sigma CI')
 
             if 'is_significant_discovery' in t.columns:
                 disc_mask = t['is_significant_discovery'].fillna(False).to_numpy()
@@ -673,8 +733,16 @@ def _plot_dual_profiles(df_trait, df_clinvar, pdf_path, nbhd_subset=None,
                     ax_trait.scatter(x_t[other_mask], y_t[other_mask], color='tab:blue', marker='D',
                                       s=45, zorder=10, edgecolor='black', linewidth=0.6,
                                       label=f'significant (other trait, n={int(other_mask.sum())})')
-            ax_trait.set_ylabel(value_col)
-            ax_trait.set_title(f'{protein} | radius={radius} | trait {trait}', fontsize=10)
+            ax_trait.set_ylabel(f'{norm}-normalized {value_col}' if norm != 'none' else value_col)
+            title = f'{protein} | radius={radius} | trait {trait}'
+            if len(c) > 0:
+                if np.isnan(rho):
+                    title += ' | Spearman rho: NA (too few shared positions)'
+                elif n_perm > 0:
+                    title += f' | Spearman rho={rho:.3f} (n={n_pairs}, perm p={perm_p:.3g})'
+                else:
+                    title += f' | Spearman rho={rho:.3f} (n={n_pairs})'
+            ax_trait.set_title(title, fontsize=10)
             ax_trait.legend(fontsize=8)
 
             if len(c) > 0:
@@ -682,17 +750,25 @@ def _plot_dual_profiles(df_trait, df_clinvar, pdf_path, nbhd_subset=None,
                 or_c = c['odds_ratio'].to_numpy(dtype=float)
                 lo_c = c['or_ci_low'].to_numpy(dtype=float) if 'or_ci_low' in c.columns else np.full_like(or_c, np.nan)
                 hi_c = c['or_ci_high'].to_numpy(dtype=float) if 'or_ci_high' in c.columns else np.full_like(or_c, np.nan)
-                ax_clinvar.plot(x_c, or_c, color='tab:red', label='ClinVar odds ratio')
-                ax_clinvar.fill_between(x_c, lo_c, hi_c, color='tab:red', alpha=0.2, label='95% CI')
-                ax_clinvar.axhline(1.0, color='black', lw=0.8, linestyle='--')
-                ax_clinvar.set_yscale('log')
+                ref_line = 1.0
+                if norm != 'none':
+                    c_c, s_c = _fit_norm_params(or_c, norm)
+                    or_c, lo_c, hi_c = (_apply_affine(a, c_c, s_c) for a in (or_c, lo_c, hi_c))
+                    ref_line = _apply_affine(1.0, c_c, s_c)
+                or_label = 'ClinVar odds ratio' + (f', {norm}-normalized' if norm != 'none' else '')
+                ax_clinvar.plot(x_c, or_c, color='tab:red', label=or_label)
+                ax_clinvar.fill_between(x_c, lo_c, hi_c, color='tab:red', alpha=0.2, edgecolor='none',
+                                         label='95% CI')
+                ax_clinvar.axhline(ref_line, color='black', lw=0.8, linestyle='--')
+                if norm == 'none':
+                    ax_clinvar.set_yscale('log')
                 if 'is_significant_clinvar' in c.columns:
                     cv_mask = c['is_significant_clinvar'].fillna(False).to_numpy()
                     if cv_mask.any():
                         ax_clinvar.scatter(x_c[cv_mask], or_c[cv_mask], color='tab:red', marker='o',
                                            s=50, zorder=10, edgecolor='black', linewidth=0.6,
                                            label=f'significant (ClinVar, n={int(cv_mask.sum())})')
-            ax_clinvar.set_ylabel('odds ratio (log scale)')
+            ax_clinvar.set_ylabel(f'{norm}-normalized odds ratio' if norm != 'none' else 'odds ratio (log scale)')
             if nbhd_subset:
                 ax_clinvar.set_title('neighborhood subset applied', fontsize=8, loc='right')
             ax_clinvar.legend(fontsize=8)
@@ -708,12 +784,14 @@ def _plot_dual_profiles(df_trait, df_clinvar, pdf_path, nbhd_subset=None,
 
 
 def plot_dual_profiles_from_files(trait_tsv, clinvar_tsv, plot_file, nbhd_subset=None,
-                                   value_col='mean_betahat', ci_z=1.96, annotate=True):
+                                   value_col='mean_betahat', ci_z=1.96, annotate=True,
+                                   norm='none', n_perm=1000):
     """
-    Standalone replotting entry point for the dual-axis (trait/ClinVar on
-    their own scales, with CIs) view: read the two tsvs already produced by
-    --explore-nhbds-traits and generate the comparison PDF. See
-    _plot_dual_profiles for details.
+    Standalone replotting entry point for the dual-axis (trait/ClinVar) view:
+    read the two tsvs already produced by --explore-nhbds-traits and
+    generate the comparison PDF. See _plot_dual_profiles for details,
+    including what norm='none'/'zscore'/'minmax'/'robust' does to each
+    panel's scale.
     """
     df_trait = pd.read_csv(trait_tsv, sep='\t')
     df_clinvar = pd.read_csv(clinvar_tsv, sep='\t')
@@ -724,7 +802,8 @@ def plot_dual_profiles_from_files(trait_tsv, clinvar_tsv, plot_file, nbhd_subset
         raise ValueError(f"'odds_ratio' not found in {clinvar_tsv}; re-run "
                           f"--explore-nhbds-traits with the updated script to get it.")
     _plot_dual_profiles(df_trait, df_clinvar, plot_file, nbhd_subset=nbhd_subset,
-                         value_col=value_col, ci_z=ci_z, annotate=annotate)
+                         value_col=value_col, ci_z=ci_z, annotate=annotate, norm=norm,
+                         n_perm=n_perm)
     logger.info(f"Wrote dual-axis profile comparison plot to {plot_file}")
 
 
@@ -995,13 +1074,18 @@ def _main():
                               'sites, motifs, etc.) drawn below each plot by default; '
                               'use this if you have no network access or want faster '
                               'plotting.')
-    parser.add_argument('--norm', type=str, default='zscore',
-                         choices=['zscore', 'minmax', 'robust'],
+    parser.add_argument('--norm', type=str, default=None,
+                         choices=['zscore', 'minmax', 'robust', 'none'],
                          help='''
-                         Normalization used to make the trait and ClinVar series
-                         visually comparable. 'zscore' (default): (x-mean)/sd.
-                         'minmax': rescale to [-1, 1]. 'robust': (x-median)/(1.4826*MAD),
-                         less sensitive to outlier residues than zscore/minmax.
+                         Normalization applied to the plotted series. 'zscore':
+                         (x-mean)/sd. 'minmax': rescale to [-1, 1]. 'robust':
+                         (x-median)/(1.4826*MAD), less sensitive to outlier
+                         residues than zscore/minmax. 'none': no normalization
+                         (only meaningful with --dual, where each panel already
+                         has its own scale). Default: 'zscore' for the single
+                         overlay plot (required to make the two series visually
+                         comparable); 'none' for --dual (each panel stays in its
+                         native units unless you pass --norm explicitly).
                          ''')
     parser.add_argument('--abs-corr', action='store_true', default=False,
                          help='''
@@ -1024,22 +1108,33 @@ def _main():
                               'Default: no report.')
     parser.add_argument('--dual', action='store_true', default=False,
                          help='plot the trait and ClinVar signals on two stacked '
-                              'panels, each on its own native scale, with 95%% CIs '
-                              '(trait: value_col +/- 1.96*se_betahat; ClinVar: '
-                              'odds_ratio +/- its Haldane-Anscombe 95%% CI), instead '
-                              'of the single normalized overlay plot. Ignores '
-                              '--norm/--abs-corr/--n-perm (not applicable: no '
-                              'normalization or correlation is computed in this mode).')
+                              'panels, with 95%% CIs (trait: value_col +/- '
+                              '1.96*se_betahat; ClinVar: odds_ratio +/- its '
+                              'Haldane-Anscombe 95%% CI), instead of the single '
+                              'overlay plot. By default each panel keeps its own '
+                              'native scale (ClinVar on a log y-axis); pass '
+                              '--norm zscore/minmax/robust to rescale both panels '
+                              'with that method instead (CI bounds and the OR=1 '
+                              'reference line are transformed consistently). The '
+                              'trait panel title still reports the Spearman rho '
+                              'between value_col and odds_ratio (--n-perm still '
+                              'applies to its permutation p-value). Ignores '
+                              '--abs-corr/--*-pvalues-h5 (not applicable: no '
+                              'sign-flipping or p-value report in this mode).')
     args = parser.parse_args()
     nbhd_subset = parse_nbhd_subset(args.nbhd_subset)
     if args.dual:
+        norm = args.norm if args.norm is not None else 'none'
         plot_dual_profiles_from_files(args.trait_tsv, args.clinvar_tsv, args.plot_file,
                                        nbhd_subset=nbhd_subset, value_col=args.value_col,
-                                       annotate=not args.no_annotate)
+                                       annotate=not args.no_annotate, norm=norm, n_perm=args.n_perm)
     else:
+        norm = args.norm if args.norm is not None else 'zscore'
+        if norm == 'none':
+            raise ValueError("--norm none is only valid with --dual.")
         plot_profiles_from_files(args.trait_tsv, args.clinvar_tsv, args.plot_file,
                                   nbhd_subset=nbhd_subset, value_col=args.value_col, n_perm=args.n_perm,
-                                  annotate=not args.no_annotate, norm=args.norm, abs_corr=args.abs_corr,
+                                  annotate=not args.no_annotate, norm=norm, abs_corr=args.abs_corr,
                                   trait_pvalues_h5=args.trait_pvalues_h5,
                                   clinvar_pvalues_h5=args.clinvar_pvalues_h5)
 
