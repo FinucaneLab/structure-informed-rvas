@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import h5py
 from utils import read_p_values
+from gene_pvalues import gene_level_pvalues
 from logger_config import get_logger
 
 logger = get_logger(__name__)
@@ -196,7 +197,7 @@ def summarize_results(df_results, fdr_cutoff, fwer_cutoff=0.05):
 
 
 def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file,
-                large_p_threshold=0.05, group=None, mu_mode=False):
+                large_p_threshold=0.05, group=None, mu_mode=False, gene_file=None):
     """
     Compute False Discovery Rate and Family-Wise Error Rate corrections for scan test results.
     
@@ -210,6 +211,9 @@ def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file
         reference_dir: Directory with reference files for result annotation
         pval_file: HDF5 filename containing p-values
         large_p_threshold: P-value threshold for computational efficiency (default 0.05)
+        gene_file: optional file name, relative to results_dir, for the gene-level
+            p-values (the within-gene FWER; see gene_pvalues). Computed from the null
+            arrays this function already holds, so it costs no extra read.
         
     Returns:
         DataFrame with FDR and FWER corrected results
@@ -224,6 +228,12 @@ def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file
         results_dir, uniprot_filter_list, aa_pos_filters, pval_file, group, mu_mode
     )
     
+    # Gene-level p-values, before the columns get subset away. Computed here rather
+    # than in a second pass so it reuses the null arrays already in memory.
+    df_genes = None
+    if gene_file is not None:
+        df_genes = gene_level_pvalues(df_pvals, null_pvals_dict, n_sims)
+
     # Compute false discoveries from null distributions (for FDR)
     false_discoveries = _compute_false_discoveries(
         df_pvals, null_pvals_dict, uniprot_ids, n_sims, large_p_threshold
@@ -238,6 +248,19 @@ def compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file
     # Add gene name
     df_gene = pd.read_csv(f'{reference_dir}/protein_sequence_guide.tsv', sep='\t')
     df_results = df_results.merge(df_gene[['gene_name', 'uniprot_id']], how='left', on='uniprot_id')
+
+    if df_genes is not None:
+        # Deduplicated, unlike the merge above: the guide can carry more than one row
+        # per uniprot_id, and the across-gene correction applied to this file counts
+        # its rows, so a duplicated row would inflate the denominator.
+        names = df_gene[['gene_name', 'uniprot_id']].drop_duplicates('uniprot_id')
+        df_genes = df_genes.merge(names, how='left', on='uniprot_id')
+        df_genes = df_genes[['uniprot_id', 'gene_name'] +
+                            [c for c in df_genes.columns
+                             if c not in ('uniprot_id', 'gene_name')]]
+        gene_path = os.path.join(results_dir, gene_file)
+        df_genes.to_csv(gene_path, sep='\t', index=False)
+        logger.info(f'Wrote gene-level p-values for {len(df_genes)} genes to {gene_path}')
     
     # Summarize and return results
     summarize_results(df_results, fdr_cutoff)
