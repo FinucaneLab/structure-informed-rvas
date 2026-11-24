@@ -661,6 +661,70 @@ if __name__ == '__main__':
         help='p-value file name to save p-values to. Defaults to the fdr file name with .h5 extension.'
     )
     parser.add_argument(
+        '--gene-pvals',
+        action='store_true',
+        help='''
+        also write one p-value per gene: the within-gene FWER, which corrects a
+        gene's best neighborhood against the minimum null p-value within that same
+        gene. Unlike the `fwer` column it does not depend on which other genes were
+        scanned, and it is uniform under the gene-level null, so it can be combined
+        across runs with --cct. Case/control scans only.
+        '''
+    )
+    parser.add_argument(
+        '--gene-pval-file',
+        type=str,
+        default=None,
+        help='''
+        file in the results directory for --gene-pvals. Defaults to the fdr file
+        name with .gene.tsv in place of .fdr.tsv.
+        '''
+    )
+    parser.add_argument(
+        '--cct',
+        type=str,
+        default=None,
+        help='''
+        Cauchy-combine gene-level p-values across runs. Takes a comma-delimited list
+        of files written by --gene-pvals, or a glob matched inside --results-dir.
+        Each entry may be given as label=path to name it in the output. The
+        across-gene correction (cct_bonf, cct_bh) is applied once, after combining.
+        '''
+    )
+    parser.add_argument(
+        '--cct-out',
+        type=str,
+        default='cct.tsv',
+        help='file in the results directory to write the --cct table to'
+    )
+    parser.add_argument(
+        '--cct-gene-list',
+        type=str,
+        default=None,
+        help='''
+        file with a uniprot_id column restricting --cct to those genes. Applied
+        before the across-gene correction, which is the only thing it changes: a
+        gene-level p-value does not depend on which other genes were scanned, so one
+        set of inputs can be corrected under several gene sets.
+        '''
+    )
+    parser.add_argument(
+        '--cct-clamp',
+        type=float,
+        default=None,
+        help='''
+        fixed upper clamp for --cct inputs. By default each p is clamped to
+        1 - 1/(n_sims + 1), one simulation unit below 1, because tan diverges at
+        p = 1 and one saturated input would otherwise collapse the gene.
+        '''
+    )
+    parser.add_argument(
+        '--cct-sig',
+        type=float,
+        default=0.05,
+        help='threshold for the n_sig diagnostic and the --cct summary log'
+    )
+    parser.add_argument(
         '--combine-pval-files',
         type=str,
         default=None,
@@ -835,6 +899,17 @@ if __name__ == '__main__':
             base = args.fdr_file
         args.pval_file = base + '.pvals.h5'
 
+    # Derive the gene-level file name the same way.
+    if args.gene_pval_file is None:
+        if args.fdr_file.endswith('.fdr.tsv'):
+            gene_base = args.fdr_file[:-len('.fdr.tsv')]
+        elif args.fdr_file.endswith('.tsv'):
+            gene_base = args.fdr_file[:-len('.tsv')]
+        else:
+            gene_base = args.fdr_file
+        args.gene_pval_file = gene_base + '.gene.tsv'
+    gene_file = args.gene_pval_file if args.gene_pvals else None
+
     # A seed is always chosen and recorded, so that a run with no --seed is still
     # reproducible after the fact from the logged value.
     if args.seed is None:
@@ -865,6 +940,34 @@ if __name__ == '__main__':
             
     if not (0 < args.fdr_cutoff < 1):
         raise ValueError(f"FDR cutoff must be between 0 and 1, got {args.fdr_cutoff}")
+
+    # --gene-pvals is wired into the case/control scans only. Silently writing no
+    # file would surface much later as "--cct matched no files", so the unsupported
+    # combinations are refused here, the way the other mode conflicts are.
+    if args.gene_pvals:
+        unsupported = None
+        if (args.mu_col is not None) or (args.mu_file is not None):
+            unsupported = 'the mutation-rate null (--mu-file/--mu-col)'
+        elif args.annotation_file is not None:
+            unsupported = 'the annotation test (--annotation-file)'
+        elif args.conditional:
+            unsupported = 'the conditional scan (--conditional)'
+        elif args.no_fdr:
+            unsupported = '--no-fdr, which runs no FDR step to compute them in'
+        elif args.components:
+            unsupported = '--components, which only rebuilds a component table'
+        if unsupported is not None:
+            raise ValueError(
+                f'--gene-pvals is not supported with {unsupported}. Gene-level '
+                'p-values are written by the case/control scans (Fisher and CMH) '
+                'and by --fdr-only over their p-value files.')
+
+    # A clamp of 0 would drive every input to 0 and surface as "CCT input must lie in
+    # (0, 1]", blaming the gene-level file for a bad flag; above 1 it silently does
+    # nothing. 1.0 is allowed and means "do not clamp".
+    if args.cct_clamp is not None and not (0 < args.cct_clamp <= 1):
+        raise ValueError("--cct-clamp must be greater than 0 and at most 1, got "
+                         f"{args.cct_clamp}. Pass 1.0 to disable clamping.")
 
     annotation_cmh = args.annotation_file is not None and args.test_method == 'cmh'
     if annotation_cmh and args.stratum_col is None:
@@ -1204,7 +1307,9 @@ if __name__ == '__main__':
     elif args.fdr_only and not args.run_3dnt:
         wrote_results = True
         from empirical_fdr import compute_fdr
-        df_results = compute_fdr(args.results_dir, args.fdr_cutoff, df_filter, args.reference_dir, args.pval_file)
+        df_results = compute_fdr(args.results_dir, args.fdr_cutoff, df_filter,
+                                 args.reference_dir, args.pval_file,
+                                 gene_file=gene_file)
         df_results.to_csv(f'{args.results_dir}/{args.fdr_file}', sep='\t', index=False)
         did_nothing = False
 
@@ -1292,6 +1397,7 @@ if __name__ == '__main__':
             args.alternative,
             args.min_alleles,
             exclusive=args.exclusive_variants,
+            gene_file=gene_file,
         )
         did_nothing = False
 
@@ -1317,6 +1423,7 @@ if __name__ == '__main__':
             args.alternative,
             args.min_alleles,
             exclusive=args.exclusive_variants,
+            gene_file=gene_file,
         )
         did_nothing = False
     
@@ -1455,6 +1562,37 @@ if __name__ == '__main__':
         print(cntrls)
         did_nothing = False
     
+    elif args.cct is not None:
+        from cauchy import combine_gene_pvalues
+        if ',' in args.cct:
+            cct_specs = [f.strip() for f in args.cct.split(',')]
+            cct_root = args.results_dir
+        else:
+            # A single entry with no comma is a glob, matched the way
+            # --combine-pval-files matches one. Kept relative to --results-dir so
+            # that inputs sharing a basename can be told apart by their directory.
+            cct_specs = [os.path.relpath(f, args.results_dir)
+                         for f in sorted(glob.glob(
+                             os.path.join(args.results_dir, args.cct)))]
+            cct_root = args.results_dir
+            if not cct_specs:
+                raise ValueError(
+                    f'--cct {args.cct} matched no files in {args.results_dir}')
+        cct_genes = None
+        if args.cct_gene_list is not None:
+            df_cct_genes = read_table(Path(args.cct_gene_list))
+            if 'uniprot_id' not in df_cct_genes.columns:
+                raise ValueError(
+                    f'--cct-gene-list {args.cct_gene_list} has no uniprot_id column')
+            cct_genes = df_cct_genes.uniprot_id.unique()
+        df_cct = combine_gene_pvalues(
+            cct_specs, results_dir=cct_root, gene_list=cct_genes,
+            clamp=args.cct_clamp, sig=args.cct_sig)
+        cct_path = os.path.join(args.results_dir, args.cct_out)
+        df_cct.to_csv(cct_path, sep='\t', index=False)
+        logger.info(f'Wrote {len(df_cct)} genes to {cct_path}')
+        did_nothing = False
+
     elif args.combine_pval_files is not None:
         if ',' in args.combine_pval_files:
             pval_files_to_combine = [os.path.join(args.results_dir,f.strip()) for f in args.combine_pval_files.split(',')]

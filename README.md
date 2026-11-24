@@ -155,6 +155,80 @@ python structure-informed-rvas/run.py \
 
 An optional `--df-filter` can be passed in Step 3 to restrict FDR to a subset of positions (e.g. AlphaMissense-filtered). FDR must be computed on the combined file to ensure the null distribution is pooled across all proteins.
 
+### Gene-level p-values and combining scans: --gene-pvals and --cct
+
+The `fwer` column in the results table corrects each neighborhood against the minimum
+null p-value over **every protein in the run**. That answers "is this neighborhood
+significant", but it is not a p-value for the gene, it is not uniform under any null,
+and it changes if you scan a different set of genes.
+
+`--gene-pvals` writes a second table, `<fdr base>.gene.tsv`, with one row per gene,
+whose `gene_p` corrects a gene's best neighborhood against the minimum null p-value
+**within that same gene only**:
+
+```
+gene_p = (#{s : min_j null_p[j, s] <= min_j obs_p[j]} + 1) / (n_sims + 1)
+```
+
+j runs over the gene's tested centres and s over the simulations. It costs nothing
+extra to compute — the null arrays are already in memory for the FDR — and it is
+uniform under the gene-level null, which makes it the thing to combine across runs.
+`--df-filter` restricts the positions on both sides, so the gene is scored only over
+the centres it was actually tested at.
+
+```bash
+python structure-informed-rvas/run.py \
+  --reference-dir sir-reference-data/ --results-dir results/am_ge0.9 \
+  --run-3dnt --test-method cmh --stratum-col stratum --n-sims 10000 \
+  --df-filter genes.tsv,am99.tsv \
+  --fdr-file am_ge0.9.fdr.tsv --gene-pvals
+```
+
+Columns: `gene_p`, `n_pos` (centres tested), `obs_min_p`, `best_aa_pos` and
+`best_radius` (the neighborhood that achieved it), `n_null_le_obs`, `n_sims`, and
+`gene_p_raw` (the same count without the +1 — reported for transparency, never for
+combining: it can be exactly 0).
+
+`--cct` then applies the Cauchy combination test to those files across runs —
+different variant filters, different annotations, any set of scans of the same genes:
+
+```bash
+python structure-informed-rvas/run.py \
+  --reference-dir sir-reference-data/ --results-dir results/ \
+  --cct "*/*.gene.tsv" \
+  --cct-gene-list strict_genes.tsv \
+  --cct-out cct_strict.tsv
+```
+
+Entries may be written `label=path` to name them. Otherwise the basename is used —
+falling back to the path when two inputs share one, which they do whenever the scans
+ran with the default `--fdr-file`. The
+output carries `cct`, the diagnostics `n_inputs`, `n_sig`, `min_p`, `best_input` and
+`best_nbhd` (the neighborhood from whichever input won), and the across-gene
+correction `cct_bonf` / `cct_bh`.
+
+Three things worth knowing:
+
+- **The Cauchy combination, not Fisher, because the inputs are dependent.** Nested variant filters and
+  the same samples scored repeatedly make Fisher or Stouffer badly anticonservative.
+  CCT's tail approximation holds under arbitrary dependence.
+- **`fwer` must not be combined**, and `--cct` refuses a file that offers it: it is
+  already corrected across genes, so combining k inputs pays that correction k times
+  and saturates. This is what `--gene-pvals` exists to avoid.
+- **The across-gene correction is applied once, after combining.** Because `gene_p`
+  does not depend on which other genes were scanned, one set of input files can be
+  corrected under several gene sets by re-running `--cct` with a different
+  `--cct-gene-list`; only `cct_bonf` and `cct_bh` change.
+
+`tan((0.5 - p) * pi)` diverges at p = 1, and `gene_p` is exactly 1 whenever every
+simulation beat the observed, so one such input would otherwise collapse the gene.
+Each p is therefore clamped to `1 - 1/(n_sims + 1)`, the next value its own run could
+have produced; `--cct-clamp` sets a fixed value instead, and `--cct-clamp 1.0`
+disables it.
+
+Case/control scans only (Fisher and CMH). The mutation-rate and annotation tests do
+not yet write gene-level p-values.
+
 ### Formatting requirements for --rvas-data-to-map
 
 Required: DNA coordinates of variant data that has not previously been mapped to UniProt proteins.

@@ -307,8 +307,11 @@ def scan_test_cmh(
     min_alleles=DEFAULT_MIN_ALLELES,
     stats=None,
     exclusive=False,
+    gene_file=None,
 ):
     # `stats`: optional dict filled with why genes were skipped (see value_tracking).
+    # `gene_file`: optional name for the gene-level p-value table (the within-gene
+    # FWER), written alongside fdr_file. See gene_pvalues.
     stats = {} if stats is None else stats
     if fdr_only:
         df_results = compute_fdr(
@@ -317,6 +320,7 @@ def scan_test_cmh(
             df_fdr_filter,
             reference_dir,
             pval_file,
+            gene_file=gene_file,
         )
         df_results.to_csv(
             os.path.join(results_dir, fdr_file),
@@ -471,6 +475,7 @@ def scan_test_cmh(
             fdr_filter,
             reference_dir,
             pval_file,
+            gene_file=gene_file,
         )
         df_results.to_csv(
             os.path.join(results_dir, fdr_file),

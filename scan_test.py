@@ -615,6 +615,7 @@ def scan_test(
     seed_salt=None,
     stats=None,
     exclusive=False,
+    gene_file=None,
 ):
     """
     Perform scan test analysis on protein structure data.
@@ -630,6 +631,9 @@ def scan_test(
 
     `requested` restricts the scan to those genes; the rest of the p-value
     file is left alone. Returns the set of genes actually written.
+
+    `gene_file`: optional name for the gene-level p-value table (the within-gene
+    FWER), written alongside fdr_file. See gene_pvalues.
     
     Main orchestration function for the structure-informed rare variant association study.
     Processes variants across proteins and computes statistical associations with 3D neighborhoods.
@@ -639,7 +643,8 @@ def scan_test(
 
     # Handle FDR-only mode
     if fdr_only:
-        df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir, pval_file)
+        df_results = compute_fdr(results_dir, fdr_cutoff, df_fdr_filter, reference_dir,
+                                 pval_file, gene_file=gene_file)
         df_results.to_csv(f'{results_dir}/{fdr_file}', sep='\t', index=False)
         return set()
 
@@ -707,7 +712,8 @@ def scan_test(
                 fdr_filter = pd.DataFrame({'uniprot_id': sorted(scanned)})
             else:
                 fdr_filter = df_fdr_filter[df_fdr_filter.uniprot_id.isin(scanned)]
-            df_results = compute_fdr(results_dir, fdr_cutoff, fdr_filter, reference_dir, pval_file)
+            df_results = compute_fdr(results_dir, fdr_cutoff, fdr_filter, reference_dir,
+                                     pval_file, gene_file=gene_file)
             df_results.to_csv(f'{results_dir}/{fdr_file}', sep='\t', index=False)
             log_counts('Neighborhoods tested (FDR/FWER pool)',
                        df_scanned[df_scanned.uniprot_id.isin(df_results.uniprot_id)],
